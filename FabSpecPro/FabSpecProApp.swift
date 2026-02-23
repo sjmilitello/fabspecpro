@@ -12,14 +12,37 @@ import SwiftData
 struct FabSpecProApp: App {
     var sharedModelContainer: ModelContainer = {
         let schema = Schema([
-            Item.self,
+            Project.self,
+            Piece.self,
+            EdgeTreatment.self,
+            EdgeAssignment.self,
+            Cutout.self,
+            CurvedEdge.self,
+            AngleCut.self,
+            BusinessHeader.self,
+            MaterialOption.self
         ])
         let modelConfiguration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
 
         do {
-            return try ModelContainer(for: schema, configurations: [modelConfiguration])
+            return try ModelContainer(
+                for: schema,
+                configurations: [modelConfiguration]
+            )
         } catch {
-            fatalError("Could not create ModelContainer: \(error)")
+            // If the store is incompatible or corrupted, delete and recreate.
+            let storeURL = modelConfiguration.url
+            if FileManager.default.fileExists(atPath: storeURL.path) {
+                try? FileManager.default.removeItem(at: storeURL)
+            }
+            do {
+                return try ModelContainer(
+                    for: schema,
+                    configurations: [modelConfiguration]
+                )
+            } catch {
+                fatalError("Could not create ModelContainer after reset: \(error)")
+            }
         }
     }()
 
