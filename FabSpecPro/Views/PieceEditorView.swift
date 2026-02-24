@@ -18,10 +18,12 @@ struct PieceEditorView: View {
     @State private var isNotchesOpen = false
     @State private var isCurvesOpen = false
     @State private var isAnglesOpen = false
+    @State private var isCornerRadiiOpen = false
     @State private var openCutoutIds: Set<UUID> = []
     @State private var openNotchIds: Set<UUID> = []
     @State private var openCurveIds: Set<UUID> = []
     @State private var openAngleIds: Set<UUID> = []
+    @State private var openCornerRadiusIds: Set<UUID> = []
     @State private var showDeletePieceConfirm = false
 
     var body: some View {
@@ -131,6 +133,7 @@ struct PieceEditorView: View {
         .onChange(of: piece.cutouts.count) { _, _ in markUpdated() }
         .onChange(of: piece.curvedEdges.count) { _, _ in markUpdated() }
         .onChange(of: piece.angleCuts.count) { _, _ in markUpdated() }
+        .onChange(of: piece.cornerRadii.count) { _, _ in markUpdated() }
         .onChange(of: piece.edgeAssignments.count) { _, _ in markUpdated() }
         .navigationDestination(item: $nextPiece) { piece in
             PieceEditorView(piece: piece)
@@ -183,10 +186,12 @@ struct PieceEditorView: View {
                 collapsibleSubsection(title: "Cutouts", isOpen: $isCutoutsOpen) {
                     VStack(spacing: 12) {
                         cutoutButtons
-                        ForEach(nonNotchCutouts.indices, id: \.self) { index in
-                            let cutout = nonNotchCutouts[index]
+                        let displayCutouts = Array(nonNotchCutouts.reversed())
+                        let cutoutCount = displayCutouts.count
+                        ForEach(displayCutouts.indices, id: \.self) { index in
+                            let cutout = displayCutouts[index]
                             collapsibleItem(
-                                title: "Cutout \(letter(for: index))",
+                                title: "Cutout \(cutoutCount - index)",
                                 isOpen: Binding(
                                     get: { openCutoutIds.contains(cutout.id) },
                                     set: { isOpen in
@@ -202,10 +207,12 @@ struct PieceEditorView: View {
                 collapsibleSubsection(title: "Notches", isOpen: $isNotchesOpen) {
                     VStack(spacing: 12) {
                         notchButtons
-                        ForEach(notchCutouts.indices, id: \.self) { index in
-                            let cutout = notchCutouts[index]
+                        let displayNotches = notchDisplayItems()
+                        ForEach(displayNotches.indices, id: \.self) { index in
+                            let item = displayNotches[index]
+                            let cutout = item.cutout
                             collapsibleItem(
-                                title: "Notch \(letter(for: index))",
+                                title: item.label,
                                 isOpen: Binding(
                                     get: { openNotchIds.contains(cutout.id) },
                                     set: { isOpen in
@@ -218,21 +225,28 @@ struct PieceEditorView: View {
                         }
                     }
                 }
-                collapsibleSubsection(title: "Curves", isOpen: $isCurvesOpen) {
+                collapsibleSubsection(title: "Corner Radius", isOpen: $isCornerRadiiOpen) {
                     VStack(spacing: 12) {
-                        curveButtons
-                        ForEach(piece.curvedEdges.indices, id: \.self) { index in
-                            let curve = piece.curvedEdges[index]
+                        cornerRadiusButtons
+                        let displayCornerRadii = piece.cornerRadii.sorted { lhs, rhs in
+                            if lhs.cornerIndex == rhs.cornerIndex {
+                                return lhs.id.uuidString > rhs.id.uuidString
+                            }
+                            return lhs.cornerIndex > rhs.cornerIndex
+                        }
+                        ForEach(displayCornerRadii.indices, id: \.self) { index in
+                            let cornerRadius = displayCornerRadii[index]
+                            let labelNumber = cornerRadius.cornerIndex >= 0 ? (cornerRadius.cornerIndex + 1) : (displayCornerRadii.count - index)
                             collapsibleItem(
-                                title: "Curve \(letter(for: index))",
+                                title: "Corner \(labelNumber)",
                                 isOpen: Binding(
-                                    get: { openCurveIds.contains(curve.id) },
+                                    get: { openCornerRadiusIds.contains(cornerRadius.id) },
                                     set: { isOpen in
-                                        if isOpen { openCurveIds.insert(curve.id) } else { openCurveIds.remove(curve.id) }
+                                        if isOpen { openCornerRadiusIds.insert(cornerRadius.id) } else { openCornerRadiusIds.remove(cornerRadius.id) }
                                     }
                                 )
                             ) {
-                                CurveRow(curve: curve, shape: piece.shape)
+                                CornerRadiusRow(cornerRadius: cornerRadius, piece: piece)
                             }
                         }
                     }
@@ -240,10 +254,17 @@ struct PieceEditorView: View {
                 collapsibleSubsection(title: "Angles", isOpen: $isAnglesOpen) {
                     VStack(spacing: 12) {
                         angleButtons
-                        ForEach(piece.angleCuts.indices, id: \.self) { index in
-                            let angle = piece.angleCuts[index]
+                        let displayAngles = piece.angleCuts.sorted { lhs, rhs in
+                            if lhs.anchorCornerIndex == rhs.anchorCornerIndex {
+                                return lhs.id.uuidString > rhs.id.uuidString
+                            }
+                            return lhs.anchorCornerIndex > rhs.anchorCornerIndex
+                        }
+                        ForEach(displayAngles.indices, id: \.self) { index in
+                            let angle = displayAngles[index]
+                            let labelNumber = angle.anchorCornerIndex >= 0 ? (angle.anchorCornerIndex + 1) : (displayAngles.count - index)
                             collapsibleItem(
-                                title: "Angle \(letter(for: index))",
+                                title: "Angle \(labelNumber)",
                                 isOpen: Binding(
                                     get: { openAngleIds.contains(angle.id) },
                                     set: { isOpen in
@@ -252,6 +273,27 @@ struct PieceEditorView: View {
                                 )
                             ) {
                                 AngleCutRow(angleCut: angle, piece: piece, angleIndex: index)
+                            }
+                        }
+                    }
+                }
+                collapsibleSubsection(title: "Curves", isOpen: $isCurvesOpen) {
+                    VStack(spacing: 12) {
+                        curveButtons
+                        let displayCurves = Array(piece.curvedEdges.reversed())
+                        let curveCount = displayCurves.count
+                        ForEach(displayCurves.indices, id: \.self) { index in
+                            let curve = displayCurves[index]
+                            collapsibleItem(
+                                title: "Curve \(curveCount - index)",
+                                isOpen: Binding(
+                                    get: { openCurveIds.contains(curve.id) },
+                                    set: { isOpen in
+                                        if isOpen { openCurveIds.insert(curve.id) } else { openCurveIds.remove(curve.id) }
+                                    }
+                                )
+                            ) {
+                                CurveRow(curve: curve, shape: piece.shape)
                             }
                         }
                     }
@@ -287,6 +329,15 @@ struct PieceEditorView: View {
         }
     }
 
+    private var cornerRadiusButtons: some View {
+        HStack(spacing: 10) {
+            Button("Add Radius") {
+                addCornerRadius()
+            }
+            .buttonStyle(PillButtonStyle())
+        }
+    }
+
     private var angleButtons: some View {
         HStack(spacing: 10) {
             Button("Add Angle") {
@@ -299,7 +350,38 @@ struct PieceEditorView: View {
     private func addCutout(kind: CutoutKind, isNotch: Bool) {
         let size = ShapePathBuilder.pieceSize(for: piece)
         if isNotch {
+            let maxNotches = 4
+            let existingNotches = piece.cutouts.filter { $0.isNotch }
+            if existingNotches.count >= maxNotches {
+                return
+            }
             let cutout = Cutout(kind: kind, width: 1, height: 1, centerX: 0.5, centerY: 0.5, isNotch: true)
+            let order = existingNotches.count % 4
+            let displaySize = ShapePathBuilder.displaySize(for: piece)
+            let displayCutout = Cutout(
+                kind: cutout.kind,
+                width: cutout.height,
+                height: cutout.width,
+                centerX: cutout.centerY,
+                centerY: cutout.centerX,
+                isNotch: cutout.isNotch
+            )
+            let halfWidth = displayCutout.width / 2
+            let halfHeight = displayCutout.height / 2
+            let displayCenter: CGPoint
+            switch order {
+            case 1:
+                displayCenter = CGPoint(x: max(displaySize.width - halfWidth, 0), y: halfHeight)
+            case 2:
+                displayCenter = CGPoint(x: max(displaySize.width - halfWidth, 0), y: max(displaySize.height - halfHeight, 0))
+            case 3:
+                displayCenter = CGPoint(x: halfWidth, y: max(displaySize.height - halfHeight, 0))
+            default:
+                displayCenter = CGPoint(x: halfWidth, y: halfHeight)
+            }
+            let rawCenter = ShapePathBuilder.rawPoint(fromDisplay: displayCenter)
+            cutout.centerX = rawCenter.x
+            cutout.centerY = rawCenter.y
             cutout.piece = piece
             piece.cutouts.append(cutout)
             modelContext.insert(cutout)
@@ -313,21 +395,207 @@ struct PieceEditorView: View {
     }
 
     private func addCurve() {
-        let defaultEdge: EdgePosition = piece.shape == .rightTriangle ? .hypotenuse : .top
         let defaultRadius: Double = piece.shape == .rightTriangle ? triangleQuarterCircleRadius() : 2
+        let maxCurves = piece.shape == .rightTriangle ? 3 : 4
+        if piece.curvedEdges.count >= maxCurves {
+            return
+        }
+        let curveIndex = piece.curvedEdges.count
+        let defaultEdge: EdgePosition
+        if piece.shape == .rightTriangle {
+            switch curveIndex % 3 {
+            case 1:
+                defaultEdge = .legB
+            case 2:
+                defaultEdge = .legA
+            default:
+                defaultEdge = .hypotenuse
+            }
+        } else {
+            switch curveIndex % 4 {
+            case 1:
+                defaultEdge = .right
+            case 2:
+                defaultEdge = .bottom
+            case 3:
+                defaultEdge = .left
+            default:
+                defaultEdge = .top
+            }
+        }
         let curve = CurvedEdge(edge: defaultEdge, radius: defaultRadius, isConcave: false)
         curve.piece = piece
         piece.curvedEdges.append(curve)
         modelContext.insert(curve)
     }
 
+    private func addCornerRadius() {
+        let cornerCount = ShapePathBuilder.cornerPoints(for: piece, includeAngles: false).count
+        guard cornerCount > 0 else { return }
+        let usedAngles = Set(piece.angleCuts.map { $0.anchorCornerIndex })
+        let usedRadii = Set(piece.cornerRadii.map { $0.cornerIndex })
+        let avoid = usedAngles.union(usedRadii)
+        let index = nextAvailableCornerIndex(count: cornerCount, avoiding: avoid) ?? -1
+        if index >= 0 {
+            removeAngle(at: index)
+        }
+        let cornerRadius = CornerRadius(cornerIndex: index, radius: 1, isInside: false)
+        cornerRadius.piece = piece
+        piece.cornerRadii.append(cornerRadius)
+        modelContext.insert(cornerRadius)
+    }
+
     private func addAngle() {
-        let cornerCount = ShapePathBuilder.cornerPoints(for: piece).count
-        let safeIndex = cornerCount > 0 ? 0 : 0
-        let cut = AngleCut(anchorCornerIndex: safeIndex, anchorOffset: 2, secondaryCornerIndex: safeIndex, secondaryOffset: 2, usesSecondPoint: true, angleDegrees: 45)
-        cut.piece = piece
-        piece.angleCuts.append(cut)
-        modelContext.insert(cut)
+        let cornerCount = ShapePathBuilder.cornerPoints(for: piece, includeAngles: false).count
+        guard cornerCount > 0 else { return }
+        let usedAngles = Set(piece.angleCuts.map { $0.anchorCornerIndex })
+        let usedRadii = Set(piece.cornerRadii.map { $0.cornerIndex })
+        let avoid = usedAngles.union(usedRadii)
+        let defaultCorner = nextAvailableCornerIndex(count: cornerCount, avoiding: avoid) ?? -1
+        if defaultCorner >= 0 {
+            removeCornerRadius(at: defaultCorner)
+        }
+        let angle = AngleCut(anchorCornerIndex: defaultCorner)
+        angle.piece = piece
+        piece.angleCuts.append(angle)
+        modelContext.insert(angle)
+    }
+
+    private func nextAvailableCornerIndex(count: Int, avoiding: Set<Int>) -> Int? {
+        guard count > 0 else { return nil }
+        for index in 0..<count where !avoiding.contains(index) {
+            return index
+        }
+        return nil
+    }
+
+    private func removeCornerRadius(at cornerIndex: Int) {
+        let matching = piece.cornerRadii.filter { $0.cornerIndex == cornerIndex }
+        guard !matching.isEmpty else { return }
+        piece.cornerRadii.removeAll { $0.cornerIndex == cornerIndex }
+        for radius in matching {
+            modelContext.delete(radius)
+        }
+    }
+
+    private func removeAngle(at cornerIndex: Int) {
+        let matching = piece.angleCuts.filter { $0.anchorCornerIndex == cornerIndex }
+        guard !matching.isEmpty else { return }
+        piece.angleCuts.removeAll { $0.anchorCornerIndex == cornerIndex }
+        for angle in matching {
+            modelContext.delete(angle)
+        }
+    }
+
+    private func sortedCurvedEdges() -> [CurvedEdge] {
+        piece.curvedEdges.sorted { lhs, rhs in
+            let leftOrder = curveEdgeOrder(lhs)
+            let rightOrder = curveEdgeOrder(rhs)
+            if leftOrder != rightOrder {
+                return leftOrder < rightOrder
+            }
+            return lhs.id.uuidString < rhs.id.uuidString
+        }
+    }
+
+    private func curveEdgeOrder(_ curve: CurvedEdge) -> Int {
+        switch piece.shape {
+        case .rightTriangle:
+            switch curve.edge {
+            case .hypotenuse: return 0
+            case .legB: return 1
+            case .legA: return 2
+            default: return 3
+            }
+        default:
+            switch curve.edge {
+            case .top: return 0
+            case .right: return 1
+            case .bottom: return 2
+            case .left: return 3
+            default: return 4
+            }
+        }
+    }
+
+    private struct NotchDisplayItem {
+        let cutout: Cutout
+        let label: String
+    }
+
+    private func notchDisplayItems() -> [NotchDisplayItem] {
+        let notches = piece.cutouts.filter { $0.isNotch }
+        let display = notches.sorted { $0.createdAt > $1.createdAt }
+        let count = display.count
+        return display.enumerated().map { index, cutout in
+            NotchDisplayItem(cutout: cutout, label: "Notch \(count - index)")
+        }
+    }
+
+    private func notchCornerIndex(for cutout: Cutout, corners: [CGPoint]) -> Int? {
+        guard !corners.isEmpty else { return nil }
+        let displayCenter = ShapePathBuilder.displayPoint(fromRaw: CGPoint(x: cutout.centerX, y: cutout.centerY))
+        var bestIndex = 0
+        var bestDistance = CGFloat.greatestFiniteMagnitude
+        for (index, corner) in corners.enumerated() {
+            let dist = distance(displayCenter, corner)
+            if dist < bestDistance {
+                bestDistance = dist
+                bestIndex = index
+            }
+        }
+        return bestIndex
+    }
+
+    private func defaultNotchDisplayCenter(for cutout: Cutout) -> CGPoint? {
+        let corners = ShapePathBuilder.cornerPoints(for: piece, includeAngles: true)
+        guard !corners.isEmpty else { return nil }
+        let existingNotches = piece.cutouts.filter { $0.isNotch }
+        let usedCornerIndices = Set(existingNotches.compactMap { notchCornerIndex(for: $0, corners: corners) })
+        let cornerIndex: Int
+        if let firstAvailable = (0..<corners.count).first(where: { !usedCornerIndices.contains($0) }) {
+            cornerIndex = firstAvailable
+        } else if let lastUsed = existingNotches.last.flatMap({ notchCornerIndex(for: $0, corners: corners) }) {
+            cornerIndex = (lastUsed + 1) % corners.count
+        } else {
+            cornerIndex = 0
+        }
+        return notchDisplayCenter(for: cutout, cornerIndex: cornerIndex, corners: corners)
+    }
+
+    private func notchDisplayCenter(for cutout: Cutout, cornerIndex: Int, corners: [CGPoint]) -> CGPoint? {
+        guard !corners.isEmpty else { return nil }
+        let displayCutout = Cutout(
+            kind: cutout.kind,
+            width: cutout.height,
+            height: cutout.width,
+            centerX: cutout.centerY,
+            centerY: cutout.centerX,
+            isNotch: cutout.isNotch
+        )
+        let halfWidth = displayCutout.width / 2
+        let halfHeight = displayCutout.height / 2
+        let count = corners.count
+        let corner = corners[cornerIndex % count]
+        let prev = corners[(cornerIndex - 1 + count) % count]
+        let next = corners[(cornerIndex + 1) % count]
+        let toPrev = unitVector(from: corner, to: prev)
+        let toNext = unitVector(from: corner, to: next)
+        return CGPoint(
+            x: corner.x + toPrev.x * halfWidth + toNext.x * halfHeight,
+            y: corner.y + toPrev.y * halfWidth + toNext.y * halfHeight
+        )
+    }
+
+    private func unitVector(from: CGPoint, to: CGPoint) -> CGPoint {
+        let dx = to.x - from.x
+        let dy = to.y - from.y
+        let length = max(sqrt(dx * dx + dy * dy), 0.0001)
+        return CGPoint(x: dx / length, y: dy / length)
+    }
+
+    private func distance(_ a: CGPoint, _ b: CGPoint) -> CGFloat {
+        sqrt(pow(a.x - b.x, 2) + pow(a.y - b.y, 2))
     }
 
     private func updateTriangleCurveRadiusIfNeeded() {
@@ -396,7 +664,45 @@ struct PieceEditorView: View {
     }
 
     private var notchCutouts: [Cutout] {
-        piece.cutouts.filter { $0.isNotch }
+        piece.cutouts
+            .filter { $0.isNotch }
+            .sorted { lhs, rhs in
+                let leftOrder = notchCornerOrder(lhs)
+                let rightOrder = notchCornerOrder(rhs)
+                if leftOrder != rightOrder {
+                    return leftOrder < rightOrder
+                }
+                return lhs.id.uuidString < rhs.id.uuidString
+            }
+    }
+
+    private func notchCornerOrder(_ cutout: Cutout) -> Int {
+        let displaySize = ShapePathBuilder.displaySize(for: piece)
+        let displayCenter = ShapePathBuilder.displayPoint(fromRaw: CGPoint(x: cutout.centerX, y: cutout.centerY))
+        let isTop = displayCenter.y <= displaySize.height / 2
+        let isLeft = displayCenter.x <= displaySize.width / 2
+        switch (isTop, isLeft) {
+        case (true, true):
+            return 0
+        case (true, false):
+            return 1
+        case (false, false):
+            return 2
+        case (false, true):
+            return 3
+        }
+    }
+
+    private func cornerLabel(for index: Int) -> String {
+        var value = index
+        var result = ""
+        repeat {
+            let remainder = value % 26
+            let scalar = UnicodeScalar(65 + remainder)!
+            result = String(Character(scalar)) + result
+            value = (value / 26) - 1
+        } while value >= 0
+        return result
     }
 
     private func letter(for index: Int) -> String {
@@ -840,10 +1146,10 @@ private struct CutoutRow: View {
             displayCenter = CGPoint(x: halfWidth, y: halfHeight)
         case .topRight:
             displayCenter = CGPoint(x: max(displaySize.width - halfWidth, 0), y: halfHeight)
-        case .bottomLeft:
-            displayCenter = CGPoint(x: halfWidth, y: max(displaySize.height - halfHeight, 0))
         case .bottomRight:
             displayCenter = CGPoint(x: max(displaySize.width - halfWidth, 0), y: max(displaySize.height - halfHeight, 0))
+        case .bottomLeft:
+            displayCenter = CGPoint(x: halfWidth, y: max(displaySize.height - halfHeight, 0))
         }
 
         let rawCenter = ShapePathBuilder.rawPoint(fromDisplay: displayCenter)
@@ -861,10 +1167,10 @@ private struct CutoutRow: View {
             return .topLeft
         case (true, false):
             return .topRight
-        case (false, true):
-            return .bottomLeft
         case (false, false):
             return .bottomRight
+        case (false, true):
+            return .bottomLeft
         }
     }
 
@@ -916,7 +1222,7 @@ private struct CurveRow: View {
                 }
             }
             HStack(spacing: 12) {
-                FractionNumberField(title: "Radius", value: $curve.radius)
+                FractionNumberField(title: "Arc Depth (in)", value: $curve.radius)
                 Toggle("Concave", isOn: $curve.isConcave)
             }
         }
@@ -940,6 +1246,14 @@ private struct AngleCutRow: View {
             cornerRow(labels: labels)
             edgeDistancesRow
         }
+        .onAppear { normalizeCornerSelection(count: labels.count) }
+        .onChange(of: angleCut.anchorCornerIndex) { _, newValue in
+            if newValue < 0 { return }
+            removeCornerRadius(at: newValue)
+        }
+        .onChange(of: labels.count) { _, newValue in
+            normalizeCornerSelection(count: newValue)
+        }
         .padding(10)
         .background(Theme.surface)
         .clipShape(RoundedRectangle(cornerRadius: 12))
@@ -960,8 +1274,9 @@ private struct AngleCutRow: View {
     }
 
     private func cornerRow(labels: [String]) -> some View {
-        HStack(spacing: 12) {
-            cornerPickerField(title: "Corner", selection: $angleCut.anchorCornerIndex, labels: labels)
+        let disabledCorners = Set(piece.cornerRadii.map { $0.cornerIndex })
+        return HStack(spacing: 12) {
+            cornerPickerField(title: "Corner", selection: $angleCut.anchorCornerIndex, labels: labels, dimmedIndices: disabledCorners)
         }
     }
 
@@ -976,14 +1291,17 @@ private struct AngleCutRow: View {
         FractionNumberField(title: title, value: value, allowNegative: allowNegative, showSignToggle: showSignToggle)
     }
 
-    private func cornerPickerField(title: String, selection: Binding<Int>, labels: [String]) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
+    private func cornerPickerField(title: String, selection: Binding<Int>, labels: [String], dimmedIndices: Set<Int>) -> some View {
+        let options: [(Int, String)] = [(-1, "None")] + labels.indices.map { ($0, labels[$0]) }
+        return VStack(alignment: .leading, spacing: 6) {
             Text(title)
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(Theme.secondaryText)
             Picker(title, selection: selection) {
-                ForEach(labels.indices, id: \.self) { index in
-                    Text(labels[index]).tag(index)
+                ForEach(options, id: \.0) { option in
+                    let prefix = dimmedIndices.contains(option.0) ? "✓ " : ""
+                    Text(prefix + option.1)
+                        .tag(option.0)
                 }
             }
             .pickerStyle(.menu)
@@ -1004,7 +1322,123 @@ private struct AngleCutRow: View {
     }
 
     private func cornerLabels() -> [String] {
-        let count = ShapePathBuilder.cornerPoints(for: piece, includeAngles: false, angleCutLimit: angleIndex).count
+        let count = ShapePathBuilder.cornerPoints(for: piece, includeAngles: false).count
         return (0..<count).map { cornerLabel(for: $0) }
+    }
+
+    private func normalizeCornerSelection(count: Int) {
+        guard count > 0 else {
+            angleCut.anchorCornerIndex = 0
+            return
+        }
+        if angleCut.anchorCornerIndex == -1 {
+            return
+        }
+        if angleCut.anchorCornerIndex >= count {
+            angleCut.anchorCornerIndex = count - 1
+        } else if angleCut.anchorCornerIndex < 0 {
+            angleCut.anchorCornerIndex = 0
+        }
+    }
+
+    private func removeCornerRadius(at cornerIndex: Int) {
+        let matching = piece.cornerRadii.filter { $0.cornerIndex == cornerIndex }
+        guard !matching.isEmpty else { return }
+        piece.cornerRadii.removeAll { $0.cornerIndex == cornerIndex }
+        for radius in matching {
+            modelContext.delete(radius)
+        }
+    }
+}
+
+private struct CornerRadiusRow: View {
+    @Bindable var cornerRadius: CornerRadius
+    let piece: Piece
+    @Environment(\.modelContext) private var modelContext
+
+    var body: some View {
+        let labels = cornerLabels()
+        return VStack(alignment: .leading, spacing: 8) {
+            deleteRow
+            cornerRow(labels: labels)
+            radiusRow
+        }
+        .onChange(of: cornerRadius.cornerIndex) { _, newValue in
+            if newValue < 0 { return }
+            removeAngle(at: newValue)
+        }
+        .padding(10)
+        .background(Theme.surface)
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(Theme.divider, lineWidth: 1)
+        )
+    }
+
+    private var deleteRow: some View {
+        HStack {
+            Spacer()
+            Button("Delete", role: .destructive) {
+                cornerRadius.piece?.cornerRadii.removeAll { $0.id == cornerRadius.id }
+                modelContext.delete(cornerRadius)
+            }
+        }
+    }
+
+    private func cornerRow(labels: [String]) -> some View {
+        let disabledCorners = Set(piece.angleCuts.map { $0.anchorCornerIndex })
+        return HStack(spacing: 12) {
+            cornerPickerField(title: "Corner", selection: $cornerRadius.cornerIndex, labels: labels, dimmedIndices: disabledCorners)
+        }
+    }
+
+    private var radiusRow: some View {
+        HStack(spacing: 12) {
+            FractionNumberField(title: "Radius (in)", value: $cornerRadius.radius)
+        }
+    }
+
+    private func cornerPickerField(title: String, selection: Binding<Int>, labels: [String], dimmedIndices: Set<Int>) -> some View {
+        let options: [(Int, String)] = [(-1, "None")] + labels.indices.map { ($0, labels[$0]) }
+        return VStack(alignment: .leading, spacing: 6) {
+            Text(title)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(Theme.secondaryText)
+            Picker(title, selection: selection) {
+                ForEach(options, id: \.0) { option in
+                    let prefix = dimmedIndices.contains(option.0) ? "✓ " : ""
+                    Text(prefix + option.1)
+                        .tag(option.0)
+                }
+            }
+            .pickerStyle(.menu)
+        }
+    }
+
+    private func cornerLabel(for index: Int) -> String {
+        var value = index
+        var result = ""
+        repeat {
+            let remainder = value % 26
+            let scalar = UnicodeScalar(65 + remainder)!
+            result = String(Character(scalar)) + result
+            value = (value / 26) - 1
+        } while value >= 0
+        return result
+    }
+
+    private func cornerLabels() -> [String] {
+        let count = ShapePathBuilder.cornerPoints(for: piece, includeAngles: false).count
+        return (0..<count).map { cornerLabel(for: $0) }
+    }
+
+    private func removeAngle(at cornerIndex: Int) {
+        let matching = piece.angleCuts.filter { $0.anchorCornerIndex == cornerIndex }
+        guard !matching.isEmpty else { return }
+        piece.angleCuts.removeAll { $0.anchorCornerIndex == cornerIndex }
+        for angle in matching {
+            modelContext.delete(angle)
+        }
     }
 }

@@ -17,6 +17,7 @@ final class Piece {
     @Relationship(deleteRule: .cascade) var cutouts: [Cutout]
     @Relationship(deleteRule: .cascade) var curvedEdges: [CurvedEdge]
     @Relationship(deleteRule: .cascade) var angleCuts: [AngleCut]
+    @Relationship(deleteRule: .cascade) var cornerRadii: [CornerRadius]
 
     init(name: String = "Piece") {
         self.id = UUID()
@@ -32,6 +33,7 @@ final class Piece {
         self.cutouts = []
         self.curvedEdges = []
         self.angleCuts = []
+        self.cornerRadii = []
     }
 
     var thickness: MaterialThickness {
@@ -105,6 +107,10 @@ extension Piece {
 
     func curve(for edge: EdgePosition) -> CurvedEdge? {
         curvedEdges.first(where: { $0.edge == edge })
+    }
+
+    func cornerRadius(for cornerIndex: Int) -> CornerRadius? {
+        cornerRadii.first(where: { $0.cornerIndex == cornerIndex })
     }
 
     func angleTreatment(for angleId: UUID) -> EdgeTreatment? {

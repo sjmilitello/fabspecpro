@@ -862,7 +862,7 @@ enum PDFRenderer {
         let mid = CGPoint(x: (geometry.start.x + geometry.end.x) / 2, y: (geometry.start.y + geometry.end.y) / 2)
         let direction: CGFloat = curve.isConcave ? -1 : 1
         let normal = normalized(geometry.normal)
-        return CGPoint(x: mid.x + normal.x * curve.radius * direction, y: mid.y + normal.y * curve.radius * direction)
+        return CGPoint(x: mid.x + normal.x * curve.radius * 2 * direction, y: mid.y + normal.y * curve.radius * 2 * direction)
     }
 
     private static func quadBezierPoint(t: CGFloat, start: CGPoint, control: CGPoint, end: CGPoint) -> CGPoint {
@@ -1200,7 +1200,9 @@ enum PDFRenderer {
 
         if piece.shape == .circle {
             let lengthFrame = CGRect(x: offsetX + (size.width * scale / 2) - 30, y: topLabelY, width: 60, height: 12)
-            let widthFrame = CGRect(x: left - drawingLeftInset + 8 - 24, y: offsetY + (size.height * scale / 2) - 6, width: 64, height: 12)
+            let unclampedX = left - 24
+            let minX = rect.minX + 4
+            let widthFrame = CGRect(x: max(unclampedX, minX), y: offsetY + (size.height * scale / 2) - 6, width: 64, height: 12)
             drawText(lengthLabel, in: context, frame: lengthFrame, font: .systemFont(ofSize: 9, weight: .semibold), alignment: .center)
             drawText(depthLabel, in: context, frame: widthFrame, font: .systemFont(ofSize: 9, weight: .semibold), alignment: .center)
         } else if piece.shape == .rectangle {

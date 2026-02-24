@@ -9,17 +9,27 @@ final class Cutout {
     var height: Double
     var centerX: Double
     var centerY: Double
+    var cornerIndex: Int
+    var cornerAnchorX: Double
+    var cornerAnchorY: Double
     var isNotch: Bool
+    var isApplied: Bool = true
+    var createdAt: Date
     var piece: Piece?
 
-    init(kind: CutoutKind, width: Double, height: Double, centerX: Double, centerY: Double, isNotch: Bool = false) {
+    init(kind: CutoutKind, width: Double, height: Double, centerX: Double, centerY: Double, isNotch: Bool = false, isApplied: Bool = true, cornerIndex: Int = -1, cornerAnchorX: Double = -1, cornerAnchorY: Double = -1, createdAt: Date = Date()) {
         self.id = UUID()
         self.kindRaw = kind.rawValue
         self.width = width
         self.height = height
         self.centerX = centerX
         self.centerY = centerY
+        self.cornerIndex = cornerIndex
+        self.cornerAnchorX = cornerAnchorX
+        self.cornerAnchorY = cornerAnchorY
         self.isNotch = isNotch
+        self.isApplied = isApplied
+        self.createdAt = createdAt
     }
 
     var kind: CutoutKind {

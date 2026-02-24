@@ -19,6 +19,7 @@ struct FabSpecProApp: App {
             Cutout.self,
             CurvedEdge.self,
             AngleCut.self,
+            CornerRadius.self,
             BusinessHeader.self,
             MaterialOption.self
         ])

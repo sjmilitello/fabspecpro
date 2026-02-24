@@ -36,10 +36,16 @@ enum ShapePathBuilder {
 
     static func path(for piece: Piece) -> Path {
         let rawSize = pieceSize(for: piece)
+        let cornerRadii = piece.cornerRadii.filter { $0.radius > 0 }
         let notches = piece.cutouts.filter { $0.isNotch && $0.kind != .circle && $0.centerX >= 0 && $0.centerY >= 0 }
         if piece.shape == .rectangle, (!notches.isEmpty || !piece.angleCuts.isEmpty) {
             let result = angledRectanglePoints(size: rawSize, notches: notches, angleCuts: piece.angleCuts)
             let displayPoints = result.points.map { displayPoint(fromRaw: $0) }
+            if !cornerRadii.isEmpty {
+                let ordered = reorderCornersClockwise(displayPoints)
+                let baseCorners = cornerPoints(for: piece, includeAngles: false)
+                return roundedPolygonPath(points: ordered, cornerRadii: cornerRadii, baseCorners: baseCorners)
+            }
             if piece.curvedEdges.isEmpty {
                 return polygonPath(displayPoints)
             }
@@ -48,12 +54,35 @@ enum ShapePathBuilder {
         if piece.shape == .rightTriangle, !piece.angleCuts.isEmpty {
             let result = angledRightTrianglePoints(size: rawSize, angleCuts: piece.angleCuts)
             let displayPoints = result.points.map { displayPoint(fromRaw: $0) }
+            if !cornerRadii.isEmpty {
+                let ordered = reorderCornersClockwise(displayPoints)
+                let baseCorners = cornerPoints(for: piece, includeAngles: false)
+                return roundedPolygonPath(points: ordered, cornerRadii: cornerRadii, baseCorners: baseCorners)
+            }
             if piece.curvedEdges.isEmpty {
                 return polygonPath(displayPoints)
             }
             let displaySize = CGSize(width: rawSize.height, height: rawSize.width)
             let baseBounds = CGRect(origin: .zero, size: displaySize)
             return curvedPolygonPath(points: displayPoints, shape: .rightTriangle, curves: piece.curvedEdges, baseBounds: baseBounds)
+        }
+        if !cornerRadii.isEmpty {
+            switch piece.shape {
+            case .rectangle:
+                let base = rectanglePoints(size: rawSize)
+                let displayPoints = base.map { displayPoint(fromRaw: $0) }
+                let ordered = reorderCornersClockwise(displayPoints)
+                let baseCorners = cornerPoints(for: piece, includeAngles: false)
+                return roundedPolygonPath(points: ordered, cornerRadii: cornerRadii, baseCorners: baseCorners)
+            case .rightTriangle:
+                let base = rightTrianglePoints(size: rawSize)
+                let displayPoints = base.map { displayPoint(fromRaw: $0) }
+                let ordered = reorderCornersClockwise(displayPoints)
+                let baseCorners = cornerPoints(for: piece, includeAngles: false)
+                return roundedPolygonPath(points: ordered, cornerRadii: cornerRadii, baseCorners: baseCorners)
+            default:
+                break
+            }
         }
         let size = displaySize(for: piece)
         return path(for: piece.shape, size: size, curves: piece.curvedEdges)
@@ -299,12 +328,117 @@ enum ShapePathBuilder {
         return dedupePoints(points)
     }
 
+    private static func applyCornerNotches(to rawPoints: [CGPoint], notches: [Cutout]) -> [CGPoint] {
+        guard !notches.isEmpty, rawPoints.count >= 3 else { return rawPoints }
+        var displayPoints = rawPoints.map { displayPoint(fromRaw: $0) }
+        displayPoints = reorderCornersClockwise(displayPoints)
+
+        let orderedNotches = sortNotchesByCorner(notches, points: displayPoints)
+        for notch in orderedNotches {
+            displayPoints = applyCornerNotchToDisplay(points: displayPoints, notch: notch)
+        }
+
+        return displayPoints.map { rawPoint(fromDisplay: $0) }
+    }
+
+    private static func applyCornerNotchToDisplay(points: [CGPoint], notch: Cutout) -> [CGPoint] {
+        guard points.count >= 3 else { return points }
+
+        var displayWidth = max(notch.height, 0)
+        var displayHeight = max(notch.width, 0)
+        if displayWidth <= 0 || displayHeight <= 0 {
+            return points
+        }
+
+        let index = resolveNotchCornerIndex(notch, points: points)
+        guard index >= 0 else { return points }
+
+        let count = points.count
+        let prevIndex = (index - 1 + count) % count
+        let nextIndex = (index + 1) % count
+        let corner = points[index]
+        let prev = points[prevIndex]
+        let next = points[nextIndex]
+
+        let toPrev = unitVector(from: corner, to: prev)
+        let toNext = unitVector(from: corner, to: next)
+
+        let maxWidth = max(distance(corner, prev) * 0.98, 0)
+        let maxHeight = max(distance(corner, next) * 0.98, 0)
+        displayWidth = min(displayWidth, maxWidth)
+        displayHeight = min(displayHeight, maxHeight)
+
+        let p1 = CGPoint(x: corner.x + toPrev.x * displayWidth, y: corner.y + toPrev.y * displayWidth)
+        let p3 = CGPoint(x: corner.x + toNext.x * displayHeight, y: corner.y + toNext.y * displayHeight)
+        let p2 = CGPoint(x: p1.x + toNext.x * displayHeight, y: p1.y + toNext.y * displayHeight)
+
+        var newPoints: [CGPoint] = []
+        for i in 0..<count {
+            if i == index {
+                newPoints.append(p1)
+                newPoints.append(p2)
+                newPoints.append(p3)
+            } else {
+                newPoints.append(points[i])
+            }
+        }
+
+        return dedupePoints(newPoints)
+    }
+
+    private static func resolveNotchCornerIndex(_ notch: Cutout, points: [CGPoint]) -> Int {
+        if notch.cornerAnchorX >= 0 && notch.cornerAnchorY >= 0 {
+            let anchor = CGPoint(x: notch.cornerAnchorX, y: notch.cornerAnchorY)
+            return nearestPointIndex(to: anchor, points: points)
+        }
+        if notch.cornerIndex >= 0 && notch.cornerIndex < points.count {
+            return notch.cornerIndex
+        }
+        if notch.centerX >= 0 && notch.centerY >= 0 {
+            let center = displayPoint(fromRaw: CGPoint(x: notch.centerX, y: notch.centerY))
+            return nearestPointIndex(to: center, points: points)
+        }
+        return -1
+    }
+
+    private static func sortNotchesByCorner(_ notches: [Cutout], points: [CGPoint]) -> [Cutout] {
+        notches.sorted { lhs, rhs in
+            let leftIndex = resolveNotchCornerIndex(lhs, points: points)
+            let rightIndex = resolveNotchCornerIndex(rhs, points: points)
+            if leftIndex != rightIndex {
+                return leftIndex < rightIndex
+            }
+            let leftSize = max(lhs.width, lhs.height)
+            let rightSize = max(rhs.width, rhs.height)
+            if leftSize != rightSize {
+                return leftSize > rightSize
+            }
+            return lhs.id.uuidString < rhs.id.uuidString
+        }
+    }
+
+    private static func nearestPointIndex(to point: CGPoint, points: [CGPoint]) -> Int {
+        var bestIndex = 0
+        var bestDistance = CGFloat.greatestFiniteMagnitude
+        for (index, candidate) in points.enumerated() {
+            let dist = distance(point, candidate)
+            if dist < bestDistance {
+                bestDistance = dist
+                bestIndex = index
+            }
+        }
+        return bestIndex
+    }
+
     private static func applyAngleCuts(to basePoints: [CGPoint], shape: ShapeKind, size: CGSize, angleCuts: [AngleCut]) -> (points: [CGPoint], segments: [AngleSegment]) {
         guard !angleCuts.isEmpty else { return (basePoints, []) }
         var displayPoints = basePoints.map { displayPoint(fromRaw: $0) }
         let baseOrdered = reorderCornersClockwise(displayPoints)
         var segments: [AngleSegment] = []
         for cut in angleCuts {
+            if cut.anchorCornerIndex < 0 {
+                continue
+            }
             let ordered = reorderCornersClockwise(displayPoints)
             let result = applyAngleCutDisplay(cut, to: ordered, baseOrdered: baseOrdered)
             displayPoints = result.points
@@ -595,7 +729,7 @@ enum ShapePathBuilder {
     private static func reorderCornersClockwise(_ points: [CGPoint]) -> [CGPoint] {
         guard points.count > 2 else { return points }
         var ordered = points
-        if !isClockwise(ordered) {
+        if isClockwise(ordered) {
             ordered.reverse()
         }
 
@@ -619,7 +753,7 @@ enum ShapePathBuilder {
             let p2 = points[(i + 1) % points.count]
             area += (p1.x * p2.y) - (p2.x * p1.y)
         }
-        return area > 0
+        return area < 0
     }
 
     private static func rotate(_ point: CGPoint, by radians: CGFloat) -> CGPoint {
@@ -662,6 +796,116 @@ enum ShapePathBuilder {
         }
         path.closeSubpath()
         return path
+    }
+
+    private static func roundedPolygonPath(points: [CGPoint], cornerRadii: [CornerRadius], baseCorners: [CGPoint]? = nil) -> Path {
+        var path = Path()
+        guard points.count >= 3 else { return polygonPath(points) }
+        let count = points.count
+        var radiusMap: [Int: CornerRadius] = [:]
+        for corner in cornerRadii where corner.cornerIndex >= 0 {
+            let targetIndex: Int
+            if let base = baseCorners, corner.cornerIndex < base.count {
+                let origin = base[corner.cornerIndex]
+                targetIndex = points.enumerated().min { lhs, rhs in
+                    distance(lhs.element, origin) < distance(rhs.element, origin)
+                }?.offset ?? corner.cornerIndex
+            } else {
+                targetIndex = corner.cornerIndex
+            }
+            radiusMap[targetIndex] = corner
+        }
+        for index in 0..<count {
+            let prev = points[(index - 1 + count) % count]
+            let curr = points[index]
+            let next = points[(index + 1) % count]
+            guard let corner = radiusMap[index], corner.radius > 0 else {
+                if index == 0 {
+                    path.move(to: curr)
+                } else {
+                    path.addLine(to: curr)
+                }
+                continue
+            }
+
+            let v1 = unitVector(from: curr, to: prev)
+            let v2 = unitVector(from: curr, to: next)
+            let dot = max(min(v1.x * v2.x + v1.y * v2.y, 1), -1)
+            let angleSmall = acos(dot)
+            if angleSmall < 0.0001 {
+                if index == 0 {
+                    path.move(to: curr)
+                } else {
+                    path.addLine(to: curr)
+                }
+                continue
+            }
+
+            let lenPrev = distance(curr, prev)
+            let lenNext = distance(curr, next)
+            let tanHalf = tan(angleSmall / 2)
+            let tanHalfAbs = abs(tanHalf)
+            if tanHalfAbs <= 0.0001 {
+                if index == 0 {
+                    path.move(to: curr)
+                } else {
+                    path.addLine(to: curr)
+                }
+                continue
+            }
+
+            let maxRadius = min(lenPrev, lenNext) * tanHalfAbs
+            let radius = min(CGFloat(corner.radius), maxRadius)
+            if radius <= 0.0001 {
+                if index == 0 {
+                    path.move(to: curr)
+                } else {
+                    path.addLine(to: curr)
+                }
+                continue
+            }
+
+            let t = radius / tanHalfAbs
+            let p1 = CGPoint(x: curr.x + v1.x * t, y: curr.y + v1.y * t)
+            let p2 = CGPoint(x: curr.x + v2.x * t, y: curr.y + v2.y * t)
+
+            if index == 0 {
+                path.move(to: p1)
+            } else {
+                path.addLine(to: p1)
+            }
+
+            let bisector = unitVector(from: .zero, to: CGPoint(x: v1.x + v2.x, y: v1.y + v2.y))
+            let sinHalf = sin(angleSmall / 2)
+            if sinHalf <= 0.0001 {
+                path.addLine(to: p2)
+                continue
+            }
+
+            let centerOffset = radius / sinHalf
+            let center = CGPoint(x: curr.x + bisector.x * centerOffset,
+                                 y: curr.y + bisector.y * centerOffset)
+
+            let startRadians = atan2(p1.y - center.y, p1.x - center.x)
+            let endRadians = atan2(p2.y - center.y, p2.x - center.x)
+            var delta = endRadians - startRadians
+            while delta <= -CGFloat.pi { delta += 2 * CGFloat.pi }
+            while delta > CGFloat.pi { delta -= 2 * CGFloat.pi }
+            let arcClockwise = delta < 0
+            let startAngle = Angle(radians: startRadians)
+            let endAngle = Angle(radians: endRadians)
+            path.addArc(center: center, radius: radius, startAngle: startAngle, endAngle: endAngle, clockwise: arcClockwise)
+        }
+
+        path.closeSubpath()
+        return path
+    }
+
+    private static func isConcaveCorner(prev: CGPoint, curr: CGPoint, next: CGPoint, clockwise: Bool) -> Bool {
+        let v1 = CGPoint(x: curr.x - prev.x, y: curr.y - prev.y)
+        let v2 = CGPoint(x: next.x - curr.x, y: next.y - curr.y)
+        let cross = v1.x * v2.y - v1.y * v2.x
+        return clockwise ? cross > 0 : cross < 0
     }
 
     private static func curvedRectanglePath(width: CGFloat, height: CGFloat, curves: [CurvedEdge]) -> Path {
@@ -709,8 +953,8 @@ enum ShapePathBuilder {
         let mid = CGPoint(x: (from.x + to.x) / 2, y: (from.y + to.y) / 2)
         let direction = curve.isConcave ? -1.0 : 1.0
         let control = CGPoint(
-            x: mid.x + normal.x * curve.radius * direction,
-            y: mid.y + normal.y * curve.radius * direction
+            x: mid.x + normal.x * curve.radius * 2 * direction,
+            y: mid.y + normal.y * curve.radius * 2 * direction
         )
         path.addQuadCurve(to: to, control: control)
     }

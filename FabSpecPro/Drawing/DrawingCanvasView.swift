@@ -197,6 +197,10 @@ struct DrawingCanvasView: View {
     }
 
     private func expandedDisplayBounds(metrics: DrawingMetrics) -> CGRect {
+        if piece.shape == .circle || piece.shape == .quarterCircle {
+            let size = ShapePathBuilder.displaySize(for: piece)
+            return CGRect(origin: .zero, size: size)
+        }
         let polygon = ShapePathBuilder.displayPolygonPoints(for: piece, includeAngles: true)
         guard !polygon.isEmpty else { return .zero }
         var bounds = bounds(for: polygon)
@@ -977,7 +981,7 @@ struct DrawingCanvasView: View {
         let mid = CGPoint(x: (geometry.start.x + geometry.end.x) / 2, y: (geometry.start.y + geometry.end.y) / 2)
         let direction: CGFloat = curve.isConcave ? -1 : 1
         let normal = normalized(geometry.normal)
-        return CGPoint(x: mid.x + normal.x * curve.radius * direction, y: mid.y + normal.y * curve.radius * direction)
+        return CGPoint(x: mid.x + normal.x * curve.radius * 2 * direction, y: mid.y + normal.y * curve.radius * 2 * direction)
     }
 
     private func segmentIsOnHypotenuse(start: CGPoint, end: CGPoint, bounds: CGRect) -> Bool {
