@@ -46,7 +46,6 @@ extension Piece {
             let assignment = EdgeAssignment(edge: edge, treatment: treatment)
             assignment.piece = self
             context.insert(assignment)
-            edgeAssignments.append(assignment)
         } else {
             for index in matchingIndices {
                 edgeAssignments[index].treatment = treatment
@@ -80,7 +79,6 @@ extension Piece {
             assignment.edgeRaw = raw
             assignment.piece = self
             context.insert(assignment)
-            edgeAssignments.append(assignment)
         }
     }
 
@@ -117,7 +115,6 @@ extension Piece {
             assignment.edgeRaw = raw
             assignment.piece = self
             context.insert(assignment)
-            edgeAssignments.append(assignment)
         }
     }
 

@@ -383,14 +383,12 @@ struct PieceEditorView: View {
             cutout.centerX = rawCenter.x
             cutout.centerY = rawCenter.y
             cutout.piece = piece
-            piece.cutouts.append(cutout)
             modelContext.insert(cutout)
             return
         }
 
         let cutout = Cutout(kind: kind, width: 3, height: 3, centerX: size.width / 2, centerY: size.height / 2, isNotch: false)
         cutout.piece = piece
-        piece.cutouts.append(cutout)
         modelContext.insert(cutout)
     }
 
@@ -425,7 +423,6 @@ struct PieceEditorView: View {
         }
         let curve = CurvedEdge(edge: defaultEdge, radius: defaultRadius, isConcave: false)
         curve.piece = piece
-        piece.curvedEdges.append(curve)
         modelContext.insert(curve)
     }
 
@@ -441,7 +438,6 @@ struct PieceEditorView: View {
         }
         let cornerRadius = CornerRadius(cornerIndex: index, radius: 1, isInside: false)
         cornerRadius.piece = piece
-        piece.cornerRadii.append(cornerRadius)
         modelContext.insert(cornerRadius)
     }
 
@@ -457,7 +453,6 @@ struct PieceEditorView: View {
         }
         let angle = AngleCut(anchorCornerIndex: defaultCorner)
         angle.piece = piece
-        piece.angleCuts.append(angle)
         modelContext.insert(angle)
     }
 
@@ -472,7 +467,6 @@ struct PieceEditorView: View {
     private func removeCornerRadius(at cornerIndex: Int) {
         let matching = piece.cornerRadii.filter { $0.cornerIndex == cornerIndex }
         guard !matching.isEmpty else { return }
-        piece.cornerRadii.removeAll { $0.cornerIndex == cornerIndex }
         for radius in matching {
             modelContext.delete(radius)
         }
@@ -481,7 +475,6 @@ struct PieceEditorView: View {
     private func removeAngle(at cornerIndex: Int) {
         let matching = piece.angleCuts.filter { $0.anchorCornerIndex == cornerIndex }
         guard !matching.isEmpty else { return }
-        piece.angleCuts.removeAll { $0.anchorCornerIndex == cornerIndex }
         for angle in matching {
             modelContext.delete(angle)
         }
@@ -636,15 +629,12 @@ struct PieceEditorView: View {
             newPiece.materialName = lastMaterial
         }
         newPiece.project = project
-        project.pieces.append(newPiece)
         modelContext.insert(newPiece)
         markUpdated()
         nextPiece = newPiece
     }
 
     private func deletePiece() {
-        guard let project = piece.project else { return }
-        project.pieces.removeAll { $0.id == piece.id }
         modelContext.delete(piece)
         markUpdated()
     }
