@@ -337,9 +337,11 @@ enum PDFRenderer {
         context.addPath(cgPath)
         context.strokePath()
 
-        for cutout in piece.cutouts where cutout.centerX >= 0 && cutout.centerY >= 0 && !cutout.isNotch {
+        for cutout in piece.cutouts where cutout.centerX >= 0 && cutout.centerY >= 0 && !isEffectiveNotch(cutout: cutout, size: size) {
             let displayCutout = displayCutout(for: cutout)
-            let cutoutPath = ShapePathBuilder.cutoutPath(displayCutout)
+            let angleCuts = localAngleCuts(for: cutout, piece: piece)
+            let cornerRadii = localCornerRadii(for: cutout, piece: piece)
+            let cutoutPath = ShapePathBuilder.cutoutPath(displayCutout, angleCuts: angleCuts, cornerRadii: cornerRadii)
             var cutoutTransform = CGAffineTransform(translationX: offsetX, y: offsetY)
             cutoutTransform = cutoutTransform.scaledBy(x: scale, y: scale)
             if let scaled = cutoutPath.cgPath.copy(using: &cutoutTransform) {
@@ -356,7 +358,7 @@ enum PDFRenderer {
     }
 
     private static func drawNotchDimensionLabels(in context: CGContext, piece: Piece, size: CGSize, scale: CGFloat, offsetX: CGFloat, offsetY: CGFloat) {
-        let notches = piece.cutouts.filter { $0.isNotch && $0.centerX >= 0 && $0.centerY >= 0 }
+        let notches = piece.cutouts.filter { isEffectiveNotch(cutout: $0, size: size) && $0.centerX >= 0 && $0.centerY >= 0 }
         guard !notches.isEmpty else { return }
         let polygon = ShapePathBuilder.displayPolygonPoints(for: piece, includeAngles: true)
 
@@ -412,7 +414,7 @@ enum PDFRenderer {
     }
 
     private static func notchInteriorEdgeMetrics(cutout: Cutout, size: CGSize, polygon: [CGPoint]) -> (width: CGFloat, length: CGFloat, widthCenterY: CGFloat, lengthCenterX: CGFloat)? {
-        guard cutout.isNotch, polygon.count >= 2 else { return nil }
+        guard polygon.count >= 2 else { return nil }
         let displayCutout = displayCutout(for: cutout)
         let halfWidth = displayCutout.width / 2
         let halfHeight = displayCutout.height / 2
@@ -538,10 +540,22 @@ enum PDFRenderer {
     private static func drawEdgeLabels(in context: CGContext, piece: Piece, rect: CGRect, size: CGSize, scale: CGFloat, offsetX: CGFloat, offsetY: CGFloat) {
         let angleSegments = ShapePathBuilder.angleSegments(for: piece)
         let polygon = ShapePathBuilder.displayPolygonPoints(for: piece, includeAngles: true)
+        let boundarySegments = ShapePathBuilder.boundarySegments(for: piece)
+        let segmentCounts = Dictionary(grouping: boundarySegments, by: { $0.edge }).mapValues { $0.count }
         for assignment in piece.edgeAssignments {
             let code = assignment.treatmentAbbreviation
             guard !code.isEmpty else { continue }
             guard assignment.cutoutEdge == nil, assignment.angleEdgeId == nil else { continue }
+            if let segmentEdge = assignment.segmentEdge {
+                if let segment = boundarySegments.first(where: { $0.edge == segmentEdge.edge && $0.index == segmentEdge.index }) {
+                    let point = segmentLabelPoint(segment: segment, scale: scale, offsetX: offsetX, offsetY: offsetY)
+                    drawText(code, in: context, frame: CGRect(x: point.x - 16, y: point.y - 8, width: 32, height: 12), font: .systemFont(ofSize: 10, weight: .bold), alignment: .center)
+                }
+                continue
+            }
+            if piece.shape == .rectangle, (segmentCounts[assignment.edge] ?? 0) > 1 {
+                continue
+            }
             let point = edgeLabelPoint(edge: assignment.edge, piece: piece, shape: piece.shape, curves: piece.curvedEdges, size: size, scale: scale, offsetX: offsetX, offsetY: offsetY, cutouts: piece.cutouts)
             drawText(code, in: context, frame: CGRect(x: point.x - 16, y: point.y - 8, width: 32, height: 12), font: .systemFont(ofSize: 10, weight: .bold), alignment: .center)
         }
@@ -578,7 +592,6 @@ enum PDFRenderer {
     }
 
     private static func isInteriorNotchEdge(cutout: Cutout, edge: EdgePosition, pieceSize: CGSize) -> Bool {
-        if !cutout.isNotch { return true }
         let displayCutout = displayCutout(for: cutout)
         let halfWidth = displayCutout.width / 2
         let halfHeight = displayCutout.height / 2
@@ -600,6 +613,39 @@ enum PDFRenderer {
         default:
             return true
         }
+    }
+
+    private static func isEffectiveNotch(cutout: Cutout, size: CGSize) -> Bool {
+        if cutout.isNotch { return true }
+        guard cutout.kind != .circle else { return false }
+        let halfWidth = cutout.width / 2
+        let halfHeight = cutout.height / 2
+        let minX = cutout.centerX - halfWidth
+        let maxX = cutout.centerX + halfWidth
+        let minY = cutout.centerY - halfHeight
+        let maxY = cutout.centerY + halfHeight
+        let eps: CGFloat = 0.01
+        return minX <= eps || minY <= eps || maxX >= size.width - eps || maxY >= size.height - eps
+    }
+
+    private static func segmentLabelPoint(segment: BoundarySegment, scale: CGFloat, offsetX: CGFloat, offsetY: CGFloat) -> CGPoint {
+        let mid = CGPoint(x: (segment.start.x + segment.end.x) / 2, y: (segment.start.y + segment.end.y) / 2)
+        let offsetDistance = 8 / max(scale, 0.01)
+        let direction: CGPoint
+        switch segment.edge {
+        case .top:
+            direction = CGPoint(x: 0, y: -1)
+        case .bottom:
+            direction = CGPoint(x: 0, y: 1)
+        case .left:
+            direction = CGPoint(x: -1, y: 0)
+        case .right:
+            direction = CGPoint(x: 1, y: 0)
+        default:
+            direction = CGPoint(x: 0, y: -1)
+        }
+        let adjusted = CGPoint(x: mid.x + direction.x * offsetDistance, y: mid.y + direction.y * offsetDistance)
+        return CGPoint(x: offsetX + adjusted.x * scale, y: offsetY + adjusted.y * scale)
     }
 
 
@@ -652,8 +698,9 @@ enum PDFRenderer {
                 if edge == .bottom {
                     offsetDistance += 4 / max(scale, 0.01)
                 }
-                let rawDirection = CGPoint(x: control.x - mid.x, y: control.y - mid.y)
-                let direction = normalized(curve.isConcave ? CGPoint(x: -rawDirection.x, y: -rawDirection.y) : rawDirection)
+                let centroid = polygon.reduce(CGPoint.zero) { CGPoint(x: $0.x + $1.x, y: $0.y + $1.y) }
+                let center = CGPoint(x: centroid.x / CGFloat(polygon.count), y: centroid.y / CGFloat(polygon.count))
+                let direction = normalized(CGPoint(x: mid.x - center.x, y: mid.y - center.y))
                 let adjusted = offsetRelativeToPolygon(
                     point: mid,
                     segmentStart: geometry.start,
@@ -919,10 +966,6 @@ enum PDFRenderer {
         let halfWidth = displayCutout.width / 2
         let halfHeight = displayCutout.height / 2
         let padding = 6 / max(scale, 0.01)
-
-        if !cutout.isNotch {
-            return CGPoint(x: offsetX + center.x * scale, y: offsetY + center.y * scale)
-        }
 
         if cutout.kind == .circle {
             let point = center
@@ -1206,6 +1249,7 @@ enum PDFRenderer {
             drawText(lengthLabel, in: context, frame: lengthFrame, font: .systemFont(ofSize: 9, weight: .semibold), alignment: .center)
             drawText(depthLabel, in: context, frame: widthFrame, font: .systemFont(ofSize: 9, weight: .semibold), alignment: .center)
         } else if piece.shape == .rectangle {
+            drawSegmentDimensionLabels(in: context, piece: piece, scale: scale, offsetX: offsetX, offsetY: offsetY)
             let sideMetrics = rectangleSideMetrics(for: piece)
             if let leftMetric = sideMetrics[.left] {
                 let widthText = "\(MeasurementParser.formatInches(Double(leftMetric.length))) in"
@@ -1239,6 +1283,25 @@ enum PDFRenderer {
             drawText(depthLabel, in: context, frame: CGRect(x: leftBottomFrame.minX - 24, y: offsetY + (size.height * scale / 2) - 6, width: leftBottomFrame.width, height: leftBottomFrame.height), font: .systemFont(ofSize: 9, weight: .semibold), alignment: .center)
         }
         drawText("Qty \(piece.quantity)", in: context, frame: CGRect(x: right + 72, y: offsetY + (size.height * scale / 2) - 6, width: 44, height: 12), font: .systemFont(ofSize: 9, weight: .semibold), alignment: .left)
+    }
+
+    private static func drawSegmentDimensionLabels(in context: CGContext, piece: Piece, scale: CGFloat, offsetX: CGFloat, offsetY: CGFloat) {
+        let segments = ShapePathBuilder.boundarySegments(for: piece)
+        guard !segments.isEmpty else { return }
+        let grouped = Dictionary(grouping: segments, by: { $0.edge })
+        for (edge, edgeSegments) in grouped where edgeSegments.count > 1 {
+            for segment in edgeSegments {
+                let lengthValue: CGFloat
+                if edge == .top || edge == .bottom {
+                    lengthValue = abs(segment.end.x - segment.start.x)
+                } else {
+                    lengthValue = abs(segment.end.y - segment.start.y)
+                }
+                let text = "\(MeasurementParser.formatInches(Double(lengthValue))) in"
+                let point = segmentLabelPoint(segment: segment, scale: scale, offsetX: offsetX, offsetY: offsetY)
+                drawText(text, in: context, frame: CGRect(x: point.x - 30, y: point.y - 6, width: 60, height: 12), font: .systemFont(ofSize: 8, weight: .semibold), alignment: .center)
+            }
+        }
     }
 
     private struct SideMetric {
@@ -1331,7 +1394,7 @@ enum PDFRenderer {
 
     private static func cutoutNoteLines(for piece: Piece) -> [String] {
         let visibleCutouts = piece.cutouts.filter { $0.centerX >= 0 && $0.centerY >= 0 }
-        let holes = visibleCutouts.filter { !$0.isNotch }
+        let holes = visibleCutouts.filter { !isEffectiveNotch(cutout: $0, size: ShapePathBuilder.pieceSize(for: piece)) }
         var lines: [String] = []
 
         for cutout in holes {
@@ -1504,6 +1567,39 @@ enum PDFRenderer {
 
     private static func displayCutout(for cutout: Cutout) -> Cutout {
         Cutout(kind: cutout.kind, width: cutout.height, height: cutout.width, centerX: cutout.centerY, centerY: cutout.centerX, isNotch: cutout.isNotch)
+    }
+
+    private static func cutoutCornerRange(for cutout: Cutout, piece: Piece) -> Range<Int>? {
+        ShapePathBuilder.cutoutCornerRanges(for: piece)
+            .first { $0.cutout.id == cutout.id }?
+            .range
+    }
+
+    private static func localAngleCuts(for cutout: Cutout, piece: Piece) -> [AngleCut] {
+        guard let range = cutoutCornerRange(for: cutout, piece: piece) else { return [] }
+        return piece.angleCuts.compactMap { cut in
+            guard range.contains(cut.anchorCornerIndex) else { return nil }
+            let local = AngleCut(
+                anchorCornerIndex: cut.anchorCornerIndex - range.lowerBound,
+                anchorOffset: cut.anchorOffset,
+                secondaryCornerIndex: cut.secondaryCornerIndex,
+                secondaryOffset: cut.secondaryOffset,
+                usesSecondPoint: cut.usesSecondPoint,
+                angleDegrees: cut.angleDegrees
+            )
+            local.id = cut.id
+            return local
+        }
+    }
+
+    private static func localCornerRadii(for cutout: Cutout, piece: Piece) -> [CornerRadius] {
+        guard let range = cutoutCornerRange(for: cutout, piece: piece) else { return [] }
+        return piece.cornerRadii.compactMap { radius in
+            guard range.contains(radius.cornerIndex) else { return nil }
+            let local = CornerRadius(cornerIndex: radius.cornerIndex - range.lowerBound, radius: radius.radius, isInside: radius.isInside)
+            local.id = radius.id
+            return local
+        }
     }
 
 

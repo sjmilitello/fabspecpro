@@ -42,6 +42,10 @@ extension EdgeAssignment {
         "cutout:\(cutoutId.uuidString):\(edge.rawValue)"
     }
 
+    static func segmentEdgeRaw(edge: EdgePosition, index: Int) -> String {
+        "segment:\(edge.rawValue):\(index)"
+    }
+
     static func angleEdgeRaw(angleId: UUID) -> String {
         "angle:\(angleId.uuidString)"
     }
@@ -52,6 +56,14 @@ extension EdgeAssignment {
         guard let id = UUID(uuidString: String(parts[1])) else { return nil }
         guard let edge = EdgePosition(rawValue: String(parts[2])) else { return nil }
         return (id: id, edge: edge)
+    }
+
+    var segmentEdge: (edge: EdgePosition, index: Int)? {
+        let parts = edgeRaw.split(separator: ":")
+        guard parts.count == 3, parts[0] == "segment" else { return nil }
+        guard let edge = EdgePosition(rawValue: String(parts[1])) else { return nil }
+        guard let index = Int(parts[2]) else { return nil }
+        return (edge: edge, index: index)
     }
 
     var angleEdgeId: UUID? {

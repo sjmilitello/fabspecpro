@@ -177,6 +177,10 @@ struct PieceEditorView: View {
                 }
             }
             .pickerStyle(.menu)
+            Button("Apply to All Edges") {
+                applySelectedTreatmentToAllEdges()
+            }
+            .buttonStyle(PillButtonStyle(isProminent: true))
         }
     }
 
@@ -427,7 +431,7 @@ struct PieceEditorView: View {
     }
 
     private func addCornerRadius() {
-        let cornerCount = ShapePathBuilder.cornerPoints(for: piece, includeAngles: false).count
+        let cornerCount = ShapePathBuilder.cornerLabelCount(for: piece)
         guard cornerCount > 0 else { return }
         let usedAngles = Set(piece.angleCuts.map { $0.anchorCornerIndex })
         let usedRadii = Set(piece.cornerRadii.map { $0.cornerIndex })
@@ -442,7 +446,7 @@ struct PieceEditorView: View {
     }
 
     private func addAngle() {
-        let cornerCount = ShapePathBuilder.cornerPoints(for: piece, includeAngles: false).count
+        let cornerCount = ShapePathBuilder.cornerLabelCount(for: piece)
         guard cornerCount > 0 else { return }
         let usedAngles = Set(piece.angleCuts.map { $0.anchorCornerIndex })
         let usedRadii = Set(piece.cornerRadii.map { $0.cornerIndex })
@@ -646,6 +650,85 @@ struct PieceEditorView: View {
 
     private func markUpdated() {
         piece.project?.updatedAt = Date()
+    }
+
+    private func applySelectedTreatmentToAllEdges() {
+        guard let selectedTreatment else { return }
+        let segments = ShapePathBuilder.boundarySegments(for: piece)
+        let segmentGroups = Dictionary(grouping: segments, by: { $0.edge })
+        let hasSplitSegments = segmentGroups.contains { $0.value.count > 1 }
+        if piece.shape == .rectangle, hasSplitSegments {
+            for segment in segments {
+                piece.setSegmentTreatment(selectedTreatment, for: segment.edge, index: segment.index, context: modelContext)
+            }
+        } else {
+            let edgesPresent = Set(segmentGroups.keys)
+            for edge in edgesForShape(piece.shape) where edgesPresent.isEmpty || edgesPresent.contains(edge) {
+                piece.setTreatment(selectedTreatment, for: edge, context: modelContext)
+            }
+        }
+
+        let pieceSize = ShapePathBuilder.pieceSize(for: piece)
+        for cutout in piece.cutouts where cutout.centerX >= 0 && cutout.centerY >= 0 {
+            for edge in edgesForCutout(cutout) {
+                guard isInteriorCutoutEdge(cutout: cutout, edge: edge, pieceSize: pieceSize) else { continue }
+                piece.setCutoutTreatment(selectedTreatment, for: cutout.id, edge: edge, context: modelContext)
+            }
+        }
+        markUpdated()
+    }
+
+    private func edgesForShape(_ shape: ShapeKind) -> [EdgePosition] {
+        switch shape {
+        case .rightTriangle:
+            return [.legA, .legB, .hypotenuse]
+        default:
+            return [.top, .right, .bottom, .left]
+        }
+    }
+
+    private func edgesForCutout(_ cutout: Cutout) -> [EdgePosition] {
+        switch cutout.kind {
+        case .rectangle, .square:
+            return [.top, .right, .bottom, .left]
+        case .circle:
+            return [.top]
+        }
+    }
+
+    private func isInteriorCutoutEdge(cutout: Cutout, edge: EdgePosition, pieceSize: CGSize) -> Bool {
+        if cutout.kind == .circle {
+            return true
+        }
+        let displayCutout = Cutout(
+            kind: cutout.kind,
+            width: cutout.height,
+            height: cutout.width,
+            centerX: cutout.centerY,
+            centerY: cutout.centerX,
+            isNotch: cutout.isNotch
+        )
+        let displaySize = CGSize(width: pieceSize.height, height: pieceSize.width)
+        let halfWidth = displayCutout.width / 2
+        let halfHeight = displayCutout.height / 2
+        let minX = displayCutout.centerX - halfWidth
+        let maxX = displayCutout.centerX + halfWidth
+        let minY = displayCutout.centerY - halfHeight
+        let maxY = displayCutout.centerY + halfHeight
+        let eps: CGFloat = 0.01
+
+        switch edge {
+        case .left:
+            return minX > eps
+        case .right:
+            return maxX < displaySize.width - eps
+        case .top:
+            return minY > eps
+        case .bottom:
+            return maxY < displaySize.height - eps
+        default:
+            return true
+        }
     }
 
 
@@ -1207,7 +1290,6 @@ private struct CurveRow: View {
                 .pickerStyle(.menu)
                 Spacer()
                 Button("Delete", role: .destructive) {
-                    curve.piece?.curvedEdges.removeAll { $0.id == curve.id }
                     modelContext.delete(curve)
                 }
             }
@@ -1312,7 +1394,7 @@ private struct AngleCutRow: View {
     }
 
     private func cornerLabels() -> [String] {
-        let count = ShapePathBuilder.cornerPoints(for: piece, includeAngles: false).count
+        let count = ShapePathBuilder.cornerLabelCount(for: piece)
         return (0..<count).map { cornerLabel(for: $0) }
     }
 
@@ -1419,7 +1501,7 @@ private struct CornerRadiusRow: View {
     }
 
     private func cornerLabels() -> [String] {
-        let count = ShapePathBuilder.cornerPoints(for: piece, includeAngles: false).count
+        let count = ShapePathBuilder.cornerLabelCount(for: piece)
         return (0..<count).map { cornerLabel(for: $0) }
     }
 

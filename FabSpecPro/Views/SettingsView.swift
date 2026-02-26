@@ -125,7 +125,6 @@ struct SettingsView: View {
                                 Spacer()
                                 Button("Delete", role: .destructive) {
                                     for assignment in edgeAssignments where assignment.treatment?.id == treatment.id {
-                                        assignment.piece?.edgeAssignments.removeAll { $0.id == assignment.id }
                                         modelContext.delete(assignment)
                                     }
                                     modelContext.delete(treatment)

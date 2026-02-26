@@ -6,6 +6,20 @@ struct AngleSegment {
     let end: CGPoint
 }
 
+struct BoundarySegment {
+    let edge: EdgePosition
+    let index: Int
+    let start: CGPoint
+    let end: CGPoint
+}
+
+enum CutoutCornerPosition: Int {
+    case topLeft
+    case topRight
+    case bottomRight
+    case bottomLeft
+}
+
 enum ShapePathBuilder {
     static func pieceSize(for piece: Piece) -> CGSize {
         let width = MeasurementParser.parseInches(piece.widthText) ?? 24
@@ -34,12 +48,62 @@ enum ShapePathBuilder {
         CGPoint(x: point.y, y: point.x)
     }
 
+    static func boundarySegments(for piece: Piece) -> [BoundarySegment] {
+        let points = displayPolygonPoints(for: piece, includeAngles: true)
+        guard points.count >= 2 else { return [] }
+        let eps: CGFloat = 0.001
+        let minX = points.map(\.x).min() ?? 0
+        let maxX = points.map(\.x).max() ?? 0
+        let minY = points.map(\.y).min() ?? 0
+        let maxY = points.map(\.y).max() ?? 0
+
+        var rawSegments: [(EdgePosition, CGPoint, CGPoint)] = []
+        for i in 0..<points.count {
+            let a = points[i]
+            let b = points[(i + 1) % points.count]
+            let dx = b.x - a.x
+            let dy = b.y - a.y
+            if abs(dy) < eps {
+                if abs(a.y - minY) < eps {
+                    rawSegments.append((.top, a, b))
+                } else if abs(a.y - maxY) < eps {
+                    rawSegments.append((.bottom, a, b))
+                }
+            } else if abs(dx) < eps {
+                if abs(a.x - minX) < eps {
+                    rawSegments.append((.left, a, b))
+                } else if abs(a.x - maxX) < eps {
+                    rawSegments.append((.right, a, b))
+                }
+            }
+        }
+
+        var segments: [BoundarySegment] = []
+        for edge in [EdgePosition.top, .right, .bottom, .left] {
+            let edgeSegments = rawSegments.filter { $0.0 == edge }.sorted { lhs, rhs in
+                switch edge {
+                case .top, .bottom:
+                    return min(lhs.1.x, lhs.2.x) < min(rhs.1.x, rhs.2.x)
+                case .left, .right:
+                    return min(lhs.1.y, lhs.2.y) < min(rhs.1.y, rhs.2.y)
+                default:
+                    return false
+                }
+            }
+            for (index, segment) in edgeSegments.enumerated() {
+                segments.append(BoundarySegment(edge: segment.0, index: index, start: segment.1, end: segment.2))
+            }
+        }
+        return segments
+    }
+
     static func path(for piece: Piece) -> Path {
         let rawSize = pieceSize(for: piece)
-        let cornerRadii = piece.cornerRadii.filter { $0.radius > 0 }
-        let notches = piece.cutouts.filter { $0.isNotch && $0.kind != .circle && $0.centerX >= 0 && $0.centerY >= 0 }
+        let cornerRadii = pieceCornerRadii(for: piece)
+        let notches = notchCandidates(for: piece, size: rawSize)
+        let pieceAngleCuts = boundaryAngleCuts(for: piece)
         if piece.shape == .rectangle, (!notches.isEmpty || !piece.angleCuts.isEmpty) {
-            let result = angledRectanglePoints(size: rawSize, notches: notches, angleCuts: piece.angleCuts)
+            let result = angledRectanglePoints(size: rawSize, notches: notches, angleCuts: pieceAngleCuts)
             let displayPoints = result.points.map { displayPoint(fromRaw: $0) }
             if !cornerRadii.isEmpty {
                 let ordered = reorderCornersClockwise(displayPoints)
@@ -52,7 +116,7 @@ enum ShapePathBuilder {
             return curvedPolygonPath(points: displayPoints, shape: .rectangle, curves: piece.curvedEdges, baseBounds: nil)
         }
         if piece.shape == .rightTriangle, !piece.angleCuts.isEmpty {
-            let result = angledRightTrianglePoints(size: rawSize, angleCuts: piece.angleCuts)
+            let result = angledRightTrianglePoints(size: rawSize, angleCuts: pieceAngleCuts)
             let displayPoints = result.points.map { displayPoint(fromRaw: $0) }
             if !cornerRadii.isEmpty {
                 let ordered = reorderCornersClockwise(displayPoints)
@@ -104,6 +168,35 @@ enum ShapePathBuilder {
         }
     }
 
+    private static func notchCandidates(for piece: Piece, size: CGSize) -> [Cutout] {
+        piece.cutouts.filter { cutout in
+            guard cutout.kind != .circle else { return false }
+            guard cutout.centerX >= 0 && cutout.centerY >= 0 else { return false }
+            return cutout.isNotch || cutoutTouchesBoundary(cutout: cutout, size: size)
+        }
+    }
+
+    private static func cutoutTouchesBoundary(cutout: Cutout, size: CGSize) -> Bool {
+        let halfWidth = cutout.width / 2
+        let halfHeight = cutout.height / 2
+        let minX = cutout.centerX - halfWidth
+        let maxX = cutout.centerX + halfWidth
+        let minY = cutout.centerY - halfHeight
+        let maxY = cutout.centerY + halfHeight
+        let eps: CGFloat = 0.01
+        return minX <= eps || minY <= eps || maxX >= size.width - eps || maxY >= size.height - eps
+    }
+
+    private static func boundaryAngleCuts(for piece: Piece) -> [AngleCut] {
+        let cornerCount = pieceCornerCount(for: piece)
+        return piece.angleCuts.filter { $0.anchorCornerIndex >= 0 && $0.anchorCornerIndex < cornerCount }
+    }
+
+    private static func pieceCornerRadii(for piece: Piece) -> [CornerRadius] {
+        let cornerCount = pieceCornerCount(for: piece)
+        return piece.cornerRadii.filter { $0.radius > 0 && $0.cornerIndex >= 0 && $0.cornerIndex < cornerCount }
+    }
+
     private static func quarterCirclePath(radius: CGFloat) -> Path {
         var path = Path()
         path.move(to: CGPoint(x: 0, y: 0))
@@ -124,17 +217,76 @@ enum ShapePathBuilder {
         }
     }
 
+    static func cutoutPath(_ cutout: Cutout, angleCuts: [AngleCut], cornerRadii: [CornerRadius]) -> Path {
+        switch cutout.kind {
+        case .circle:
+            return cutoutPath(cutout)
+        case .square, .rectangle:
+            var points = reorderCornersClockwise(cutoutCornerPoints(for: cutout))
+            if !angleCuts.isEmpty {
+                points = applyAngleCutsDisplay(to: points, angleCuts: angleCuts)
+            }
+            let localRadii = cornerRadii.filter { $0.cornerIndex >= 0 }
+            if !localRadii.isEmpty {
+                let baseCorners = reorderCornersClockwise(cutoutCornerPoints(for: cutout))
+                return roundedPolygonPath(points: points, cornerRadii: localRadii, baseCorners: baseCorners)
+            }
+            return polygonPath(points)
+        }
+    }
+
+    static func cornerLabelCount(for piece: Piece) -> Int {
+        pieceCornerCount(for: piece) + interiorCutouts(for: piece).count * 4
+    }
+
+    static func pieceCornerCount(for piece: Piece) -> Int {
+        baseCornerPoints(for: piece).count
+    }
+
+    static func interiorCutouts(for piece: Piece) -> [Cutout] {
+        let rawSize = pieceSize(for: piece)
+        return piece.cutouts.filter { cutout in
+            guard cutout.centerX >= 0 && cutout.centerY >= 0 else { return false }
+            guard cutout.kind != .circle else { return false }
+            guard !cutout.isNotch else { return false }
+            return !cutoutTouchesBoundary(cutout: cutout, size: rawSize)
+        }
+    }
+
+    static func cutoutCornerRanges(for piece: Piece) -> [(cutout: Cutout, range: Range<Int>)] {
+        let baseCount = pieceCornerCount(for: piece)
+        var nextIndex = baseCount
+        var ranges: [(Cutout, Range<Int>)] = []
+        for cutout in interiorCutouts(for: piece) {
+            let range = nextIndex..<(nextIndex + 4)
+            ranges.append((cutout, range))
+            nextIndex += 4
+        }
+        return ranges
+    }
+
+    static func cutoutCornerInfo(for piece: Piece, index: Int) -> (cutout: Cutout, corner: CutoutCornerPosition, localIndex: Int)? {
+        for entry in cutoutCornerRanges(for: piece) {
+            if entry.range.contains(index) {
+                let localIndex = index - entry.range.lowerBound
+                let corner = CutoutCornerPosition(rawValue: localIndex) ?? .topLeft
+                return (entry.cutout, corner, localIndex)
+            }
+        }
+        return nil
+    }
+
     static func angleSegments(for piece: Piece) -> [AngleSegment] {
         let rawSize = pieceSize(for: piece)
         if piece.shape == .rectangle {
-            let notches = piece.cutouts.filter { $0.isNotch && $0.kind != .circle && $0.centerX >= 0 && $0.centerY >= 0 }
-            let result = angledRectanglePoints(size: rawSize, notches: notches, angleCuts: piece.angleCuts)
+            let notches = notchCandidates(for: piece, size: rawSize)
+            let result = angledRectanglePoints(size: rawSize, notches: notches, angleCuts: boundaryAngleCuts(for: piece))
             return result.segments.map { segment in
                 AngleSegment(id: segment.id, start: displayPoint(fromRaw: segment.start), end: displayPoint(fromRaw: segment.end))
             }
         }
         if piece.shape == .rightTriangle {
-            let result = angledRightTrianglePoints(size: rawSize, angleCuts: piece.angleCuts)
+            let result = angledRightTrianglePoints(size: rawSize, angleCuts: boundaryAngleCuts(for: piece))
             return result.segments.map { segment in
                 AngleSegment(id: segment.id, start: displayPoint(fromRaw: segment.start), end: displayPoint(fromRaw: segment.end))
             }
@@ -142,16 +294,33 @@ enum ShapePathBuilder {
         return []
     }
 
+    private static func baseCornerPoints(for piece: Piece) -> [CGPoint] {
+        let rawSize = pieceSize(for: piece)
+        switch piece.shape {
+        case .rectangle:
+            let notches = notchCandidates(for: piece, size: rawSize)
+            let result = angledRectanglePoints(size: rawSize, notches: notches, angleCuts: [])
+            let displayPoints = result.points.map { displayPoint(fromRaw: $0) }
+            return reorderCornersClockwise(displayPoints)
+        case .rightTriangle:
+            let result = angledRightTrianglePoints(size: rawSize, angleCuts: [])
+            let displayPoints = result.points.map { displayPoint(fromRaw: $0) }
+            return reorderCornersClockwise(displayPoints)
+        default:
+            return []
+        }
+    }
+
     static func cornerPoints(for piece: Piece, includeAngles: Bool = true, angleCutLimit: Int? = nil) -> [CGPoint] {
         let rawSize = pieceSize(for: piece)
         switch piece.shape {
         case .rectangle:
-            let notches = piece.cutouts.filter { $0.isNotch && $0.kind != .circle && $0.centerX >= 0 && $0.centerY >= 0 }
+            let notches = notchCandidates(for: piece, size: rawSize)
             let angleCuts: [AngleCut]
             if let limit = angleCutLimit {
-                angleCuts = Array(piece.angleCuts.prefix(max(0, limit)))
+                angleCuts = Array(boundaryAngleCuts(for: piece).prefix(max(0, limit)))
             } else {
-                angleCuts = includeAngles ? piece.angleCuts : []
+                angleCuts = includeAngles ? boundaryAngleCuts(for: piece) : []
             }
             let result = angledRectanglePoints(size: rawSize, notches: notches, angleCuts: angleCuts)
             let displayPoints = result.points.map { displayPoint(fromRaw: $0) }
@@ -159,9 +328,9 @@ enum ShapePathBuilder {
         case .rightTriangle:
             let angleCuts: [AngleCut]
             if let limit = angleCutLimit {
-                angleCuts = Array(piece.angleCuts.prefix(max(0, limit)))
+                angleCuts = Array(boundaryAngleCuts(for: piece).prefix(max(0, limit)))
             } else {
-                angleCuts = includeAngles ? piece.angleCuts : []
+                angleCuts = includeAngles ? boundaryAngleCuts(for: piece) : []
             }
             let result = angledRightTrianglePoints(size: rawSize, angleCuts: angleCuts)
             let displayPoints = result.points.map { displayPoint(fromRaw: $0) }
@@ -175,21 +344,21 @@ enum ShapePathBuilder {
         let rawSize = pieceSize(for: piece)
         switch piece.shape {
         case .rectangle:
-            let notches = piece.cutouts.filter { $0.isNotch && $0.kind != .circle && $0.centerX >= 0 && $0.centerY >= 0 }
+            let notches = notchCandidates(for: piece, size: rawSize)
             let angleCuts: [AngleCut]
             if let limit = angleCutLimit {
-                angleCuts = Array(piece.angleCuts.prefix(max(0, limit)))
+                angleCuts = Array(boundaryAngleCuts(for: piece).prefix(max(0, limit)))
             } else {
-                angleCuts = includeAngles ? piece.angleCuts : []
+                angleCuts = includeAngles ? boundaryAngleCuts(for: piece) : []
             }
             let result = angledRectanglePoints(size: rawSize, notches: notches, angleCuts: angleCuts)
             return result.points.map { displayPoint(fromRaw: $0) }
         case .rightTriangle:
             let angleCuts: [AngleCut]
             if let limit = angleCutLimit {
-                angleCuts = Array(piece.angleCuts.prefix(max(0, limit)))
+                angleCuts = Array(boundaryAngleCuts(for: piece).prefix(max(0, limit)))
             } else {
-                angleCuts = includeAngles ? piece.angleCuts : []
+                angleCuts = includeAngles ? boundaryAngleCuts(for: piece) : []
             }
             let result = angledRightTrianglePoints(size: rawSize, angleCuts: angleCuts)
             return result.points.map { displayPoint(fromRaw: $0) }
@@ -243,6 +412,10 @@ enum ShapePathBuilder {
         var bottomRightMinY: CGFloat = height
         var bottomLeftMaxX: CGFloat = 0
         var bottomLeftMinY: CGFloat = height
+        var topSpans: [(start: CGFloat, end: CGFloat, depth: CGFloat)] = []
+        var bottomSpans: [(start: CGFloat, end: CGFloat, depth: CGFloat)] = []
+        var leftSpans: [(start: CGFloat, end: CGFloat, depth: CGFloat)] = []
+        var rightSpans: [(start: CGFloat, end: CGFloat, depth: CGFloat)] = []
 
         for notch in notches {
             let halfWidth = notch.width / 2
@@ -278,18 +451,46 @@ enum ShapePathBuilder {
                 bottomLeftMaxX = max(bottomLeftMaxX, maxX)
                 bottomLeftMinY = min(bottomLeftMinY, minY)
             }
+
+            let touchesCount = [touchesTop, touchesRight, touchesBottom, touchesLeft].filter { $0 }.count
+            if touchesCount == 1 {
+                if touchesTop {
+                    topSpans.append((start: minX, end: maxX, depth: maxY))
+                } else if touchesBottom {
+                    bottomSpans.append((start: minX, end: maxX, depth: height - minY))
+                } else if touchesLeft {
+                    leftSpans.append((start: minY, end: maxY, depth: maxX))
+                } else if touchesRight {
+                    rightSpans.append((start: minY, end: maxY, depth: width - minX))
+                }
+            }
         }
 
         let hasTopLeft = topLeftMaxX > 0 && topLeftMaxY > 0
         let hasTopRight = topRightMinX < width && topRightMaxY > 0
         let hasBottomRight = bottomRightMinX < width && bottomRightMinY < height
         let hasBottomLeft = bottomLeftMaxX > 0 && bottomLeftMinY < height
+        let mergedTop = mergeEdgeSpans(topSpans)
+        let mergedBottom = mergeEdgeSpans(bottomSpans)
+        let mergedLeft = mergeEdgeSpans(leftSpans)
+        let mergedRight = mergeEdgeSpans(rightSpans)
 
         var points: [CGPoint] = []
         let startX = hasTopLeft ? topLeftMaxX : 0
         points.append(CGPoint(x: startX, y: 0))
 
         let topRightX = hasTopRight ? topRightMinX : width
+        for span in mergedTop {
+            let clampedStart = max(span.start, startX)
+            let clampedEnd = min(span.end, topRightX)
+            if clampedEnd <= clampedStart { continue }
+            if points.last?.x ?? 0 < clampedStart {
+                points.append(CGPoint(x: clampedStart, y: 0))
+            }
+            points.append(CGPoint(x: clampedStart, y: span.depth))
+            points.append(CGPoint(x: clampedEnd, y: span.depth))
+            points.append(CGPoint(x: clampedEnd, y: 0))
+        }
         points.append(CGPoint(x: topRightX, y: 0))
         if hasTopRight {
             points.append(CGPoint(x: topRightX, y: topRightMaxY))
@@ -299,6 +500,18 @@ enum ShapePathBuilder {
         }
 
         let rightDownY = hasBottomRight ? bottomRightMinY : height
+        for span in mergedRight {
+            let upperBound = hasTopRight ? topRightMaxY : 0
+            let clampedStart = max(span.start, upperBound)
+            let clampedEnd = min(span.end, rightDownY)
+            if clampedEnd <= clampedStart { continue }
+            if points.last?.y ?? 0 < clampedStart {
+                points.append(CGPoint(x: width, y: clampedStart))
+            }
+            points.append(CGPoint(x: width - span.depth, y: clampedStart))
+            points.append(CGPoint(x: width - span.depth, y: clampedEnd))
+            points.append(CGPoint(x: width, y: clampedEnd))
+        }
         points.append(CGPoint(x: width, y: rightDownY))
         if hasBottomRight {
             points.append(CGPoint(x: bottomRightMinX, y: bottomRightMinY))
@@ -308,6 +521,18 @@ enum ShapePathBuilder {
         }
 
         let bottomLeftX = hasBottomLeft ? bottomLeftMaxX : 0
+        let bottomStartX = hasBottomRight ? bottomRightMinX : width
+        for span in mergedBottom.reversed() {
+            let clampedStart = max(span.start, bottomLeftX)
+            let clampedEnd = min(span.end, bottomStartX)
+            if clampedEnd <= clampedStart { continue }
+            if points.last?.x ?? width > clampedEnd {
+                points.append(CGPoint(x: clampedEnd, y: height))
+            }
+            points.append(CGPoint(x: clampedEnd, y: height - span.depth))
+            points.append(CGPoint(x: clampedStart, y: height - span.depth))
+            points.append(CGPoint(x: clampedStart, y: height))
+        }
         points.append(CGPoint(x: bottomLeftX, y: height))
         if hasBottomLeft {
             points.append(CGPoint(x: bottomLeftMaxX, y: bottomLeftMinY))
@@ -317,6 +542,18 @@ enum ShapePathBuilder {
         }
 
         let leftUpY = hasTopLeft ? topLeftMaxY : 0
+        let leftStartY = hasBottomLeft ? bottomLeftMinY : height
+        for span in mergedLeft.reversed() {
+            let clampedStart = max(span.start, leftUpY)
+            let clampedEnd = min(span.end, leftStartY)
+            if clampedEnd <= clampedStart { continue }
+            if points.last?.y ?? height > clampedEnd {
+                points.append(CGPoint(x: 0, y: clampedEnd))
+            }
+            points.append(CGPoint(x: span.depth, y: clampedEnd))
+            points.append(CGPoint(x: span.depth, y: clampedStart))
+            points.append(CGPoint(x: 0, y: clampedStart))
+        }
         points.append(CGPoint(x: 0, y: leftUpY))
         if hasTopLeft {
             points.append(CGPoint(x: topLeftMaxX, y: topLeftMaxY))
@@ -326,6 +563,25 @@ enum ShapePathBuilder {
         }
 
         return dedupePoints(points)
+    }
+
+    private static func mergeEdgeSpans(_ spans: [(start: CGFloat, end: CGFloat, depth: CGFloat)]) -> [(start: CGFloat, end: CGFloat, depth: CGFloat)] {
+        let sorted = spans.sorted { $0.start < $1.start }
+        var merged: [(start: CGFloat, end: CGFloat, depth: CGFloat)] = []
+        for span in sorted {
+            guard let last = merged.last else {
+                merged.append(span)
+                continue
+            }
+            if span.start <= last.end + 0.01 {
+                let newEnd = max(last.end, span.end)
+                let newDepth = max(last.depth, span.depth)
+                merged[merged.count - 1] = (start: last.start, end: newEnd, depth: newDepth)
+            } else {
+                merged.append(span)
+            }
+        }
+        return merged
     }
 
     private static func applyCornerNotches(to rawPoints: [CGPoint], notches: [Cutout]) -> [CGPoint] {
@@ -796,6 +1052,33 @@ enum ShapePathBuilder {
         }
         path.closeSubpath()
         return path
+    }
+
+    private static func cutoutCornerPoints(for cutout: Cutout) -> [CGPoint] {
+        let halfWidth = cutout.width / 2
+        let halfHeight = cutout.height / 2
+        let center = CGPoint(x: cutout.centerX, y: cutout.centerY)
+        return [
+            CGPoint(x: center.x - halfWidth, y: center.y - halfHeight),
+            CGPoint(x: center.x + halfWidth, y: center.y - halfHeight),
+            CGPoint(x: center.x + halfWidth, y: center.y + halfHeight),
+            CGPoint(x: center.x - halfWidth, y: center.y + halfHeight)
+        ]
+    }
+
+    private static func applyAngleCutsDisplay(to basePoints: [CGPoint], angleCuts: [AngleCut]) -> [CGPoint] {
+        guard !angleCuts.isEmpty else { return basePoints }
+        var displayPoints = basePoints
+        let baseOrdered = reorderCornersClockwise(displayPoints)
+        for cut in angleCuts {
+            if cut.anchorCornerIndex < 0 {
+                continue
+            }
+            let ordered = reorderCornersClockwise(displayPoints)
+            let result = applyAngleCutDisplay(cut, to: ordered, baseOrdered: baseOrdered)
+            displayPoints = result.points
+        }
+        return displayPoints
     }
 
     private static func roundedPolygonPath(points: [CGPoint], cornerRadii: [CornerRadius], baseCorners: [CGPoint]? = nil) -> Path {

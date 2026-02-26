@@ -40,6 +40,11 @@ extension Piece {
         edgeAssignments.first(where: { $0.edgeRaw == edge.rawValue })?.treatment
     }
 
+    func segmentTreatment(for edge: EdgePosition, index: Int) -> EdgeTreatment? {
+        let raw = EdgeAssignment.segmentEdgeRaw(edge: edge, index: index)
+        return edgeAssignments.first(where: { $0.edgeRaw == raw })?.treatment
+    }
+
     func setTreatment(_ treatment: EdgeTreatment?, for edge: EdgePosition, context: ModelContext) {
         let matchingIndices = edgeAssignments.indices.filter { edgeAssignments[$0].edgeRaw == edge.rawValue }
         if matchingIndices.isEmpty {
@@ -55,11 +60,34 @@ extension Piece {
         }
     }
 
+    func setSegmentTreatment(_ treatment: EdgeTreatment?, for edge: EdgePosition, index: Int, context: ModelContext) {
+        let raw = EdgeAssignment.segmentEdgeRaw(edge: edge, index: index)
+        if let existingIndex = edgeAssignments.firstIndex(where: { $0.edgeRaw == raw }) {
+            edgeAssignments[existingIndex].treatment = treatment
+            edgeAssignments[existingIndex].treatmentAbbreviation = treatment?.abbreviation ?? ""
+            edgeAssignments[existingIndex].treatmentName = treatment?.name ?? ""
+        } else {
+            let assignment = EdgeAssignment(edge: edge, treatment: treatment)
+            assignment.edgeRaw = raw
+            assignment.piece = self
+            context.insert(assignment)
+        }
+    }
+
     func clearTreatment(for edge: EdgePosition) {
         for index in edgeAssignments.indices where edgeAssignments[index].edgeRaw == edge.rawValue {
             edgeAssignments[index].treatment = nil
             edgeAssignments[index].treatmentAbbreviation = ""
             edgeAssignments[index].treatmentName = ""
+        }
+    }
+
+    func clearSegmentTreatment(for edge: EdgePosition, index: Int) {
+        let raw = EdgeAssignment.segmentEdgeRaw(edge: edge, index: index)
+        if let foundIndex = edgeAssignments.firstIndex(where: { $0.edgeRaw == raw }) {
+            edgeAssignments[foundIndex].treatment = nil
+            edgeAssignments[foundIndex].treatmentAbbreviation = ""
+            edgeAssignments[foundIndex].treatmentName = ""
         }
     }
 
