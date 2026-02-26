@@ -25,6 +25,11 @@ struct PieceEditorView: View {
     @State private var openAngleIds: Set<UUID> = []
     @State private var openCornerRadiusIds: Set<UUID> = []
     @State private var showDeletePieceConfirm = false
+    @State private var showDeleteCutoutsConfirm = false
+    @State private var showDeleteNotchesConfirm = false
+    @State private var showDeleteCurvesConfirm = false
+    @State private var showDeleteAnglesConfirm = false
+    @State private var showDeleteCornerRadiiConfirm = false
 
     var body: some View {
         ZStack {
@@ -177,10 +182,20 @@ struct PieceEditorView: View {
                 }
             }
             .pickerStyle(.menu)
-            Button("Apply to All Edges") {
-                applySelectedTreatmentToAllEdges()
+            Button(edgeAssignmentsPresent ? "Remove All" : "Apply to All Edges") {
+                if edgeAssignmentsPresent {
+                    removeAllEdgeTreatments()
+                } else {
+                    applySelectedTreatmentToAllEdges()
+                }
             }
-            .buttonStyle(PillButtonStyle(isProminent: true))
+            .buttonStyle(
+                PillButtonStyle(
+                    isProminent: true,
+                    textColor: edgeAssignmentsPresent ? Theme.primaryText : nil,
+                    backgroundColor: edgeAssignmentsPresent ? Color.red : nil
+                )
+            )
         }
     }
 
@@ -312,6 +327,17 @@ struct PieceEditorView: View {
                 addCutout(kind: .circle, isNotch: false)
             }
             .buttonStyle(PillButtonStyle())
+            Button("Delete All", role: .destructive) {
+                showDeleteCutoutsConfirm = true
+            }
+            .buttonStyle(PillButtonStyle(textColor: .white, backgroundColor: .red))
+            Spacer()
+        }
+        .alert("Delete All Cutouts?", isPresented: $showDeleteCutoutsConfirm) {
+            Button("Delete", role: .destructive) { deleteAllCutouts() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This will remove all cutouts for this piece.")
         }
     }
 
@@ -321,6 +347,17 @@ struct PieceEditorView: View {
                 addCutout(kind: .rectangle, isNotch: true)
             }
             .buttonStyle(PillButtonStyle())
+            Button("Delete All", role: .destructive) {
+                showDeleteNotchesConfirm = true
+            }
+            .buttonStyle(PillButtonStyle(textColor: .white, backgroundColor: .red))
+            Spacer()
+        }
+        .alert("Delete All Notches?", isPresented: $showDeleteNotchesConfirm) {
+            Button("Delete", role: .destructive) { deleteAllNotches() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This will remove all notches for this piece.")
         }
     }
 
@@ -330,6 +367,17 @@ struct PieceEditorView: View {
                 addCurve()
             }
             .buttonStyle(PillButtonStyle())
+            Button("Delete All", role: .destructive) {
+                showDeleteCurvesConfirm = true
+            }
+            .buttonStyle(PillButtonStyle(textColor: .white, backgroundColor: .red))
+            Spacer()
+        }
+        .alert("Delete All Curves?", isPresented: $showDeleteCurvesConfirm) {
+            Button("Delete", role: .destructive) { deleteAllCurves() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This will remove all curves for this piece.")
         }
     }
 
@@ -339,6 +387,17 @@ struct PieceEditorView: View {
                 addCornerRadius()
             }
             .buttonStyle(PillButtonStyle())
+            Button("Delete All", role: .destructive) {
+                showDeleteCornerRadiiConfirm = true
+            }
+            .buttonStyle(PillButtonStyle(textColor: .white, backgroundColor: .red))
+            Spacer()
+        }
+        .alert("Delete All Corner Radius?", isPresented: $showDeleteCornerRadiiConfirm) {
+            Button("Delete", role: .destructive) { deleteAllCornerRadii() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This will remove all corner radius for this piece.")
         }
     }
 
@@ -348,6 +407,17 @@ struct PieceEditorView: View {
                 addAngle()
             }
             .buttonStyle(PillButtonStyle())
+            Button("Delete All", role: .destructive) {
+                showDeleteAnglesConfirm = true
+            }
+            .buttonStyle(PillButtonStyle(textColor: .white, backgroundColor: .red))
+            Spacer()
+        }
+        .alert("Delete All Angles?", isPresented: $showDeleteAnglesConfirm) {
+            Button("Delete", role: .destructive) { deleteAllAngles() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This will remove all angles for this piece.")
         }
     }
 
@@ -396,6 +466,28 @@ struct PieceEditorView: View {
         modelContext.insert(cutout)
     }
 
+    private func deleteAllCutouts() {
+        let targets = piece.cutouts.filter { !$0.isNotch }
+        guard !targets.isEmpty else { return }
+        for cutout in targets {
+            modelContext.delete(cutout)
+        }
+        piece.cutouts.removeAll { !$0.isNotch }
+        openCutoutIds.removeAll()
+        markUpdated()
+    }
+
+    private func deleteAllNotches() {
+        let targets = piece.cutouts.filter { $0.isNotch }
+        guard !targets.isEmpty else { return }
+        for cutout in targets {
+            modelContext.delete(cutout)
+        }
+        piece.cutouts.removeAll { $0.isNotch }
+        openNotchIds.removeAll()
+        markUpdated()
+    }
+
     private func addCurve() {
         let defaultRadius: Double = piece.shape == .rightTriangle ? triangleQuarterCircleRadius() : 2
         let maxCurves = piece.shape == .rightTriangle ? 3 : 4
@@ -430,6 +522,17 @@ struct PieceEditorView: View {
         modelContext.insert(curve)
     }
 
+    private func deleteAllCurves() {
+        let targets = piece.curvedEdges
+        guard !targets.isEmpty else { return }
+        for curve in targets {
+            modelContext.delete(curve)
+        }
+        piece.curvedEdges.removeAll()
+        openCurveIds.removeAll()
+        markUpdated()
+    }
+
     private func addCornerRadius() {
         let cornerCount = ShapePathBuilder.cornerLabelCount(for: piece)
         guard cornerCount > 0 else { return }
@@ -445,6 +548,17 @@ struct PieceEditorView: View {
         modelContext.insert(cornerRadius)
     }
 
+    private func deleteAllCornerRadii() {
+        let targets = piece.cornerRadii
+        guard !targets.isEmpty else { return }
+        for radius in targets {
+            modelContext.delete(radius)
+        }
+        piece.cornerRadii.removeAll()
+        openCornerRadiusIds.removeAll()
+        markUpdated()
+    }
+
     private func addAngle() {
         let cornerCount = ShapePathBuilder.cornerLabelCount(for: piece)
         guard cornerCount > 0 else { return }
@@ -458,6 +572,17 @@ struct PieceEditorView: View {
         let angle = AngleCut(anchorCornerIndex: defaultCorner)
         angle.piece = piece
         modelContext.insert(angle)
+    }
+
+    private func deleteAllAngles() {
+        let targets = piece.angleCuts
+        guard !targets.isEmpty else { return }
+        for angle in targets {
+            modelContext.delete(angle)
+        }
+        piece.angleCuts.removeAll()
+        openAngleIds.removeAll()
+        markUpdated()
     }
 
     private func nextAvailableCornerIndex(count: Int, avoiding: Set<Int>) -> Int? {
@@ -652,6 +777,10 @@ struct PieceEditorView: View {
         piece.project?.updatedAt = Date()
     }
 
+    private var edgeAssignmentsPresent: Bool {
+        !piece.edgeAssignments.isEmpty
+    }
+
     private func applySelectedTreatmentToAllEdges() {
         guard let selectedTreatment else { return }
         let segments = ShapePathBuilder.boundarySegments(for: piece)
@@ -675,6 +804,16 @@ struct PieceEditorView: View {
                 piece.setCutoutTreatment(selectedTreatment, for: cutout.id, edge: edge, context: modelContext)
             }
         }
+        markUpdated()
+    }
+
+    private func removeAllEdgeTreatments() {
+        let assignments = piece.edgeAssignments
+        guard !assignments.isEmpty else { return }
+        for assignment in assignments {
+            modelContext.delete(assignment)
+        }
+        piece.edgeAssignments.removeAll()
         markUpdated()
     }
 
