@@ -458,12 +458,14 @@ struct PieceEditorView: View {
             cutout.centerY = rawCenter.y
             cutout.piece = piece
             modelContext.insert(cutout)
+            openNotchIds = [cutout.id]
             return
         }
 
         let cutout = Cutout(kind: kind, width: 3, height: 3, centerX: size.width / 2, centerY: size.height / 2, isNotch: false)
         cutout.piece = piece
         modelContext.insert(cutout)
+        openCutoutIds = [cutout.id]
     }
 
     private func deleteAllCutouts() {
@@ -520,6 +522,7 @@ struct PieceEditorView: View {
         let curve = CurvedEdge(edge: defaultEdge, radius: defaultRadius, isConcave: false)
         curve.piece = piece
         modelContext.insert(curve)
+        openCurveIds = [curve.id]
     }
 
     private func deleteAllCurves() {
@@ -546,6 +549,7 @@ struct PieceEditorView: View {
         let cornerRadius = CornerRadius(cornerIndex: index, radius: 1, isInside: false)
         cornerRadius.piece = piece
         modelContext.insert(cornerRadius)
+        openCornerRadiusIds = [cornerRadius.id]
     }
 
     private func deleteAllCornerRadii() {
@@ -572,6 +576,7 @@ struct PieceEditorView: View {
         let angle = AngleCut(anchorCornerIndex: defaultCorner)
         angle.piece = piece
         modelContext.insert(angle)
+        openAngleIds = [angle.id]
     }
 
     private func deleteAllAngles() {

@@ -525,6 +525,8 @@ struct DrawingCanvasView: View {
 
     private func cutoutNoteLines(from cutouts: [Cutout]) -> [String] {
         var lines: [String] = []
+        let leftCurveOffset = curveEdgeOffset(edge: .left)
+        let topCurveOffset = curveEdgeOffset(edge: .top)
 
         for cutout in cutouts {
             let displayCutout = rotatedCutout(cutout)
@@ -537,12 +539,20 @@ struct DrawingCanvasView: View {
                 label = abs(cutout.width - cutout.height) < 0.001 ? "Square Cutout" : "Rectangular Cutout"
             }
             let sizeText = "\(widthText)\" Wide x \(heightText)\" Long"
-            let fromLeft = MeasurementParser.formatInches(displayCutout.centerX)
-            let fromTop = MeasurementParser.formatInches(displayCutout.centerY)
+            let fromLeftValue = max(displayCutout.centerX + leftCurveOffset, 0)
+            let fromTopValue = max(displayCutout.centerY + topCurveOffset, 0)
+            let fromLeft = MeasurementParser.formatInches(fromLeftValue)
+            let fromTop = MeasurementParser.formatInches(fromTopValue)
             lines.append("\(label): \(sizeText) - \(fromLeft)\" From Left to Center, \(fromTop)\" From Top to Center")
         }
 
         return wrapLines(lines, maxLength: 48)
+    }
+
+    private func curveEdgeOffset(edge: EdgePosition) -> Double {
+        guard piece.shape == .rectangle else { return 0 }
+        guard let curve = piece.curve(for: edge), curve.radius > 0 else { return 0 }
+        return curve.isConcave ? -curve.radius : curve.radius
     }
 
     private func letter(for index: Int) -> String {

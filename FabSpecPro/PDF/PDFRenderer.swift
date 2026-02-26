@@ -1396,6 +1396,8 @@ enum PDFRenderer {
         let visibleCutouts = piece.cutouts.filter { $0.centerX >= 0 && $0.centerY >= 0 }
         let holes = visibleCutouts.filter { !isEffectiveNotch(cutout: $0, size: ShapePathBuilder.pieceSize(for: piece)) }
         var lines: [String] = []
+        let leftCurveOffset = curveEdgeOffset(piece: piece, edge: .left)
+        let topCurveOffset = curveEdgeOffset(piece: piece, edge: .top)
 
         for cutout in holes {
             let label: String
@@ -1408,12 +1410,20 @@ enum PDFRenderer {
             let widthText = MeasurementParser.formatInches(cutout.width)
             let heightText = MeasurementParser.formatInches(cutout.height)
             let sizeText = "\(widthText)\" Wide x \(heightText)\" Long"
-            let fromLeft = MeasurementParser.formatInches(displayCutout.centerX)
-            let fromTop = MeasurementParser.formatInches(displayCutout.centerY)
+            let fromLeftValue = max(displayCutout.centerX + leftCurveOffset, 0)
+            let fromTopValue = max(displayCutout.centerY + topCurveOffset, 0)
+            let fromLeft = MeasurementParser.formatInches(fromLeftValue)
+            let fromTop = MeasurementParser.formatInches(fromTopValue)
             lines.append("\(label): \(sizeText) - \(fromLeft)\" From Left to Center, \(fromTop)\" From Top to Center")
         }
 
         return lines
+    }
+
+    private static func curveEdgeOffset(piece: Piece, edge: EdgePosition) -> Double {
+        guard piece.shape == .rectangle else { return 0 }
+        guard let curve = piece.curve(for: edge), curve.radius > 0 else { return 0 }
+        return curve.isConcave ? -curve.radius : curve.radius
     }
 
     private static func pieceNoteLines(for piece: Piece) -> [String] {
