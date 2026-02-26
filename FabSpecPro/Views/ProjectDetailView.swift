@@ -5,11 +5,19 @@ struct ProjectDetailView: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(\.dismiss) private var dismiss
     @Query private var headers: [BusinessHeader]
+    @Query private var pieces: [Piece]
     @Bindable var project: Project
     @State private var pdfData: Data?
     @State private var isShowingShare = false
     @State private var pieceToDelete: Piece?
+    @State private var selectedPiece: Piece?
     @State private var isShowingDeleteProject = false
+
+    init(project: Project) {
+        self.project = project
+        let projectId = project.id
+        _pieces = Query(filter: #Predicate<Piece> { $0.project?.id == projectId })
+    }
 
     var body: some View {
         ZStack {
@@ -55,8 +63,8 @@ struct ProjectDetailView: View {
 
                                     LazyVGrid(columns: gridColumns, spacing: 10) {
                                         ForEach(groupedPieces[key, default: []]) { piece in
-                                            NavigationLink {
-                                                PieceEditorView(piece: piece)
+                                            Button {
+                                                selectedPiece = piece
                                             } label: {
                                                 PieceRow(piece: piece)
                                             }
@@ -82,6 +90,9 @@ struct ProjectDetailView: View {
         }
         .navigationTitle(project.name)
         .navigationBarTitleDisplayMode(.inline)
+        .navigationDestination(item: $selectedPiece) { piece in
+            PieceEditorView(piece: piece)
+        }
         .sheet(isPresented: $isShowingShare) {
             if let pdfData {
                 ProjectShareSheet(activityItems: [pdfData])
@@ -93,7 +104,6 @@ struct ProjectDetailView: View {
         )) {
             Button("Delete", role: .destructive) {
                 if let pieceToDelete {
-                    project.pieces.removeAll { $0.id == pieceToDelete.id }
                     modelContext.delete(pieceToDelete)
                     self.pieceToDelete = nil
                     markUpdated()
@@ -129,12 +139,13 @@ struct ProjectDetailView: View {
     }
 
     private func addPiece() {
-        let piece = Piece(name: "Piece \(project.pieces.count + 1)")
-        if let lastMaterial = project.pieces.last(where: { !$0.materialName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })?.materialName {
+        let nextIndex = pieces.count + 1
+        let piece = Piece(name: "Piece \(nextIndex)")
+        let lastMaterial = pieces.last(where: { !$0.materialName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })?.materialName
+        if let lastMaterial {
             piece.materialName = lastMaterial
         }
         piece.project = project
-        project.pieces.append(piece)
         modelContext.insert(piece)
         markUpdated()
     }
@@ -161,7 +172,7 @@ struct ProjectDetailView: View {
     }
 
     private var groupedPieces: [PieceGroupKey: [Piece]] {
-        Dictionary(grouping: project.pieces) { piece in
+        Dictionary(grouping: pieces) { piece in
             PieceGroupKey(materialName: piece.materialName, thicknessLabel: piece.thickness.rawValue)
         }
     }

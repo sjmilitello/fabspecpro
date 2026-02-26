@@ -3,37 +3,24 @@ import SwiftData
 
 @Model
 final class Piece {
-    var id: UUID
-    var name: String
-    var materialName: String
-    var thicknessRaw: String
-    var shapeRaw: String
-    var widthText: String
-    var heightText: String
-    var quantity: Int
-    var notes: String
+    var id: UUID = UUID()
+    var name: String = "Piece"
+    var materialName: String = ""
+    var thicknessRaw: String = MaterialThickness.threeCentimeter.rawValue
+    var shapeRaw: String = ShapeKind.rectangle.rawValue
+    var widthText: String = "24"
+    var heightText: String = "18"
+    var quantity: Int = 1
+    var notes: String = ""
     var project: Project?
-    @Relationship(deleteRule: .cascade) var edgeAssignments: [EdgeAssignment]
-    @Relationship(deleteRule: .cascade) var cutouts: [Cutout]
-    @Relationship(deleteRule: .cascade) var curvedEdges: [CurvedEdge]
-    @Relationship(deleteRule: .cascade) var angleCuts: [AngleCut]
-    @Relationship(deleteRule: .cascade) var cornerRadii: [CornerRadius]
+    @Relationship(deleteRule: .cascade) var edgeAssignments: [EdgeAssignment] = []
+    @Relationship(deleteRule: .cascade) var cutouts: [Cutout] = []
+    @Relationship(deleteRule: .cascade) var curvedEdges: [CurvedEdge] = []
+    @Relationship(deleteRule: .cascade) var angleCuts: [AngleCut] = []
+    @Relationship(deleteRule: .cascade) var cornerRadii: [CornerRadius] = []
 
     init(name: String = "Piece") {
-        self.id = UUID()
         self.name = name
-        self.materialName = ""
-        self.thicknessRaw = MaterialThickness.threeCentimeter.rawValue
-        self.shapeRaw = ShapeKind.rectangle.rawValue
-        self.widthText = "24"
-        self.heightText = "18"
-        self.quantity = 1
-        self.notes = ""
-        self.edgeAssignments = []
-        self.cutouts = []
-        self.curvedEdges = []
-        self.angleCuts = []
-        self.cornerRadii = []
     }
 
     var thickness: MaterialThickness {
@@ -46,6 +33,7 @@ final class Piece {
         set { shapeRaw = newValue.rawValue }
     }
 }
+
 
 extension Piece {
     func treatment(for edge: EdgePosition) -> EdgeTreatment? {
