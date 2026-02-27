@@ -120,7 +120,10 @@ extension Piece {
     }
 
     func curve(for edge: EdgePosition) -> CurvedEdge? {
-        curvedEdges.first(where: { $0.edge == edge })
+        if let edgeCurve = curvedEdges.first(where: { $0.edge == edge && !$0.hasSpan }) {
+            return edgeCurve
+        }
+        return curvedEdges.first(where: { $0.edge == edge })
     }
 
     func cornerRadius(for cornerIndex: Int) -> CornerRadius? {

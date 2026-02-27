@@ -42,13 +42,19 @@ final class Cutout {
 final class CurvedEdge {
     var id: UUID
     var edgeRaw: String
+    var targetRaw: String = "span"
+    var startCornerIndex: Int = -1
+    var endCornerIndex: Int = -1
     var radius: Double
     var isConcave: Bool
     var piece: Piece?
 
-    init(edge: EdgePosition, radius: Double, isConcave: Bool) {
+    init(edge: EdgePosition, radius: Double, isConcave: Bool, startCornerIndex: Int = -1, endCornerIndex: Int = -1) {
         self.id = UUID()
         self.edgeRaw = edge.rawValue
+        self.targetRaw = "span"
+        self.startCornerIndex = startCornerIndex
+        self.endCornerIndex = endCornerIndex
         self.radius = radius
         self.isConcave = isConcave
     }
@@ -56,5 +62,9 @@ final class CurvedEdge {
     var edge: EdgePosition {
         get { EdgePosition(rawValue: edgeRaw) ?? .top }
         set { edgeRaw = newValue.rawValue }
+    }
+
+    var hasSpan: Bool {
+        startCornerIndex >= 0 && endCornerIndex >= 0 && startCornerIndex != endCornerIndex
     }
 }

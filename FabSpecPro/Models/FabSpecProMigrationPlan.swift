@@ -156,9 +156,27 @@ enum FabSpecProSchemaV9: VersionedSchema {
     }
 }
 
+enum FabSpecProSchemaV10: VersionedSchema {
+    static var versionIdentifier: Schema.Version { Schema.Version(1, 9, 0) }
+    static var models: [any PersistentModel.Type] {
+        [
+            Project.self,
+            Piece.self,
+            EdgeTreatment.self,
+            EdgeAssignment.self,
+            Cutout.self,
+            CurvedEdge.self,
+            AngleCut.self,
+            CornerRadius.self,
+            BusinessHeader.self,
+            MaterialOption.self
+        ]
+    }
+}
+
 enum FabSpecProMigrationPlan: SchemaMigrationPlan {
     static var schemas: [any VersionedSchema.Type] {
-        [FabSpecProSchemaV1.self, FabSpecProSchemaV2.self, FabSpecProSchemaV3.self, FabSpecProSchemaV4.self, FabSpecProSchemaV5.self, FabSpecProSchemaV6.self, FabSpecProSchemaV7.self, FabSpecProSchemaV8.self, FabSpecProSchemaV9.self]
+        [FabSpecProSchemaV1.self, FabSpecProSchemaV2.self, FabSpecProSchemaV3.self, FabSpecProSchemaV4.self, FabSpecProSchemaV5.self, FabSpecProSchemaV6.self, FabSpecProSchemaV7.self, FabSpecProSchemaV8.self, FabSpecProSchemaV9.self, FabSpecProSchemaV10.self]
     }
 
     static var stages: [MigrationStage] {
@@ -170,7 +188,8 @@ enum FabSpecProMigrationPlan: SchemaMigrationPlan {
             .lightweight(fromVersion: FabSpecProSchemaV5.self, toVersion: FabSpecProSchemaV6.self),
             .lightweight(fromVersion: FabSpecProSchemaV6.self, toVersion: FabSpecProSchemaV7.self),
             .lightweight(fromVersion: FabSpecProSchemaV7.self, toVersion: FabSpecProSchemaV8.self),
-            .lightweight(fromVersion: FabSpecProSchemaV8.self, toVersion: FabSpecProSchemaV9.self)
+            .lightweight(fromVersion: FabSpecProSchemaV8.self, toVersion: FabSpecProSchemaV9.self),
+            .lightweight(fromVersion: FabSpecProSchemaV9.self, toVersion: FabSpecProSchemaV10.self)
         ]
     }
 }
