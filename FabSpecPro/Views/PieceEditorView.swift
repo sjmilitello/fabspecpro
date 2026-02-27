@@ -15,18 +15,15 @@ struct PieceEditorView: View {
     @State private var isOptionsOpen = false
     @State private var isNotesOpen = false
     @State private var isCutoutsOpen = false
-    @State private var isNotchesOpen = false
     @State private var isCurvesOpen = false
     @State private var isAnglesOpen = false
     @State private var isCornerRadiiOpen = false
     @State private var openCutoutIds: Set<UUID> = []
-    @State private var openNotchIds: Set<UUID> = []
     @State private var openCurveIds: Set<UUID> = []
     @State private var openAngleIds: Set<UUID> = []
     @State private var openCornerRadiusIds: Set<UUID> = []
     @State private var showDeletePieceConfirm = false
     @State private var showDeleteCutoutsConfirm = false
-    @State private var showDeleteNotchesConfirm = false
     @State private var showDeleteCurvesConfirm = false
     @State private var showDeleteAnglesConfirm = false
     @State private var showDeleteCornerRadiiConfirm = false
@@ -205,7 +202,7 @@ struct PieceEditorView: View {
                 collapsibleSubsection(title: "Cutouts", isOpen: $isCutoutsOpen) {
                     VStack(spacing: 12) {
                         cutoutButtons
-                        let displayCutouts = Array(nonNotchCutouts.reversed())
+                        let displayCutouts = Array(piece.cutouts.reversed())
                         let cutoutCount = displayCutouts.count
                         ForEach(displayCutouts.indices, id: \.self) { index in
                             let cutout = displayCutouts[index]
@@ -215,27 +212,6 @@ struct PieceEditorView: View {
                                     get: { openCutoutIds.contains(cutout.id) },
                                     set: { isOpen in
                                         if isOpen { openCutoutIds.insert(cutout.id) } else { openCutoutIds.remove(cutout.id) }
-                                    }
-                                )
-                            ) {
-                                CutoutRow(cutout: cutout, piece: piece)
-                            }
-                        }
-                    }
-                }
-                collapsibleSubsection(title: "Notches", isOpen: $isNotchesOpen) {
-                    VStack(spacing: 12) {
-                        notchButtons
-                        let displayNotches = notchDisplayItems()
-                        ForEach(displayNotches.indices, id: \.self) { index in
-                            let item = displayNotches[index]
-                            let cutout = item.cutout
-                            collapsibleItem(
-                                title: item.label,
-                                isOpen: Binding(
-                                    get: { openNotchIds.contains(cutout.id) },
-                                    set: { isOpen in
-                                        if isOpen { openNotchIds.insert(cutout.id) } else { openNotchIds.remove(cutout.id) }
                                     }
                                 )
                             ) {
@@ -324,7 +300,7 @@ struct PieceEditorView: View {
     private var cutoutButtons: some View {
         HStack(spacing: 10) {
             Button("Add Cutout") {
-                addCutout(kind: .circle, isNotch: false)
+                addCutout(kind: .circle)
             }
             .buttonStyle(PillButtonStyle())
             Button("Delete All", role: .destructive) {
@@ -338,26 +314,6 @@ struct PieceEditorView: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("This will remove all cutouts for this piece.")
-        }
-    }
-
-    private var notchButtons: some View {
-        HStack(spacing: 10) {
-            Button("Add Notch") {
-                addCutout(kind: .rectangle, isNotch: true)
-            }
-            .buttonStyle(PillButtonStyle())
-            Button("Delete All", role: .destructive) {
-                showDeleteNotchesConfirm = true
-            }
-            .buttonStyle(PillButtonStyle(textColor: .white, backgroundColor: .red))
-            Spacer()
-        }
-        .alert("Delete All Notches?", isPresented: $showDeleteNotchesConfirm) {
-            Button("Delete", role: .destructive) { deleteAllNotches() }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("This will remove all notches for this piece.")
         }
     }
 
@@ -421,47 +377,8 @@ struct PieceEditorView: View {
         }
     }
 
-    private func addCutout(kind: CutoutKind, isNotch: Bool) {
+    private func addCutout(kind: CutoutKind) {
         let size = ShapePathBuilder.pieceSize(for: piece)
-        if isNotch {
-            let maxNotches = 4
-            let existingNotches = piece.cutouts.filter { $0.isNotch }
-            if existingNotches.count >= maxNotches {
-                return
-            }
-            let cutout = Cutout(kind: kind, width: 1, height: 1, centerX: 0.5, centerY: 0.5, isNotch: true)
-            let order = existingNotches.count % 4
-            let displaySize = ShapePathBuilder.displaySize(for: piece)
-            let displayCutout = Cutout(
-                kind: cutout.kind,
-                width: cutout.height,
-                height: cutout.width,
-                centerX: cutout.centerY,
-                centerY: cutout.centerX,
-                isNotch: cutout.isNotch
-            )
-            let halfWidth = displayCutout.width / 2
-            let halfHeight = displayCutout.height / 2
-            let displayCenter: CGPoint
-            switch order {
-            case 1:
-                displayCenter = CGPoint(x: max(displaySize.width - halfWidth, 0), y: halfHeight)
-            case 2:
-                displayCenter = CGPoint(x: max(displaySize.width - halfWidth, 0), y: max(displaySize.height - halfHeight, 0))
-            case 3:
-                displayCenter = CGPoint(x: halfWidth, y: max(displaySize.height - halfHeight, 0))
-            default:
-                displayCenter = CGPoint(x: halfWidth, y: halfHeight)
-            }
-            let rawCenter = ShapePathBuilder.rawPoint(fromDisplay: displayCenter)
-            cutout.centerX = rawCenter.x
-            cutout.centerY = rawCenter.y
-            cutout.piece = piece
-            modelContext.insert(cutout)
-            openNotchIds = [cutout.id]
-            return
-        }
-
         let cutout = Cutout(kind: kind, width: 3, height: 3, centerX: size.width / 2, centerY: size.height / 2, isNotch: false)
         cutout.piece = piece
         modelContext.insert(cutout)
@@ -469,24 +386,13 @@ struct PieceEditorView: View {
     }
 
     private func deleteAllCutouts() {
-        let targets = piece.cutouts.filter { !$0.isNotch }
+        let targets = piece.cutouts
         guard !targets.isEmpty else { return }
         for cutout in targets {
             modelContext.delete(cutout)
         }
-        piece.cutouts.removeAll { !$0.isNotch }
+        piece.cutouts.removeAll()
         openCutoutIds.removeAll()
-        markUpdated()
-    }
-
-    private func deleteAllNotches() {
-        let targets = piece.cutouts.filter { $0.isNotch }
-        guard !targets.isEmpty else { return }
-        for cutout in targets {
-            modelContext.delete(cutout)
-        }
-        piece.cutouts.removeAll { $0.isNotch }
-        openNotchIds.removeAll()
         markUpdated()
     }
 
@@ -645,86 +551,6 @@ struct PieceEditorView: View {
         }
     }
 
-    private struct NotchDisplayItem {
-        let cutout: Cutout
-        let label: String
-    }
-
-    private func notchDisplayItems() -> [NotchDisplayItem] {
-        let notches = piece.cutouts.filter { $0.isNotch }
-        let display = notches.sorted { $0.createdAt > $1.createdAt }
-        let count = display.count
-        return display.enumerated().map { index, cutout in
-            NotchDisplayItem(cutout: cutout, label: "Notch \(count - index)")
-        }
-    }
-
-    private func notchCornerIndex(for cutout: Cutout, corners: [CGPoint]) -> Int? {
-        guard !corners.isEmpty else { return nil }
-        let displayCenter = ShapePathBuilder.displayPoint(fromRaw: CGPoint(x: cutout.centerX, y: cutout.centerY))
-        var bestIndex = 0
-        var bestDistance = CGFloat.greatestFiniteMagnitude
-        for (index, corner) in corners.enumerated() {
-            let dist = distance(displayCenter, corner)
-            if dist < bestDistance {
-                bestDistance = dist
-                bestIndex = index
-            }
-        }
-        return bestIndex
-    }
-
-    private func defaultNotchDisplayCenter(for cutout: Cutout) -> CGPoint? {
-        let corners = ShapePathBuilder.cornerPoints(for: piece, includeAngles: true)
-        guard !corners.isEmpty else { return nil }
-        let existingNotches = piece.cutouts.filter { $0.isNotch }
-        let usedCornerIndices = Set(existingNotches.compactMap { notchCornerIndex(for: $0, corners: corners) })
-        let cornerIndex: Int
-        if let firstAvailable = (0..<corners.count).first(where: { !usedCornerIndices.contains($0) }) {
-            cornerIndex = firstAvailable
-        } else if let lastUsed = existingNotches.last.flatMap({ notchCornerIndex(for: $0, corners: corners) }) {
-            cornerIndex = (lastUsed + 1) % corners.count
-        } else {
-            cornerIndex = 0
-        }
-        return notchDisplayCenter(for: cutout, cornerIndex: cornerIndex, corners: corners)
-    }
-
-    private func notchDisplayCenter(for cutout: Cutout, cornerIndex: Int, corners: [CGPoint]) -> CGPoint? {
-        guard !corners.isEmpty else { return nil }
-        let displayCutout = Cutout(
-            kind: cutout.kind,
-            width: cutout.height,
-            height: cutout.width,
-            centerX: cutout.centerY,
-            centerY: cutout.centerX,
-            isNotch: cutout.isNotch
-        )
-        let halfWidth = displayCutout.width / 2
-        let halfHeight = displayCutout.height / 2
-        let count = corners.count
-        let corner = corners[cornerIndex % count]
-        let prev = corners[(cornerIndex - 1 + count) % count]
-        let next = corners[(cornerIndex + 1) % count]
-        let toPrev = unitVector(from: corner, to: prev)
-        let toNext = unitVector(from: corner, to: next)
-        return CGPoint(
-            x: corner.x + toPrev.x * halfWidth + toNext.x * halfHeight,
-            y: corner.y + toPrev.y * halfWidth + toNext.y * halfHeight
-        )
-    }
-
-    private func unitVector(from: CGPoint, to: CGPoint) -> CGPoint {
-        let dx = to.x - from.x
-        let dy = to.y - from.y
-        let length = max(sqrt(dx * dx + dy * dy), 0.0001)
-        return CGPoint(x: dx / length, y: dy / length)
-    }
-
-    private func distance(_ a: CGPoint, _ b: CGPoint) -> CGFloat {
-        sqrt(pow(a.x - b.x, 2) + pow(a.y - b.y, 2))
-    }
-
     private func updateTriangleCurveRadiusIfNeeded() {
         guard piece.shape == .rightTriangle else { return }
         let radius = triangleQuarterCircleRadius()
@@ -788,6 +614,11 @@ struct PieceEditorView: View {
 
     private func applySelectedTreatmentToAllEdges() {
         guard let selectedTreatment else { return }
+        if piece.shape == .rightTriangle {
+            for edge in edgesForShape(piece.shape) {
+                piece.setTreatment(selectedTreatment, for: edge, context: modelContext)
+            }
+        } else {
         let segments = ShapePathBuilder.boundarySegments(for: piece)
         let segmentGroups = Dictionary(grouping: segments, by: { $0.edge })
         let hasSplitSegments = segmentGroups.contains { $0.value.count > 1 }
@@ -801,6 +632,7 @@ struct PieceEditorView: View {
                 piece.setTreatment(selectedTreatment, for: edge, context: modelContext)
             }
         }
+        }
 
         let pieceSize = ShapePathBuilder.pieceSize(for: piece)
         for cutout in piece.cutouts where cutout.centerX >= 0 && cutout.centerY >= 0 {
@@ -810,6 +642,15 @@ struct PieceEditorView: View {
             }
         }
         markUpdated()
+    }
+
+    private func clearSegmentTreatments(for edge: EdgePosition) {
+        let toDelete = piece.edgeAssignments.filter { $0.segmentEdge?.edge == edge }
+        guard !toDelete.isEmpty else { return }
+        for assignment in toDelete {
+            modelContext.delete(assignment)
+        }
+        piece.edgeAssignments.removeAll { $0.segmentEdge?.edge == edge }
     }
 
     private func removeAllEdgeTreatments() {
@@ -875,40 +716,6 @@ struct PieceEditorView: View {
         }
     }
 
-
-    private var nonNotchCutouts: [Cutout] {
-        piece.cutouts.filter { !$0.isNotch }
-    }
-
-    private var notchCutouts: [Cutout] {
-        piece.cutouts
-            .filter { $0.isNotch }
-            .sorted { lhs, rhs in
-                let leftOrder = notchCornerOrder(lhs)
-                let rightOrder = notchCornerOrder(rhs)
-                if leftOrder != rightOrder {
-                    return leftOrder < rightOrder
-                }
-                return lhs.id.uuidString < rhs.id.uuidString
-            }
-    }
-
-    private func notchCornerOrder(_ cutout: Cutout) -> Int {
-        let displaySize = ShapePathBuilder.displaySize(for: piece)
-        let displayCenter = ShapePathBuilder.displayPoint(fromRaw: CGPoint(x: cutout.centerX, y: cutout.centerY))
-        let isTop = displayCenter.y <= displaySize.height / 2
-        let isLeft = displayCenter.x <= displaySize.width / 2
-        switch (isTop, isLeft) {
-        case (true, true):
-            return 0
-        case (true, false):
-            return 1
-        case (false, false):
-            return 2
-        case (false, true):
-            return 3
-        }
-    }
 
     private func cornerLabel(for index: Int) -> String {
         var value = index
@@ -1041,14 +848,28 @@ private struct FractionOption: Identifiable {
     var id: Int { numerator }
 }
 
-private func makeFractionOptions() -> [FractionOption] {
-    (0...15).map { numerator in
+private func makeFractionOptions(denominator: Int = 16) -> [FractionOption] {
+    let maxNumerator = max(denominator - 1, 0)
+    return (0...maxNumerator).map { numerator in
         if numerator == 0 {
-            return FractionOption(numerator: 0, denominator: 16, label: "0")
+            return FractionOption(numerator: 0, denominator: denominator, label: "0")
         }
-        let reduced = MeasurementParser.reducedFraction(numerator: numerator, denominator: 16)
-        return FractionOption(numerator: numerator, denominator: 16, label: "\(reduced.numerator)/\(reduced.denominator)")
+        let reduced = MeasurementParser.reducedFraction(numerator: numerator, denominator: denominator)
+        return FractionOption(numerator: numerator, denominator: denominator, label: "\(reduced.numerator)/\(reduced.denominator)")
     }
+}
+
+private func fractionSelectionComponents(_ value: Double, denominator: Int) -> (whole: Int, numerator: Int, isNegative: Bool) {
+    let isNegative = value < 0
+    let absValue = abs(value)
+    var whole = Int(floor(absValue))
+    let fraction = absValue - Double(whole)
+    var numerator = Int(round(fraction * Double(denominator)))
+    if numerator == denominator {
+        whole += 1
+        numerator = 0
+    }
+    return (whole, numerator, isNegative)
 }
 
 private struct FractionTextField: View {
@@ -1065,21 +886,32 @@ private struct FractionTextField: View {
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(Theme.secondaryText)
 
-            HStack(spacing: 10) {
+            HStack(spacing: 8) {
                 TextField("0", text: $wholeText)
                     .keyboardType(.numberPad)
-                    .frame(width: 60)
+                    .frame(width: 52)
                     .textFieldStyle(.roundedBorder)
                     .onChange(of: wholeText) { _, _ in
                         updateTextFromFields()
                     }
 
-                Picker("Fraction", selection: $selectedNumerator) {
+                Picker(selection: $selectedNumerator) {
                     ForEach(options) { option in
-                        Text(option.label).tag(option.numerator)
+                        Text(option.label)
+                            .font(.system(size: 9, weight: .semibold))
+                            .tag(option.numerator)
                     }
+                } label: {
+                    Text(selectedFractionLabelShort)
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(Theme.primaryText)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.7)
+                        .fixedSize(horizontal: true, vertical: false)
                 }
                 .pickerStyle(.menu)
+                .controlSize(.mini)
+                .frame(minWidth: 52, alignment: .leading)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .onChange(of: selectedNumerator) { _, _ in
                     updateTextFromFields()
@@ -1100,7 +932,7 @@ private struct FractionTextField: View {
             return
         }
         let value = MeasurementParser.parseInches(trimmed) ?? 0
-        let components = MeasurementParser.fractionalComponents(value, denominator: 16)
+        let components = fractionSelectionComponents(value, denominator: 16)
         wholeText = components.whole == 0 ? "" : String(components.whole)
         selectedNumerator = components.numerator
     }
@@ -1115,6 +947,12 @@ private struct FractionTextField: View {
         text = MeasurementParser.formatFractional(whole: whole, numerator: reduced.numerator, denominator: reduced.denominator, isNegative: false)
     }
 
+    private var selectedFractionLabelShort: String {
+        if selectedNumerator == 0 { return "0" }
+        let reduced = MeasurementParser.reducedFraction(numerator: selectedNumerator, denominator: 16)
+        return "\(reduced.numerator)\u{2044}\(reduced.denominator)"
+    }
+
 }
 
 private struct FractionNumberField: View {
@@ -1122,7 +960,8 @@ private struct FractionNumberField: View {
     @Binding var value: Double
     var allowNegative: Bool = false
     var showSignToggle: Bool = false
-    private let options = makeFractionOptions()
+    var denominator: Int = 16
+    private var options: [FractionOption] { makeFractionOptions(denominator: denominator) }
 
     @State private var wholeText = "0"
     @State private var selectedNumerator = 0
@@ -1133,7 +972,7 @@ private struct FractionNumberField: View {
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(Theme.secondaryText)
 
-            HStack(spacing: 10) {
+            HStack(spacing: 8) {
                 if showSignToggle {
                     Toggle(isOn: signBinding) {
                         Text("")
@@ -1144,18 +983,29 @@ private struct FractionNumberField: View {
 
                 TextField("0", text: $wholeText)
                     .keyboardType(allowNegative ? .numbersAndPunctuation : .numberPad)
-                    .frame(width: 60)
+                    .frame(width: 52)
                     .textFieldStyle(.roundedBorder)
                     .onChange(of: wholeText) { _, _ in
                         updateValueFromFields()
                     }
 
-                Picker("Fraction", selection: $selectedNumerator) {
+                Picker(selection: $selectedNumerator) {
                     ForEach(options) { option in
-                        Text(option.label).tag(option.numerator)
+                        Text(option.label)
+                            .font(.system(size: 9, weight: .semibold))
+                            .tag(option.numerator)
                     }
+                } label: {
+                    Text(selectedFractionLabelShort)
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(Theme.primaryText)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.7)
+                        .fixedSize(horizontal: true, vertical: false)
                 }
                 .pickerStyle(.menu)
+                .controlSize(.mini)
+                .frame(minWidth: 52, alignment: .leading)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .onChange(of: selectedNumerator) { _, _ in
                     updateValueFromFields()
@@ -1169,7 +1019,7 @@ private struct FractionNumberField: View {
     }
 
     private func syncFromValue() {
-        let components = MeasurementParser.fractionalComponents(value, denominator: 16)
+        let components = fractionSelectionComponents(value, denominator: denominator)
         let sign = components.isNegative ? "-" : ""
         wholeText = "\(sign)\(components.whole)"
         selectedNumerator = components.numerator
@@ -1180,10 +1030,16 @@ private struct FractionNumberField: View {
         let isNegative = allowNegative && trimmed.hasPrefix("-")
         let absText = trimmed.replacingOccurrences(of: "-", with: "")
         let whole = Int(absText) ?? 0
-        let reduced = MeasurementParser.reducedFraction(numerator: selectedNumerator, denominator: 16)
+        let reduced = MeasurementParser.reducedFraction(numerator: selectedNumerator, denominator: denominator)
         let fraction = Double(reduced.numerator) / Double(reduced.denominator)
         let magnitude = Double(whole) + fraction
         value = isNegative ? -magnitude : magnitude
+    }
+
+    private var selectedFractionLabelShort: String {
+        if selectedNumerator == 0 { return "0" }
+        let reduced = MeasurementParser.reducedFraction(numerator: selectedNumerator, denominator: denominator)
+        return "\(reduced.numerator)\u{2044}\(reduced.denominator)"
     }
 
     private var signBinding: Binding<Bool> {
@@ -1242,49 +1098,70 @@ private struct CutoutRow: View {
                 }
             }
 
-            if !cutout.isNotch {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Cutout Shape")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(Theme.secondaryText)
-                    Picker("Cutout Shape", selection: Binding(
-                        get: { cutout.kind == .circle ? HoleShape.circle : HoleShape.rectangle },
-                        set: { newValue in
-                            cutout.kind = (newValue == .circle) ? .circle : .rectangle
-                        }
-                    )) {
-                        ForEach(HoleShape.allCases, id: \.self) { shape in
-                            Text(shape.rawValue).tag(shape)
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Cutout Shape")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Theme.secondaryText)
+                Picker("Cutout Shape", selection: Binding(
+                    get: { cutout.kind == .circle ? HoleShape.circle : HoleShape.rectangle },
+                    set: { newValue in
+                        cutout.kind = (newValue == .circle) ? .circle : .rectangle
+                        if newValue == .circle {
+                            selectedCorner = nil
+                            cutout.isNotch = false
+                            cutout.cornerIndex = -1
+                            cutout.cornerAnchorX = -1
+                            cutout.cornerAnchorY = -1
+                        } else if selectedCorner != nil {
+                            updateNotchCorner()
                         }
                     }
-                    .pickerStyle(.segmented)
+                )) {
+                    ForEach(HoleShape.allCases, id: \.self) { shape in
+                        Text(shape.rawValue).tag(shape)
+                    }
+                }
+                .pickerStyle(.segmented)
 
+                HStack(spacing: 12) {
                     labeledField("Width (in)", value: $cutout.width)
-                    labeledField("Length (in)", value: $cutout.height)
+                        .frame(maxWidth: .infinity)
                     labeledField("From Left to Center (in)", value: Binding(
                         get: { cutout.centerY },
                         set: { cutout.centerY = $0 }
-                    ))
+                    ), denominator: 32)
+                    .frame(maxWidth: .infinity)
+                }
+
+                HStack(spacing: 12) {
+                    labeledField("Length (in)", value: $cutout.height)
+                        .frame(maxWidth: .infinity)
                     labeledField("From Top to Center (in)", value: Binding(
                         get: { cutout.centerX },
                         set: { cutout.centerX = $0 }
-                    ))
+                    ), denominator: 32)
+                    .frame(maxWidth: .infinity)
                 }
-            } else {
-                VStack(alignment: .leading, spacing: 8) {
-                    labeledField("Notch Width (in)", value: $cutout.width)
-                    labeledField("Notch Length (in)", value: $cutout.height)
 
-                    Text("Corner")
+                if cutout.kind != .circle {
+                    Text("Snap to Corner")
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(Theme.secondaryText)
 
                     let columns = [GridItem(.adaptive(minimum: 120), spacing: 8)]
                     LazyVGrid(columns: columns, spacing: 8) {
-                        ForEach(NotchCorner.allCases, id: \.self) { corner in
+                        ForEach(availableCorners, id: \.self) { corner in
                             sideButton(title: corner.rawValue, isSelected: selectedCorner == corner) {
-                                selectedCorner = corner
-                                updateNotchCorner()
+                                if selectedCorner == corner {
+                                    selectedCorner = nil
+                                    cutout.isNotch = false
+                                    cutout.cornerIndex = -1
+                                    cutout.cornerAnchorX = -1
+                                    cutout.cornerAnchorY = -1
+                                } else {
+                                    selectedCorner = corner
+                                    updateNotchCorner()
+                                }
                             }
                         }
                     }
@@ -1296,7 +1173,12 @@ private struct CutoutRow: View {
         .clipShape(RoundedRectangle(cornerRadius: 10))
         .onAppear {
             if cutout.isNotch, selectedCorner == nil {
-                selectedCorner = inferredNotchCorner()
+                let inferred = inferredNotchCorner()
+                if piece.shape == .rightTriangle, inferred == .bottomRight {
+                    cutout.isNotch = false
+                } else {
+                    selectedCorner = inferred
+                }
             }
         }
         .onChange(of: cutout.width) { _, _ in
@@ -1333,18 +1215,15 @@ private struct CutoutRow: View {
         }
     }
 
-    private func labeledField(_ title: String, value: Binding<Double>, allowNegative: Bool = false, showSignToggle: Bool = false) -> some View {
-        FractionNumberField(title: title, value: value, allowNegative: allowNegative, showSignToggle: showSignToggle)
+    private func labeledField(_ title: String, value: Binding<Double>, allowNegative: Bool = false, showSignToggle: Bool = false, denominator: Int = 16) -> some View {
+        FractionNumberField(title: title, value: value, allowNegative: allowNegative, showSignToggle: showSignToggle, denominator: denominator)
     }
 
     private func updateNotchCorner() {
         guard cutout.kind != .circle else { return }
-        guard let selectedCorner else {
-            cutout.centerX = -1
-            cutout.centerY = -1
-            return
-        }
+        guard let selectedCorner else { return }
 
+        cutout.isNotch = true
         let displaySize = ShapePathBuilder.displaySize(for: piece)
         let displayCutout = Cutout(
             kind: cutout.kind,
@@ -1395,6 +1274,13 @@ private struct CutoutRow: View {
         if cutout.kind == .square {
             cutout.height = cutout.width
         }
+    }
+
+    private var availableCorners: [NotchCorner] {
+        if piece.shape == .rightTriangle {
+            return [.topLeft, .topRight, .bottomLeft]
+        }
+        return NotchCorner.allCases
     }
 }
 
