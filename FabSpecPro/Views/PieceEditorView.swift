@@ -288,7 +288,7 @@ struct PieceEditorView: View {
                                     }
                                 )
                             ) {
-                                CurveRow(curve: curve, shape: piece.shape)
+                                CurveRow(curve: curve, shape: piece.shape, piece: piece)
                             }
                         }
                     }
@@ -1287,50 +1287,291 @@ private struct CutoutRow: View {
 private struct CurveRow: View {
     @Bindable var curve: CurvedEdge
     let shape: ShapeKind
+    let piece: Piece
     @Environment(\.modelContext) private var modelContext
-
-    private var edgeOptions: [(EdgePosition, String)] {
-        switch shape {
-        case .rectangle:
-            return [
-                (.top, "Top"),
-                (.right, "Right"),
-                (.bottom, "Bottom"),
-                (.left, "Left")
-            ]
-        case .rightTriangle:
-            return [
-                (.legA, "Side A"),
-                (.legB, "Side B"),
-                (.hypotenuse, "Side C")
-            ]
-        default:
-            return EdgePosition.allCases.map { ($0, $0.label) }
-        }
-    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Picker("Edge", selection: $curve.edgeRaw) {
-                    ForEach(edgeOptions, id: \.0) { edge, label in
-                        Text(label).tag(edge.rawValue)
-                    }
-                }
-                .pickerStyle(.menu)
                 Spacer()
                 Button("Delete", role: .destructive) {
                     modelContext.delete(curve)
                 }
             }
+            spanPickers
             HStack(spacing: 12) {
                 FractionNumberField(title: "Arc Depth (in)", value: $curve.radius)
                 Toggle("Concave", isOn: $curve.isConcave)
             }
         }
+        .onAppear { normalizeSpanSelection() }
+        .onChange(of: piece.widthText) { _, _ in
+            normalizeSpanSelection()
+        }
+        .onChange(of: piece.heightText) { _, _ in
+            normalizeSpanSelection()
+        }
+        .onChange(of: piece.cutouts.count) { _, _ in
+            normalizeSpanSelection()
+        }
+        .onChange(of: curve.startCornerIndex) { _, _ in
+            updateEdgeFromSpan()
+        }
+        .onChange(of: curve.endCornerIndex) { _, _ in
+            updateEdgeFromSpan()
+        }
         .padding(10)
         .background(Theme.surface)
         .clipShape(RoundedRectangle(cornerRadius: 10))
+    }
+
+    private var spanPickers: some View {
+        let labels = spanCornerLabels()
+        let labelToPolygon = spanCornerIndexMap()
+        let polygonToLabel = spanPolygonToLabelMap(from: labelToPolygon)
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 12) {
+                cornerPickerField(
+                    title: "Start",
+                    selection: spanBinding(
+                        polygonIndex: $curve.startCornerIndex,
+                        labelToPolygon: labelToPolygon,
+                        polygonToLabel: polygonToLabel
+                    ),
+                    labels: labels,
+                    dimmedIndices: []
+                )
+                cornerPickerField(
+                    title: "End",
+                    selection: spanBinding(
+                        polygonIndex: $curve.endCornerIndex,
+                        labelToPolygon: labelToPolygon,
+                        polygonToLabel: polygonToLabel
+                    ),
+                    labels: labels,
+                    dimmedIndices: []
+                )
+            }
+            let inferredEdge = inferredEdgeFromSpan()
+            let isSamePoint = curve.startCornerIndex == curve.endCornerIndex
+            let spanIsValid = inferredEdge.map { spanPathIsValid(edge: $0) } ?? false
+            if isSamePoint || (!isSamePoint && inferredEdge != nil && !spanIsValid) {
+                Text("Select a Different Start or End Point")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Color.red)
+            } else if inferredEdge == nil {
+                Text("Select a Different Start or End Point")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Color.red)
+            }
+        }
+    }
+
+    private func spanCornerLabels() -> [String] {
+        let count = spanCornerPoints().count
+        return (0..<count).map { cornerLabel(for: $0) }
+    }
+
+    private func cornerLabel(for index: Int) -> String {
+        var value = index
+        var result = ""
+        repeat {
+            let remainder = value % 26
+            let scalar = UnicodeScalar(65 + remainder)!
+            result = String(Character(scalar)) + result
+            value = (value / 26) - 1
+        } while value >= 0
+        return result
+    }
+
+    private func normalizeSpanSelection() {
+        let points = ShapePathBuilder.displayPolygonPoints(for: piece, includeAngles: true)
+        let count = points.count
+        if count <= 1 {
+            curve.startCornerIndex = 0
+            curve.endCornerIndex = 0
+            return
+        }
+        if curve.startCornerIndex < 0 || curve.startCornerIndex >= count ||
+            curve.endCornerIndex < 0 || curve.endCornerIndex >= count ||
+            curve.startCornerIndex == curve.endCornerIndex {
+            if let defaultSpan = defaultSpanForEdge(points: points) {
+                curve.startCornerIndex = defaultSpan.start
+                curve.endCornerIndex = defaultSpan.end
+            } else {
+                curve.startCornerIndex = 0
+                curve.endCornerIndex = min(1, count - 1)
+            }
+        }
+        updateEdgeFromSpan()
+    }
+
+    private func inferredEdgeFromSpan() -> EdgePosition? {
+        let points = ShapePathBuilder.displayPolygonPoints(for: piece, includeAngles: true)
+        guard points.count > 1 else { return nil }
+        let baseBounds = piece.shape == .rightTriangle ? CGRect(origin: .zero, size: ShapePathBuilder.displaySize(for: piece)) : nil
+        let startIndex = curve.startCornerIndex
+        let endIndex = curve.endCornerIndex
+        if startIndex < 0 || endIndex < 0 || startIndex >= points.count || endIndex >= points.count { return nil }
+        let start = points[startIndex]
+        let end = points[endIndex]
+        return edgeForSpanPoints(start: start, end: end, polygon: points, baseBounds: baseBounds)
+    }
+
+    private func updateEdgeFromSpan() {
+        if let edge = inferredEdgeFromSpan(), spanPathIsValid(edge: edge) {
+            curve.edgeRaw = edge.rawValue
+        }
+    }
+
+    private func defaultSpanForEdge(points: [CGPoint]) -> (start: Int, end: Int)? {
+        let segments = ShapePathBuilder.boundarySegments(for: piece)
+        let edgeSegments = segments.filter { $0.edge == curve.edge }
+        guard let first = edgeSegments.first, let last = edgeSegments.last else { return nil }
+        return (start: first.startIndex, end: last.endIndex)
+    }
+
+    private func spanPathIsValid(edge: EdgePosition) -> Bool {
+        let points = ShapePathBuilder.displayPolygonPoints(for: piece, includeAngles: true)
+        let bounds = bounds(for: points)
+        let hypotenuseBounds = piece.shape == .rightTriangle ? CGRect(origin: .zero, size: ShapePathBuilder.displaySize(for: piece)) : bounds
+        return ShapePathBuilder.spanPathIsValid(
+            points: points,
+            startIndex: curve.startCornerIndex,
+            endIndex: curve.endCornerIndex,
+            edge: edge,
+            shape: piece.shape,
+            hypotenuseBounds: hypotenuseBounds,
+            bounds: bounds
+        )
+    }
+
+    private func edgeForSpanPoints(start: CGPoint, end: CGPoint, polygon: [CGPoint], baseBounds: CGRect?) -> EdgePosition? {
+        let bounds = baseBounds ?? bounds(for: polygon)
+        let edgeTolerance: CGFloat = 0.5
+        switch piece.shape {
+        case .rightTriangle:
+            let eps: CGFloat = 0.01
+            let onLegA = abs(start.y - bounds.minY) < edgeTolerance && abs(end.y - bounds.minY) < edgeTolerance
+            if onLegA { return .legA }
+            let onLegB = abs(start.x - bounds.minX) < edgeTolerance && abs(end.x - bounds.minX) < edgeTolerance
+            if onLegB { return .legB }
+            let a = CGPoint(x: bounds.maxX, y: bounds.minY)
+            let b = CGPoint(x: bounds.minX, y: bounds.maxY)
+            let onHypotenuse = pointLineDistance(point: start, a: a, b: b) < eps &&
+                pointLineDistance(point: end, a: a, b: b) < eps
+            return onHypotenuse ? .hypotenuse : nil
+        default:
+            let minX = bounds.minX
+            let maxX = bounds.maxX
+            let minY = bounds.minY
+            let maxY = bounds.maxY
+            let onTop = abs(start.y - minY) < edgeTolerance && abs(end.y - minY) < edgeTolerance
+            if onTop { return .top }
+            let onBottom = abs(start.y - maxY) < edgeTolerance && abs(end.y - maxY) < edgeTolerance
+            if onBottom { return .bottom }
+            let onLeft = abs(start.x - minX) < edgeTolerance && abs(end.x - minX) < edgeTolerance
+            if onLeft { return .left }
+            let onRight = abs(start.x - maxX) < edgeTolerance && abs(end.x - maxX) < edgeTolerance
+            if onRight { return .right }
+            return nil
+        }
+    }
+
+    private func bounds(for points: [CGPoint]) -> CGRect {
+        guard let first = points.first else { return .zero }
+        var minX = first.x
+        var maxX = first.x
+        var minY = first.y
+        var maxY = first.y
+        for point in points.dropFirst() {
+            minX = min(minX, point.x)
+            maxX = max(maxX, point.x)
+            minY = min(minY, point.y)
+            maxY = max(maxY, point.y)
+        }
+        return CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
+    }
+
+    private func pointLineDistance(point: CGPoint, a: CGPoint, b: CGPoint) -> CGFloat {
+        let dx = b.x - a.x
+        let dy = b.y - a.y
+        let denom = max(dx * dx + dy * dy, 0.0001)
+        let t = ((point.x - a.x) * dx + (point.y - a.y) * dy) / denom
+        let proj = CGPoint(x: a.x + t * dx, y: a.y + t * dy)
+        let diffX = point.x - proj.x
+        let diffY = point.y - proj.y
+        return sqrt(diffX * diffX + diffY * diffY)
+    }
+
+    private func spanCornerPoints() -> [CGPoint] {
+        ShapePathBuilder.cornerPoints(for: piece, includeAngles: false)
+    }
+
+    private func spanCornerIndexMap() -> [Int] {
+        let labelPoints = spanCornerPoints()
+        let polygonPoints = ShapePathBuilder.displayPolygonPoints(for: piece, includeAngles: true)
+        guard !labelPoints.isEmpty, !polygonPoints.isEmpty else { return [] }
+        var used: Set<Int> = []
+        var mapping: [Int] = []
+        for labelPoint in labelPoints {
+            var bestIndex = 0
+            var bestDistance = CGFloat.greatestFiniteMagnitude
+            for (index, point) in polygonPoints.enumerated() where !used.contains(index) {
+                let dx = labelPoint.x - point.x
+                let dy = labelPoint.y - point.y
+                let distance = dx * dx + dy * dy
+                if distance < bestDistance {
+                    bestDistance = distance
+                    bestIndex = index
+                }
+            }
+            used.insert(bestIndex)
+            mapping.append(bestIndex)
+        }
+        return mapping
+    }
+
+    private func spanPolygonToLabelMap(from labelToPolygon: [Int]) -> [Int: Int] {
+        var map: [Int: Int] = [:]
+        for (labelIndex, polygonIndex) in labelToPolygon.enumerated() {
+            map[polygonIndex] = labelIndex
+        }
+        return map
+    }
+
+    private func spanBinding(
+        polygonIndex: Binding<Int>,
+        labelToPolygon: [Int],
+        polygonToLabel: [Int: Int]
+    ) -> Binding<Int> {
+        Binding(
+            get: {
+                polygonToLabel[polygonIndex.wrappedValue] ?? 0
+            },
+            set: { newLabelIndex in
+                if newLabelIndex >= 0 && newLabelIndex < labelToPolygon.count {
+                    polygonIndex.wrappedValue = labelToPolygon[newLabelIndex]
+                }
+            }
+        )
+    }
+
+    private func cornerPickerField(title: String, selection: Binding<Int>, labels: [String], dimmedIndices: Set<Int>) -> some View {
+        let options = labels.enumerated().map { (index: $0.offset, label: $0.element) }
+        return VStack(alignment: .leading, spacing: 6) {
+            Text(title)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(Theme.secondaryText)
+            Picker(title, selection: selection) {
+                ForEach(options, id: \.index) { option in
+                    let prefix = dimmedIndices.contains(option.index) ? "✓ " : ""
+                    Text(prefix + option.label)
+                        .tag(option.index)
+                }
+            }
+            .pickerStyle(.menu)
+        }
     }
 }
 
@@ -1376,10 +1617,50 @@ private struct AngleCutRow: View {
     }
 
     private func cornerRow(labels: [String]) -> some View {
-        let disabledCorners = Set(piece.cornerRadii.map { $0.cornerIndex })
+        let radiusOccupied = Set(piece.cornerRadii.map { $0.cornerIndex })
+        let curveOccupied = curveOccupiedBaseCorners()
+        let disabledCorners = radiusOccupied.union(curveOccupied)
         return HStack(spacing: 12) {
             cornerPickerField(title: "Corner", selection: $angleCut.anchorCornerIndex, labels: labels, dimmedIndices: disabledCorners)
         }
+    }
+    
+    private func curveOccupiedBaseCorners() -> Set<Int> {
+        // Map polygon indices back to base corner indices
+        let baseCorners = ShapePathBuilder.cornerPoints(for: piece, includeAngles: false)
+        let polygonPoints = ShapePathBuilder.displayPolygonPoints(for: piece, includeAngles: true)
+        guard !baseCorners.isEmpty, !polygonPoints.isEmpty else { return [] }
+        
+        // Build reverse mapping: polygon index -> base corner index (if it's a base corner)
+        var polygonToBase: [Int: Int] = [:]
+        for (baseIndex, basePoint) in baseCorners.enumerated() {
+            var bestPolygonIndex = 0
+            var bestDistance = CGFloat.greatestFiniteMagnitude
+            for (polygonIndex, polygonPoint) in polygonPoints.enumerated() {
+                let dx = basePoint.x - polygonPoint.x
+                let dy = basePoint.y - polygonPoint.y
+                let distance = dx * dx + dy * dy
+                if distance < bestDistance {
+                    bestDistance = distance
+                    bestPolygonIndex = polygonIndex
+                }
+            }
+            if bestDistance < 0.01 { // Only if it's actually the same point
+                polygonToBase[bestPolygonIndex] = baseIndex
+            }
+        }
+        
+        // Find base corners occupied by curve endpoints
+        var occupied: Set<Int> = []
+        for curve in piece.curvedEdges where curve.hasSpan {
+            if let baseIndex = polygonToBase[curve.startCornerIndex] {
+                occupied.insert(baseIndex)
+            }
+            if let baseIndex = polygonToBase[curve.endCornerIndex] {
+                occupied.insert(baseIndex)
+            }
+        }
+        return occupied
     }
 
     private var edgeDistancesRow: some View {
@@ -1489,10 +1770,50 @@ private struct CornerRadiusRow: View {
     }
 
     private func cornerRow(labels: [String]) -> some View {
-        let disabledCorners = Set(piece.angleCuts.map { $0.anchorCornerIndex })
+        let angleOccupied = Set(piece.angleCuts.map { $0.anchorCornerIndex })
+        let curveOccupied = curveOccupiedBaseCorners()
+        let disabledCorners = angleOccupied.union(curveOccupied)
         return HStack(spacing: 12) {
             cornerPickerField(title: "Corner", selection: $cornerRadius.cornerIndex, labels: labels, dimmedIndices: disabledCorners)
         }
+    }
+    
+    private func curveOccupiedBaseCorners() -> Set<Int> {
+        // Map polygon indices back to base corner indices
+        let baseCorners = ShapePathBuilder.cornerPoints(for: piece, includeAngles: false)
+        let polygonPoints = ShapePathBuilder.displayPolygonPoints(for: piece, includeAngles: true)
+        guard !baseCorners.isEmpty, !polygonPoints.isEmpty else { return [] }
+        
+        // Build reverse mapping: polygon index -> base corner index (if it's a base corner)
+        var polygonToBase: [Int: Int] = [:]
+        for (baseIndex, basePoint) in baseCorners.enumerated() {
+            var bestPolygonIndex = 0
+            var bestDistance = CGFloat.greatestFiniteMagnitude
+            for (polygonIndex, polygonPoint) in polygonPoints.enumerated() {
+                let dx = basePoint.x - polygonPoint.x
+                let dy = basePoint.y - polygonPoint.y
+                let distance = dx * dx + dy * dy
+                if distance < bestDistance {
+                    bestDistance = distance
+                    bestPolygonIndex = polygonIndex
+                }
+            }
+            if bestDistance < 0.01 { // Only if it's actually the same point
+                polygonToBase[bestPolygonIndex] = baseIndex
+            }
+        }
+        
+        // Find base corners occupied by curve endpoints
+        var occupied: Set<Int> = []
+        for curve in piece.curvedEdges where curve.hasSpan {
+            if let baseIndex = polygonToBase[curve.startCornerIndex] {
+                occupied.insert(baseIndex)
+            }
+            if let baseIndex = polygonToBase[curve.endCornerIndex] {
+                occupied.insert(baseIndex)
+            }
+        }
+        return occupied
     }
 
     private var radiusRow: some View {

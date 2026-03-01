@@ -301,4 +301,91 @@ enum GeometryHelpers {
         guard total > 0 else { return (rangeMin + rangeMax) / 2 }
         return weightedSum / total
     }
+    
+    // MARK: - Line-Line Intersection
+    
+    /// Find the intersection point of two infinite lines, each defined by a point and direction.
+    /// Returns nil if lines are parallel.
+    static func lineLineIntersection(
+        point1: CGPoint, direction1: CGPoint,
+        point2: CGPoint, direction2: CGPoint
+    ) -> CGPoint? {
+        let cross = direction1.x * direction2.y - direction1.y * direction2.x
+        if abs(cross) < 0.0001 { return nil }
+        
+        let dx = point2.x - point1.x
+        let dy = point2.y - point1.y
+        let t = (dx * direction2.y - dy * direction2.x) / cross
+        
+        return CGPoint(x: point1.x + t * direction1.x, y: point1.y + t * direction1.y)
+    }
+    
+    /// Find the intersection point of two line segments.
+    /// Returns nil if segments don't intersect.
+    static func segmentSegmentIntersection(
+        a1: CGPoint, a2: CGPoint,
+        b1: CGPoint, b2: CGPoint
+    ) -> CGPoint? {
+        let d1 = CGPoint(x: a2.x - a1.x, y: a2.y - a1.y)
+        let d2 = CGPoint(x: b2.x - b1.x, y: b2.y - b1.y)
+        let cross = d1.x * d2.y - d1.y * d2.x
+        if abs(cross) < 0.0001 { return nil }
+        
+        let dx = b1.x - a1.x
+        let dy = b1.y - a1.y
+        let t = (dx * d2.y - dy * d2.x) / cross
+        let u = (dx * d1.y - dy * d1.x) / cross
+        
+        if t >= 0 && t <= 1 && u >= 0 && u <= 1 {
+            return CGPoint(x: a1.x + t * d1.x, y: a1.y + t * d1.y)
+        }
+        return nil
+    }
+    
+    // MARK: - Arc Geometry for Corner-Based Curves
+    
+    /// Calculate the arc parameters for a curve spanning two corner points.
+    /// The curve bulges outward (or inward if concave) perpendicular to the chord.
+    /// Returns the control point for a quadratic Bezier approximation and the tangent points
+    /// where lines should meet the arc.
+    static func arcGeometryForCornerCurve(
+        startPoint: CGPoint,
+        endPoint: CGPoint,
+        radius: CGFloat,
+        isConcave: Bool
+    ) -> (controlPoint: CGPoint, tangentStart: CGPoint, tangentEnd: CGPoint)? {
+        let chordLength = distance(startPoint, endPoint)
+        guard chordLength > 0.001 else { return nil }
+        
+        // Midpoint of the chord
+        let midpoint = CGPoint(
+            x: (startPoint.x + endPoint.x) / 2,
+            y: (startPoint.y + endPoint.y) / 2
+        )
+        
+        // Direction along the chord
+        let chordDir = unitVector(from: startPoint, to: endPoint)
+        
+        // Perpendicular direction (outward normal)
+        // For convex, bulge outward; for concave, bulge inward
+        let perpDir: CGPoint
+        if isConcave {
+            perpDir = CGPoint(x: chordDir.y, y: -chordDir.x)
+        } else {
+            perpDir = CGPoint(x: -chordDir.y, y: chordDir.x)
+        }
+        
+        // For a quadratic Bezier curve, the control point offset from midpoint
+        // is approximately 2 * radius for a good arc approximation
+        let controlOffset = radius * 2
+        let controlPoint = CGPoint(
+            x: midpoint.x + perpDir.x * controlOffset,
+            y: midpoint.y + perpDir.y * controlOffset
+        )
+        
+        // For tangent points, we use the start and end points directly
+        // since the incoming/outgoing lines will connect to these points
+        // The Bezier curve naturally provides smooth tangent transitions
+        return (controlPoint: controlPoint, tangentStart: startPoint, tangentEnd: endPoint)
+    }
 }

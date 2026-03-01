@@ -9,6 +9,8 @@ struct AngleSegment {
 struct BoundarySegment {
     let edge: EdgePosition
     let index: Int
+    let startIndex: Int
+    let endIndex: Int
     let start: CGPoint
     let end: CGPoint
 }
@@ -94,32 +96,33 @@ enum ShapePathBuilder {
         let minY = points.map(\.y).min() ?? 0
         let maxY = points.map(\.y).max() ?? 0
 
-        var rawSegments: [(EdgePosition, CGPoint, CGPoint)] = []
+        var rawSegments: [(EdgePosition, Int, Int, CGPoint, CGPoint)] = []
         for i in 0..<points.count {
             let a = points[i]
-            let b = points[(i + 1) % points.count]
+            let nextIndex = (i + 1) % points.count
+            let b = points[nextIndex]
             let dx = b.x - a.x
             let dy = b.y - a.y
             if piece.shape == .rightTriangle {
                 if abs(dy) < eps, abs(a.y - minY) < eps {
-                    rawSegments.append((.legA, a, b))
+                    rawSegments.append((.legA, i, nextIndex, a, b))
                 } else if abs(dx) < eps, abs(a.x - minX) < eps {
-                    rawSegments.append((.legB, a, b))
+                    rawSegments.append((.legB, i, nextIndex, a, b))
                 } else if segmentIsOnHypotenuse(start: a, end: b, bounds: CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)) {
-                    rawSegments.append((.hypotenuse, a, b))
+                    rawSegments.append((.hypotenuse, i, nextIndex, a, b))
                 }
             } else {
                 if abs(dy) < eps {
                     if abs(a.y - minY) < eps {
-                        rawSegments.append((.top, a, b))
+                        rawSegments.append((.top, i, nextIndex, a, b))
                     } else if abs(a.y - maxY) < eps {
-                        rawSegments.append((.bottom, a, b))
+                        rawSegments.append((.bottom, i, nextIndex, a, b))
                     }
                 } else if abs(dx) < eps {
                     if abs(a.x - minX) < eps {
-                        rawSegments.append((.left, a, b))
+                        rawSegments.append((.left, i, nextIndex, a, b))
                     } else if abs(a.x - maxX) < eps {
-                        rawSegments.append((.right, a, b))
+                        rawSegments.append((.right, i, nextIndex, a, b))
                     }
                 }
             }
@@ -131,19 +134,19 @@ enum ShapePathBuilder {
             let edgeSegments = rawSegments.filter { $0.0 == edge }.sorted { lhs, rhs in
                 switch edge {
                 case .top, .bottom, .legA:
-                    return min(lhs.1.x, lhs.2.x) < min(rhs.1.x, rhs.2.x)
+                    return min(lhs.3.x, lhs.4.x) < min(rhs.3.x, rhs.4.x)
                 case .left, .right, .legB:
-                    return min(lhs.1.y, lhs.2.y) < min(rhs.1.y, rhs.2.y)
+                    return min(lhs.3.y, lhs.4.y) < min(rhs.3.y, rhs.4.y)
                 case .hypotenuse:
-                    let midL = CGPoint(x: (lhs.1.x + lhs.2.x) / 2, y: (lhs.1.y + lhs.2.y) / 2)
-                    let midR = CGPoint(x: (rhs.1.x + rhs.2.x) / 2, y: (rhs.1.y + rhs.2.y) / 2)
+                    let midL = CGPoint(x: (lhs.3.x + lhs.4.x) / 2, y: (lhs.3.y + lhs.4.y) / 2)
+                    let midR = CGPoint(x: (rhs.3.x + rhs.4.x) / 2, y: (rhs.3.y + rhs.4.y) / 2)
                     let tL = ((maxX - midL.x) / max(maxX - minX, 0.0001))
                     let tR = ((maxX - midR.x) / max(maxX - minX, 0.0001))
                     return tL < tR
                 }
             }
             for (index, segment) in edgeSegments.enumerated() {
-                segments.append(BoundarySegment(edge: segment.0, index: index, start: segment.1, end: segment.2))
+                segments.append(BoundarySegment(edge: segment.0, index: index, startIndex: segment.1, endIndex: segment.2, start: segment.3, end: segment.4))
             }
         }
         return segments
@@ -166,6 +169,8 @@ enum ShapePathBuilder {
             
             // Handle curves + radii together, or just one, or neither
             if !activeCurves.isEmpty {
+                // Always use the proven edge-based curvedPolygonPath
+                // Corner indices are used to set the edge property, but rendering uses edge-based approach
                 let curvedPath = curvedPolygonPath(points: displayPoints, shape: .rectangle, curves: activeCurves, baseBounds: nil)
                 if !cornerRadii.isEmpty {
                     return applyCornerRadiiToPath(curvedPath, cornerRadii: cornerRadii, piece: piece, displayPoints: displayPoints)
@@ -187,6 +192,8 @@ enum ShapePathBuilder {
             
             // Handle curves + radii together, or just one, or neither
             if !activeCurves.isEmpty {
+                // Always use the proven edge-based curvedPolygonPath
+                // Corner indices are used to set the edge property, but rendering uses edge-based approach
                 let curvedPath = curvedPolygonPath(points: displayPoints, shape: .rightTriangle, curves: activeCurves, baseBounds: baseBounds)
                 if !cornerRadii.isEmpty {
                     return applyCornerRadiiToPath(curvedPath, cornerRadii: cornerRadii, piece: piece, displayPoints: displayPoints)
@@ -209,6 +216,7 @@ enum ShapePathBuilder {
                 let displayPoints = base.map { displayPoint(fromRaw: $0) }
                 
                 if !activeCurves.isEmpty {
+                    // Always use the proven edge-based curvedRectanglePath
                     let size = displaySize(for: piece)
                     let curvedPath = curvedRectanglePath(width: size.width, height: size.height, curves: activeCurves)
                     if !cornerRadii.isEmpty {
@@ -227,6 +235,7 @@ enum ShapePathBuilder {
                 let displayPoints = base.map { displayPoint(fromRaw: $0) }
                 
                 if !activeCurves.isEmpty {
+                    // Always use the proven edge-based curvedRightTriangle
                     let size = displaySize(for: piece)
                     let curvedPath = curvedRightTriangle(width: size.width, height: size.height, curves: activeCurves)
                     if !cornerRadii.isEmpty {
@@ -250,10 +259,14 @@ enum ShapePathBuilder {
     /// Applies corner radii to corners of a path that aren't affected by curves.
     /// This allows curves and corner radii to coexist on different parts of the same piece.
     private static func applyCornerRadiiToPath(_ basePath: Path, cornerRadii: [CornerRadius], piece: Piece, displayPoints: [CGPoint]) -> Path {
-        // For now, return the curved path as-is when both features exist.
-        // The corner radii on non-curved corners are already filtered out from conflicting with curves.
-        // A full implementation would trace the curved path and add arcs at the non-curved corners.
-        // This requires more complex path manipulation, but at least now the features don't block each other.
+        // Get the base corner count for the shape
+        let baseCornerCount = pieceCornerCount(for: piece)
+        
+        // If the polygon has been modified by cutouts/notches (more points than base corners),
+        // the unified renderer can't handle it safely - return the curved path as-is
+        if displayPoints.count > baseCornerCount {
+            return basePath
+        }
         
         // Get the base corners for reference
         let baseCorners = cornerPoints(for: piece, includeAngles: false)
@@ -1355,6 +1368,17 @@ enum ShapePathBuilder {
         return CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
     }
 
+    private static func polygonIsClockwise(_ points: [CGPoint]) -> Bool {
+        guard points.count >= 3 else { return true }
+        var area: CGFloat = 0
+        for i in 0..<points.count {
+            let p1 = points[i]
+            let p2 = points[(i + 1) % points.count]
+            area += (p1.x * p2.y) - (p2.x * p1.y)
+        }
+        return area > 0
+    }
+
     private static func reorderCornersClockwise(_ points: [CGPoint]) -> [CGPoint] {
         guard points.count > 2 else { return points }
         var ordered = points
@@ -1805,13 +1829,18 @@ enum ShapePathBuilder {
 
     private static func curvedPolygonPath(points: [CGPoint], shape: ShapeKind, curves: [CurvedEdge], baseBounds: CGRect?) -> Path {
         guard points.count >= 2 else { return Path() }
-        let curveMap = curveLookup(curves)
+        let curvesByEdge = Dictionary(grouping: curves, by: { $0.edge })
+        let edgeCurves = curvesByEdge.compactMapValues { curves in
+            curves.first(where: { !$0.hasSpan && $0.radius > 0 })
+        }
         let bounds = polygonBounds(points)
         let hypotenuseBounds = baseBounds ?? bounds
         let eps: CGFloat = 0.01
+        _ = polygonIsClockwise(points)
+        var drawPoints = points
         var hypotenuseSegmentIndex: Int?
 
-        if shape == .rightTriangle, curveMap[.hypotenuse] != nil {
+        if shape == .rightTriangle, (curvesByEdge[.hypotenuse]?.contains { $0.radius > 0 } ?? false) {
             let a = CGPoint(x: hypotenuseBounds.maxX, y: hypotenuseBounds.minY)
             let b = CGPoint(x: hypotenuseBounds.minX, y: hypotenuseBounds.maxY)
             var bestDistance = CGFloat.greatestFiniteMagnitude
@@ -1831,26 +1860,126 @@ enum ShapePathBuilder {
                 }
             }
         }
-        var controlOverrides: [EdgePosition: CGPoint] = [:]
-        for (edge, curve) in curveMap where curve.radius > 0 {
+        
+        // Edge-based control overrides for non-span curves
+        var edgeControlOverrides: [EdgePosition: CGPoint] = [:]
+        for (edge, curve) in edgeCurves where curve.radius > 0 {
             if let geometry = fullEdgeGeometry(edge: edge, bounds: bounds, hypotenuseBounds: hypotenuseBounds, shape: shape) {
                 let mid = CGPoint(x: (geometry.start.x + geometry.end.x) / 2, y: (geometry.start.y + geometry.end.y) / 2)
                 let direction = curve.isConcave ? -1.0 : 1.0
-                controlOverrides[edge] = CGPoint(
+                edgeControlOverrides[edge] = CGPoint(
                     x: mid.x + geometry.normal.x * curve.radius * 2 * direction,
                     y: mid.y + geometry.normal.y * curve.radius * 2 * direction
                 )
             }
         }
+        
+        // Span-based control overrides for span curves
+        var spanControlOverrides: [UUID: [Int: CGPoint]] = [:]
+        let pointCount = points.count
+        for curve in curves where curve.hasSpan && curve.radius > 0 {
+            guard pointCount > 1 else { continue }
+            let startIndex = normalizedIndex(curve.startCornerIndex, count: pointCount)
+            let endIndex = normalizedIndex(curve.endCornerIndex, count: pointCount)
+            if startIndex == endIndex { continue }
+            if startIndex < 0 || endIndex < 0 || startIndex >= pointCount || endIndex >= pointCount { continue }
+            let spanStart = points[startIndex]
+            let spanEnd = points[endIndex]
+            guard let spanEdge = edgeForSpanPoints(
+                start: spanStart,
+                end: spanEnd,
+                points: points,
+                bounds: bounds,
+                hypotenuseBounds: hypotenuseBounds,
+                shape: shape
+            ) else { continue }
+            guard let fullGeometry = fullEdgeGeometry(edge: spanEdge, bounds: bounds, hypotenuseBounds: hypotenuseBounds, shape: shape) else { continue }
+            let edgeSegments = edgeSegmentsForPoints(
+                points: points,
+                edge: spanEdge,
+                shape: shape,
+                bounds: bounds,
+                hypotenuseBounds: hypotenuseBounds
+            )
+            guard !edgeSegments.isEmpty else { continue }
+            guard spanPathIsValid(
+                points: points,
+                startIndex: startIndex,
+                endIndex: endIndex,
+                edge: spanEdge,
+                shape: shape,
+                hypotenuseBounds: hypotenuseBounds,
+                bounds: bounds
+            ) else { continue }
+            let spanDx = spanEnd.x - spanStart.x
+            let spanDy = spanEnd.y - spanStart.y
+            let spanDenom = spanDx * spanDx + spanDy * spanDy
+            guard spanDenom > 0.0001 else { continue }
+
+            func spanParam(_ point: CGPoint) -> CGFloat {
+                return ((point.x - spanStart.x) * spanDx + (point.y - spanStart.y) * spanDy) / spanDenom
+            }
+
+            let sStart = spanParam(spanStart)
+            let sEnd = spanParam(spanEnd)
+            let sMin = min(sStart, sEnd)
+            let sMax = max(sStart, sEnd)
+            let direction = curve.isConcave ? -1.0 : 1.0
+
+            if abs(sMax - sMin) < 0.0001 {
+                continue
+            }
+
+            let mid = CGPoint(x: (spanStart.x + spanEnd.x) / 2, y: (spanStart.y + spanEnd.y) / 2)
+            let control = CGPoint(
+                x: mid.x + fullGeometry.normal.x * curve.radius * 2 * direction,
+                y: mid.y + fullGeometry.normal.y * curve.radius * 2 * direction
+            )
+
+            for edgeSegment in edgeSegments {
+                let segT0 = spanParam(edgeSegment.start)
+                let segT1 = spanParam(edgeSegment.end)
+                let segMin = min(segT0, segT1)
+                let segMax = max(segT0, segT1)
+                if segMax < sMin || segMin > sMax { continue }
+                let t0 = (segT0 - sMin) / max(sMax - sMin, 0.0001)
+                let t1 = (segT1 - sMin) / max(sMax - sMin, 0.0001)
+                let segment = quadSubsegment(
+                    start: spanStart,
+                    control: control,
+                    end: spanEnd,
+                    t0: t0,
+                    t1: t1
+                )
+                spanControlOverrides[curve.id, default: [:]][edgeSegment.startIndex] = segment.control
+            }
+
+            for pointIndex in 0..<points.count {
+                let point = points[pointIndex]
+                let t = spanParam(point)
+                if t < sMin - 0.0001 || t > sMax + 0.0001 { continue }
+                switch spanEdge {
+                case .left, .right, .legB:
+                    if abs(point.x - fullGeometry.start.x) > 1.0 { continue }
+                case .top, .bottom, .legA:
+                    if abs(point.y - fullGeometry.start.y) > 1.0 { continue }
+                case .hypotenuse:
+                    continue
+                }
+                drawPoints[pointIndex] = quadPoint(start: spanStart, control: control, end: spanEnd, t: t)
+            }
+        }
 
         var path = Path()
-        path.move(to: points[0])
+        path.move(to: drawPoints[0])
         let count = points.count
         for index in 0..<count {
-            let start = points[index]
-            let end = points[(index + 1) % count]
-            var edge = edgeForSegment(start: start, end: end, bounds: bounds, shape: shape, hypotenuseBounds: hypotenuseBounds)
-            if edge == nil, shape == .rightTriangle, curveMap[.hypotenuse] != nil, hypotenuseSegmentIndex == index {
+            let start = drawPoints[index]
+            let end = drawPoints[(index + 1) % count]
+            let originalStart = points[index]
+            let originalEnd = points[(index + 1) % count]
+            var edge = edgeForSegment(start: originalStart, end: originalEnd, bounds: bounds, shape: shape, hypotenuseBounds: hypotenuseBounds)
+            if edge == nil, shape == .rightTriangle, (curvesByEdge[.hypotenuse]?.contains { $0.radius > 0 } ?? false), hypotenuseSegmentIndex == index {
                 edge = .hypotenuse
             }
             guard let resolvedEdge = edge else {
@@ -1858,25 +1987,52 @@ enum ShapePathBuilder {
                 continue
             }
             let normal = edgeNormal(for: resolvedEdge, start: start, end: end)
-            var segmentControl: CGPoint? = controlOverrides[resolvedEdge]
-            if let curve = curveMap[resolvedEdge], curve.radius > 0,
-               let fullGeometry = fullEdgeGeometry(edge: resolvedEdge, bounds: bounds, hypotenuseBounds: hypotenuseBounds, shape: shape),
-               let baseControl = controlOverrides[resolvedEdge] {
-                let t0 = tForEdge(point: start, geometry: fullGeometry, edge: resolvedEdge)
-                let t1 = tForEdge(point: end, geometry: fullGeometry, edge: resolvedEdge)
-                let segment = quadSubsegment(
-                    start: fullGeometry.start,
-                    control: baseControl,
-                    end: fullGeometry.end,
-                    t0: t0,
-                    t1: t1
-                )
-                segmentControl = segment.control
+            var segmentControl: CGPoint? = nil
+            var curveForSegment: CurvedEdge? = nil
+            if let curvesForEdge = curvesByEdge[resolvedEdge] {
+                if let spanCurve = curvesForEdge.first(where: { $0.hasSpan && spanControlOverrides[$0.id]?[index] != nil }) {
+                    curveForSegment = spanCurve
+                    segmentControl = spanControlOverrides[spanCurve.id]?[index]
+                } else if let edgeCurve = curvesForEdge.first(where: { !$0.hasSpan }) {
+                    curveForSegment = edgeCurve
+                    if let fullGeometry = fullEdgeGeometry(edge: resolvedEdge, bounds: bounds, hypotenuseBounds: hypotenuseBounds, shape: shape),
+                       let baseControl = edgeControlOverrides[resolvedEdge] {
+                        let t0 = tForEdge(point: originalStart, geometry: fullGeometry, edge: resolvedEdge)
+                        let t1 = tForEdge(point: originalEnd, geometry: fullGeometry, edge: resolvedEdge)
+                        let segment = quadSubsegment(
+                            start: fullGeometry.start,
+                            control: baseControl,
+                            end: fullGeometry.end,
+                            t0: t0,
+                            t1: t1
+                        )
+                        segmentControl = segment.control
+                    }
+                }
             }
-            addEdge(path: &path, from: start, to: end, edge: resolvedEdge, curveMap: curveMap, normal: normal, controlOverride: segmentControl)
+            addEdgeWithCurve(path: &path, from: start, to: end, curve: curveForSegment, normal: normal, controlOverride: segmentControl)
         }
         path.closeSubpath()
         return path
+    }
+    
+    private static func addEdgeWithCurve(path: inout Path, from: CGPoint, to: CGPoint, curve: CurvedEdge?, normal: CGPoint, controlOverride: CGPoint?) {
+        guard let curve, curve.radius > 0 else {
+            path.addLine(to: to)
+            return
+        }
+        let control: CGPoint
+        if let controlOverride {
+            control = controlOverride
+        } else {
+            let mid = CGPoint(x: (from.x + to.x) / 2, y: (from.y + to.y) / 2)
+            let direction = curve.isConcave ? -1.0 : 1.0
+            control = CGPoint(
+                x: mid.x + normal.x * curve.radius * 2 * direction,
+                y: mid.y + normal.y * curve.radius * 2 * direction
+            )
+        }
+        path.addQuadCurve(to: to, control: control)
     }
 
     private static func fullEdgeGeometry(edge: EdgePosition, bounds: CGRect, hypotenuseBounds: CGRect, shape: ShapeKind) -> (start: CGPoint, end: CGPoint, normal: CGPoint)? {
@@ -2045,5 +2201,274 @@ enum ShapePathBuilder {
             let direction = unitVector(from: start, to: end)
             return CGPoint(x: direction.y, y: -direction.x)
         }
+    }
+    
+    // MARK: - Span Curve Support
+    
+    private static func quadPoint(start: CGPoint, control: CGPoint, end: CGPoint, t: CGFloat) -> CGPoint {
+        let clamped = min(max(t, 0), 1)
+        let inv = 1 - clamped
+        let x = inv * inv * start.x + 2 * inv * clamped * control.x + clamped * clamped * end.x
+        let y = inv * inv * start.y + 2 * inv * clamped * control.y + clamped * clamped * end.y
+        return CGPoint(x: x, y: y)
+    }
+    
+    private static func edgeForSpanPoints(
+        start: CGPoint,
+        end: CGPoint,
+        points: [CGPoint],
+        bounds: CGRect,
+        hypotenuseBounds: CGRect,
+        shape: ShapeKind
+    ) -> EdgePosition? {
+        let edgeTolerance: CGFloat = 0.5
+        switch shape {
+        case .rightTriangle:
+            let eps: CGFloat = 0.01
+            let onLegA = abs(start.y - hypotenuseBounds.minY) < edgeTolerance && abs(end.y - hypotenuseBounds.minY) < edgeTolerance
+            if onLegA { return .legA }
+            let onLegB = abs(start.x - hypotenuseBounds.minX) < edgeTolerance && abs(end.x - hypotenuseBounds.minX) < edgeTolerance
+            if onLegB { return .legB }
+            let a = CGPoint(x: hypotenuseBounds.maxX, y: hypotenuseBounds.minY)
+            let b = CGPoint(x: hypotenuseBounds.minX, y: hypotenuseBounds.maxY)
+            let onHypotenuse = pointLineDistance(point: start, a: a, b: b) < eps &&
+                pointLineDistance(point: end, a: a, b: b) < eps
+            return onHypotenuse ? .hypotenuse : nil
+        default:
+            let minX = bounds.minX
+            let maxX = bounds.maxX
+            let minY = bounds.minY
+            let maxY = bounds.maxY
+            let onTop = abs(start.y - minY) < edgeTolerance && abs(end.y - minY) < edgeTolerance
+            if onTop { return .top }
+            let onBottom = abs(start.y - maxY) < edgeTolerance && abs(end.y - maxY) < edgeTolerance
+            if onBottom { return .bottom }
+            let onLeft = abs(start.x - minX) < edgeTolerance && abs(end.x - minX) < edgeTolerance
+            if onLeft { return .left }
+            let onRight = abs(start.x - maxX) < edgeTolerance && abs(end.x - maxX) < edgeTolerance
+            if onRight { return .right }
+            return edgeForSpanPointsBySegments(
+                start: start,
+                end: end,
+                points: points,
+                bounds: bounds,
+                hypotenuseBounds: hypotenuseBounds,
+                shape: shape,
+                tolerance: edgeTolerance
+            )
+        }
+    }
+
+    private static func edgeForSpanPointsBySegments(
+        start: CGPoint,
+        end: CGPoint,
+        points: [CGPoint],
+        bounds: CGRect,
+        hypotenuseBounds: CGRect,
+        shape: ShapeKind,
+        tolerance: CGFloat
+    ) -> EdgePosition? {
+        guard points.count > 1 else { return nil }
+        let count = points.count
+        var bestStart: (edge: EdgePosition, distance: CGFloat)?
+        var bestEnd: (edge: EdgePosition, distance: CGFloat)?
+        for index in 0..<count {
+            let segStart = points[index]
+            let segEnd = points[(index + 1) % count]
+            guard let edge = edgeForSegment(
+                start: segStart,
+                end: segEnd,
+                bounds: bounds,
+                shape: shape,
+                hypotenuseBounds: hypotenuseBounds
+            ) else { continue }
+            let distStart = pointSegmentDistance(point: start, a: segStart, b: segEnd)
+            let distEnd = pointSegmentDistance(point: end, a: segStart, b: segEnd)
+            if distStart < (bestStart?.distance ?? .greatestFiniteMagnitude) {
+                bestStart = (edge, distStart)
+            }
+            if distEnd < (bestEnd?.distance ?? .greatestFiniteMagnitude) {
+                bestEnd = (edge, distEnd)
+            }
+        }
+        guard let startEdge = bestStart, let endEdge = bestEnd else { return nil }
+        if startEdge.edge == endEdge.edge && startEdge.distance <= tolerance && endEdge.distance <= tolerance {
+            return startEdge.edge
+        }
+        return nil
+    }
+
+    private static func pointSegmentDistance(point: CGPoint, a: CGPoint, b: CGPoint) -> CGFloat {
+        let dx = b.x - a.x
+        let dy = b.y - a.y
+        let denom = dx * dx + dy * dy
+        if denom < 0.0001 {
+            return distance(point, a)
+        }
+        let t = max(0, min(1, ((point.x - a.x) * dx + (point.y - a.y) * dy) / denom))
+        let proj = CGPoint(x: a.x + t * dx, y: a.y + t * dy)
+        return distance(point, proj)
+    }
+
+    private static func edgeSegmentsForPoints(
+        points: [CGPoint],
+        edge: EdgePosition,
+        shape: ShapeKind,
+        bounds: CGRect,
+        hypotenuseBounds: CGRect
+    ) -> [BoundarySegment] {
+        guard points.count > 1 else { return [] }
+        let eps: CGFloat = 0.001
+        var rawSegments: [(EdgePosition, Int, Int, CGPoint, CGPoint)] = []
+        for i in 0..<points.count {
+            let a = points[i]
+            let b = points[(i + 1) % points.count]
+            let dx = b.x - a.x
+            let dy = b.y - a.y
+            if shape == .rightTriangle {
+                if abs(dy) < eps, abs(a.y - bounds.minY) < eps {
+                    rawSegments.append((.legA, i, (i + 1) % points.count, a, b))
+                } else if abs(dx) < eps, abs(a.x - bounds.minX) < eps {
+                    rawSegments.append((.legB, i, (i + 1) % points.count, a, b))
+                } else if segmentIsOnHypotenuse(start: a, end: b, bounds: hypotenuseBounds) {
+                    rawSegments.append((.hypotenuse, i, (i + 1) % points.count, a, b))
+                }
+            } else {
+                if abs(dy) < eps {
+                    if abs(a.y - bounds.minY) < eps {
+                        rawSegments.append((.top, i, (i + 1) % points.count, a, b))
+                    } else if abs(a.y - bounds.maxY) < eps {
+                        rawSegments.append((.bottom, i, (i + 1) % points.count, a, b))
+                    }
+                } else if abs(dx) < eps {
+                    if abs(a.x - bounds.minX) < eps {
+                        rawSegments.append((.left, i, (i + 1) % points.count, a, b))
+                    } else if abs(a.x - bounds.maxX) < eps {
+                        rawSegments.append((.right, i, (i + 1) % points.count, a, b))
+                    }
+                }
+            }
+        }
+        let edgeSegments = rawSegments.filter { $0.0 == edge }.sorted { lhs, rhs in
+            switch edge {
+            case .top, .bottom, .legA:
+                return min(lhs.3.x, lhs.4.x) < min(rhs.3.x, rhs.4.x)
+            case .left, .right, .legB:
+                return min(lhs.3.y, lhs.4.y) < min(rhs.3.y, rhs.4.y)
+            case .hypotenuse:
+                let midL = CGPoint(x: (lhs.3.x + lhs.4.x) / 2, y: (lhs.3.y + lhs.4.y) / 2)
+                let midR = CGPoint(x: (rhs.3.x + rhs.4.x) / 2, y: (rhs.3.y + rhs.4.y) / 2)
+                let tL = ((hypotenuseBounds.maxX - midL.x) / max(hypotenuseBounds.maxX - hypotenuseBounds.minX, 0.0001))
+                let tR = ((hypotenuseBounds.maxX - midR.x) / max(hypotenuseBounds.maxX - hypotenuseBounds.minX, 0.0001))
+                return tL < tR
+            }
+        }
+        return edgeSegments.enumerated().map { index, segment in
+            BoundarySegment(edge: segment.0, index: index, startIndex: segment.1, endIndex: segment.2, start: segment.3, end: segment.4)
+        }
+    }
+
+    static func spanPathIsValid(
+        points: [CGPoint],
+        startIndex: Int,
+        endIndex: Int,
+        edge: EdgePosition,
+        shape: ShapeKind,
+        hypotenuseBounds: CGRect,
+        bounds: CGRect
+    ) -> Bool {
+        guard points.count > 1 else { return false }
+        let count = points.count
+        if startIndex < 0 || endIndex < 0 || startIndex >= count || endIndex >= count { return false }
+        if startIndex == endIndex { return false }
+
+        let edgeSegments = edgeSegmentsForPoints(
+            points: points,
+            edge: edge,
+            shape: shape,
+            bounds: bounds,
+            hypotenuseBounds: hypotenuseBounds
+        )
+        guard !edgeSegments.isEmpty else { return false }
+        let startPoint = points[startIndex]
+        let endPoint = points[endIndex]
+        if !pointIsOnEdgeSegments(point: startPoint, segments: edgeSegments) ||
+            !pointIsOnEdgeSegments(point: endPoint, segments: edgeSegments) {
+            return false
+        }
+        var edgeEndpoints: Set<Int> = []
+        for segment in edgeSegments {
+            edgeEndpoints.insert(segment.startIndex)
+            edgeEndpoints.insert(segment.endIndex)
+        }
+        if !edgeEndpoints.contains(startIndex) || !edgeEndpoints.contains(endIndex) {
+            return false
+        }
+
+        func segmentEdge(_ a: CGPoint, _ b: CGPoint) -> EdgePosition? {
+            return edgeForSegment(start: a, end: b, bounds: bounds, shape: shape, hypotenuseBounds: hypotenuseBounds)
+        }
+
+        func validate(step: Int) -> Bool {
+            var index = startIndex
+            var hasTarget = false
+            var spanIndices: [Int] = []
+            while index != endIndex {
+                let next = (index + step + count) % count
+                spanIndices.append(index)
+                let segStart = step > 0 ? points[index] : points[next]
+                let segEnd = step > 0 ? points[next] : points[index]
+                if let segEdge = segmentEdge(segStart, segEnd) {
+                    if segEdge != edge { return false }
+                    hasTarget = true
+                }
+                index = next
+            }
+            spanIndices.append(endIndex)
+            guard hasTarget else { return false }
+            return spanCoversWholeEdgeSegments(
+                indices: spanIndices,
+                edgeSegments: edgeSegments
+            )
+        }
+
+        return validate(step: 1) || validate(step: -1)
+    }
+
+    private static func spanCoversWholeEdgeSegments(indices: [Int], edgeSegments: [BoundarySegment]) -> Bool {
+        guard indices.count >= 2 else { return false }
+        let spanSet = Set(indices)
+        for segment in edgeSegments {
+            let a = segment.startIndex
+            let b = segment.endIndex
+            let hasA = spanSet.contains(a)
+            let hasB = spanSet.contains(b)
+            if hasA != hasB {
+                return false
+            }
+        }
+        return true
+    }
+
+    private static func pointIsOnEdgeSegments(point: CGPoint, segments: [BoundarySegment]) -> Bool {
+        let eps: CGFloat = 0.01
+        for segment in segments {
+            let dx = segment.end.x - segment.start.x
+            let dy = segment.end.y - segment.start.y
+            if abs(dx) < eps {
+                let within = point.y >= min(segment.start.y, segment.end.y) - eps &&
+                    point.y <= max(segment.start.y, segment.end.y) + eps
+                if abs(point.x - segment.start.x) < eps && within {
+                    return true
+                }
+            } else if abs(dy) < eps {
+                let within = point.x >= min(segment.start.x, segment.end.x) - eps &&
+                    point.x <= max(segment.start.x, segment.end.x) + eps
+                if abs(point.y - segment.start.y) < eps && within {
+                    return true
+                }
+            }
+        }
+        return false
     }
 }

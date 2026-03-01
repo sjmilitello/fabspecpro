@@ -45,16 +45,44 @@ final class CurvedEdge {
     var radius: Double
     var isConcave: Bool
     var piece: Piece?
+    
+    /// Start corner index for corner-based curve selection (-1 means use legacy edge-based)
+    var startCornerIndex: Int = -1
+    /// End corner index for corner-based curve selection (-1 means use legacy edge-based)
+    var endCornerIndex: Int = -1
 
+    /// Legacy initializer for edge-based curves (backward compatibility)
     init(edge: EdgePosition, radius: Double, isConcave: Bool) {
         self.id = UUID()
         self.edgeRaw = edge.rawValue
         self.radius = radius
         self.isConcave = isConcave
+        self.startCornerIndex = -1
+        self.endCornerIndex = -1
+    }
+    
+    /// New initializer for corner-based curves
+    init(startCornerIndex: Int, endCornerIndex: Int, radius: Double, isConcave: Bool, edge: EdgePosition) {
+        self.id = UUID()
+        self.startCornerIndex = startCornerIndex
+        self.endCornerIndex = endCornerIndex
+        self.radius = radius
+        self.isConcave = isConcave
+        self.edgeRaw = edge.rawValue
     }
 
     var edge: EdgePosition {
         get { EdgePosition(rawValue: edgeRaw) ?? .top }
         set { edgeRaw = newValue.rawValue }
+    }
+    
+    /// Returns true if this curve uses the new corner-based selection
+    var usesCornerIndices: Bool {
+        startCornerIndex >= 0 && endCornerIndex >= 0
+    }
+    
+    /// Returns true if this curve has a valid span (different start and end corners)
+    var hasSpan: Bool {
+        startCornerIndex >= 0 && endCornerIndex >= 0 && startCornerIndex != endCornerIndex
     }
 }
