@@ -5,6 +5,7 @@ struct PieceEditorView: View {
     @Environment(\.modelContext) private var modelContext
     @Query private var treatments: [EdgeTreatment]
     @Query private var materials: [MaterialOption]
+    @Query private var pieceDefaults: [PieceDefaults]
     @Bindable var piece: Piece
 
     @State private var selectedTreatmentId: UUID?
@@ -35,10 +36,16 @@ struct PieceEditorView: View {
                 VStack(alignment: .leading, spacing: 18) {
                     collapsibleSection(title: "Material", isOpen: $isMaterialOpen) {
                         VStack(spacing: 12) {
-                            TextField("Piece name", text: $piece.name)
+                            TextField("Piece name", text: $piece.name, prompt: Text("Piece name").foregroundStyle(Theme.secondaryText))
+                                .foregroundStyle(Theme.primaryText)
+                                #if canImport(UIKit)
                                 .textInputAutocapitalization(.words)
-                            TextField("Material name", text: $piece.materialName)
+                                #endif
+                            TextField("Material name", text: $piece.materialName, prompt: Text("Material name").foregroundStyle(Theme.secondaryText))
+                                .foregroundStyle(Theme.primaryText)
+                                #if canImport(UIKit)
                                 .textInputAutocapitalization(.words)
+                                #endif
                             HStack {
                                 Picker("Thickness", selection: $piece.thicknessRaw) {
                                     ForEach(MaterialThickness.allCases) { thickness in
@@ -61,6 +68,7 @@ struct PieceEditorView: View {
                             shapeButtons
                             dimensionFields
                             Stepper("Qty \(piece.quantity)", value: $piece.quantity, in: 1...99)
+                                .foregroundStyle(Theme.primaryText)
                         }
                     }
 
@@ -75,7 +83,8 @@ struct PieceEditorView: View {
                     optionsSection
 
                     collapsibleSection(title: "Notes", isOpen: $isNotesOpen) {
-                        TextField("Notes", text: $piece.notes, axis: .vertical)
+                        TextField("Notes", text: $piece.notes, prompt: Text("Notes").foregroundStyle(Theme.secondaryText), axis: .vertical)
+                            .foregroundStyle(Theme.primaryText)
                             .lineLimit(3...6)
                     }
 
@@ -103,7 +112,9 @@ struct PieceEditorView: View {
             }
         }
         .navigationTitle(piece.name)
+        #if canImport(UIKit)
         .navigationBarTitleDisplayMode(.inline)
+        #endif
         .onChange(of: piece.shape) { _, newShape in
             enforceShapeDefaults(newShape)
             markUpdated()
@@ -300,7 +311,13 @@ struct PieceEditorView: View {
     private var cutoutButtons: some View {
         HStack(spacing: 10) {
             Button("Add Cutout") {
-                addCutout(kind: .circle)
+                let defaultKind: CutoutKind
+                if let defaults = pieceDefaults.first, defaults.enableDefaultCutout {
+                    defaultKind = defaults.defaultCutoutShape == "Rectangle" ? .rectangle : .circle
+                } else {
+                    defaultKind = .circle
+                }
+                addCutout(kind: defaultKind)
             }
             .buttonStyle(PillButtonStyle())
             Button("Delete All", role: .destructive) {
@@ -379,7 +396,16 @@ struct PieceEditorView: View {
 
     private func addCutout(kind: CutoutKind) {
         let size = ShapePathBuilder.pieceSize(for: piece)
-        let cutout = Cutout(kind: kind, width: 3, height: 3, centerX: size.width / 2, centerY: size.height / 2, isNotch: false)
+        
+        // Apply defaults if enabled
+        var cutoutWidth: Double = 3
+        var cutoutHeight: Double = 3
+        if let defaults = pieceDefaults.first, defaults.enableDefaultCutout {
+            cutoutWidth = defaults.defaultCutoutWidth
+            cutoutHeight = defaults.defaultCutoutHeight
+        }
+        
+        let cutout = Cutout(kind: kind, width: cutoutWidth, height: cutoutHeight, centerX: size.width / 2, centerY: size.height / 2, isNotch: false)
         cutout.piece = piece
         modelContext.insert(cutout)
         openCutoutIds = [cutout.id]
@@ -397,7 +423,15 @@ struct PieceEditorView: View {
     }
 
     private func addCurve() {
-        let defaultRadius: Double = piece.shape == .rightTriangle ? triangleQuarterCircleRadius() : 2
+        // Determine radius - use defaults if enabled, otherwise use shape-based default
+        var curveRadius: Double = piece.shape == .rightTriangle ? triangleQuarterCircleRadius() : 2
+        var curveIsConcave: Bool = false
+        
+        if let defaults = pieceDefaults.first, defaults.enableDefaultCurve {
+            curveRadius = defaults.defaultCurveRadius
+            curveIsConcave = defaults.defaultCurveIsConcave
+        }
+        
         let maxCurves = piece.shape == .rightTriangle ? 3 : 4
         if piece.curvedEdges.count >= maxCurves {
             return
@@ -425,7 +459,7 @@ struct PieceEditorView: View {
                 defaultEdge = .top
             }
         }
-        let curve = CurvedEdge(edge: defaultEdge, radius: defaultRadius, isConcave: false)
+        let curve = CurvedEdge(edge: defaultEdge, radius: curveRadius, isConcave: curveIsConcave)
         curve.piece = piece
         modelContext.insert(curve)
         openCurveIds = [curve.id]
@@ -452,7 +486,16 @@ struct PieceEditorView: View {
         if index >= 0 {
             removeAngle(at: index)
         }
-        let cornerRadius = CornerRadius(cornerIndex: index, radius: 1, isInside: false)
+        
+        // Apply defaults if enabled
+        var radiusValue: Double = 1
+        var isInside: Bool = false
+        if let defaults = pieceDefaults.first, defaults.enableDefaultCornerRadius {
+            radiusValue = defaults.defaultCornerRadiusValue
+            isInside = defaults.defaultCornerRadiusIsInside
+        }
+        
+        let cornerRadius = CornerRadius(cornerIndex: index, radius: radiusValue, isInside: isInside)
         cornerRadius.piece = piece
         modelContext.insert(cornerRadius)
         openCornerRadiusIds = [cornerRadius.id]
@@ -480,6 +523,12 @@ struct PieceEditorView: View {
             removeCornerRadius(at: defaultCorner)
         }
         let angle = AngleCut(anchorCornerIndex: defaultCorner)
+        
+        // Apply defaults if enabled
+        if let defaults = pieceDefaults.first, defaults.enableDefaultAngle {
+            angle.angleDegrees = defaults.defaultAngleDegrees
+        }
+        
         angle.piece = piece
         modelContext.insert(angle)
         openAngleIds = [angle.id]
@@ -585,9 +634,33 @@ struct PieceEditorView: View {
     private func addAnotherPiece() {
         guard let project = piece.project else { return }
         let newPiece = Piece(name: "Piece \(project.pieces.count + 1)")
-        if let lastMaterial = project.pieces.last(where: { !$0.materialName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })?.materialName {
-            newPiece.materialName = lastMaterial
+        
+        // Apply defaults if available
+        if let defaults = pieceDefaults.first {
+            // Use default material if set, otherwise fall back to last used material
+            if !defaults.defaultMaterialName.isEmpty {
+                newPiece.materialName = defaults.defaultMaterialName
+            } else if let lastMaterial = project.pieces.last(where: { !$0.materialName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })?.materialName {
+                newPiece.materialName = lastMaterial
+            }
+            
+            // Apply other basic defaults
+            if let thickness = MaterialThickness(rawValue: defaults.defaultThickness) {
+                newPiece.thickness = thickness
+            }
+            if let shape = ShapeKind(rawValue: defaults.defaultShape) {
+                newPiece.shape = shape
+            }
+            newPiece.widthText = defaults.defaultWidth
+            newPiece.heightText = defaults.defaultHeight
+            newPiece.quantity = defaults.defaultQuantity
+        } else {
+            // Fallback: use last material if no defaults
+            if let lastMaterial = project.pieces.last(where: { !$0.materialName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })?.materialName {
+                newPiece.materialName = lastMaterial
+            }
         }
+        
         newPiece.project = project
         modelContext.insert(newPiece)
         markUpdated()
@@ -887,10 +960,16 @@ private struct FractionTextField: View {
                 .foregroundStyle(Theme.secondaryText)
 
             HStack(spacing: 8) {
-                TextField("0", text: $wholeText)
+                TextField("0", text: $wholeText, prompt: Text("0").foregroundStyle(Theme.secondaryText))
+                    .foregroundStyle(Theme.primaryText)
+                    #if canImport(UIKit)
                     .keyboardType(.numberPad)
+                    #endif
                     .frame(width: 52)
-                    .textFieldStyle(.roundedBorder)
+                    .padding(8)
+                    .background(Theme.surface)
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.divider, lineWidth: 1))
                     .onChange(of: wholeText) { _, _ in
                         updateTextFromFields()
                     }
@@ -981,10 +1060,16 @@ private struct FractionNumberField: View {
                     .frame(width: 34)
                 }
 
-                TextField("0", text: $wholeText)
+                TextField("0", text: $wholeText, prompt: Text("0").foregroundStyle(Theme.secondaryText))
+                    .foregroundStyle(Theme.primaryText)
+                    #if canImport(UIKit)
                     .keyboardType(allowNegative ? .numbersAndPunctuation : .numberPad)
+                    #endif
                     .frame(width: 52)
-                    .textFieldStyle(.roundedBorder)
+                    .padding(8)
+                    .background(Theme.surface)
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.divider, lineWidth: 1))
                     .onChange(of: wholeText) { _, _ in
                         updateValueFromFields()
                     }
@@ -1102,26 +1187,24 @@ private struct CutoutRow: View {
                 Text("Cutout Shape")
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(Theme.secondaryText)
-                Picker("Cutout Shape", selection: Binding(
-                    get: { cutout.kind == .circle ? HoleShape.circle : HoleShape.rectangle },
-                    set: { newValue in
-                        cutout.kind = (newValue == .circle) ? .circle : .rectangle
-                        if newValue == .circle {
-                            selectedCorner = nil
-                            cutout.isNotch = false
-                            cutout.cornerIndex = -1
-                            cutout.cornerAnchorX = -1
-                            cutout.cornerAnchorY = -1
-                        } else if selectedCorner != nil {
-                            updateNotchCorner()
-                        }
-                    }
-                )) {
+                HStack(spacing: 8) {
                     ForEach(HoleShape.allCases, id: \.self) { shape in
-                        Text(shape.rawValue).tag(shape)
+                        let isSelected = (cutout.kind == .circle && shape == .circle) || (cutout.kind != .circle && shape == .rectangle)
+                        Button(shape.rawValue) {
+                            cutout.kind = (shape == .circle) ? .circle : .rectangle
+                            if shape == .circle {
+                                selectedCorner = nil
+                                cutout.isNotch = false
+                                cutout.cornerIndex = -1
+                                cutout.cornerAnchorX = -1
+                                cutout.cornerAnchorY = -1
+                            } else if selectedCorner != nil {
+                                updateNotchCorner()
+                            }
+                        }
+                        .buttonStyle(PillButtonStyle(isProminent: isSelected))
                     }
                 }
-                .pickerStyle(.segmented)
 
                 HStack(spacing: 12) {
                     labeledField("Width (in)", value: $cutout.width)
@@ -1302,6 +1385,7 @@ private struct CurveRow: View {
             HStack(spacing: 12) {
                 FractionNumberField(title: "Arc Depth (in)", value: $curve.radius)
                 Toggle("Concave", isOn: $curve.isConcave)
+                    .foregroundStyle(Theme.primaryText)
             }
         }
         .onAppear { normalizeSpanSelection() }
@@ -1580,7 +1664,8 @@ private struct AngleCutRow: View {
     let piece: Piece
     let angleIndex: Int
     @Environment(\.modelContext) private var modelContext
-    @State private var isUpdating = false
+    @State private var isUpdatingFromDistance = false
+    @State private var isUpdatingFromAngle = false
 
     var body: some View {
         let labels = cornerLabels()
@@ -1588,6 +1673,7 @@ private struct AngleCutRow: View {
             deleteRow
             cornerRow(labels: labels)
             edgeDistancesRow
+            angleDegreesRow
         }
         .onAppear { normalizeCornerSelection(count: labels.count) }
         .onChange(of: angleCut.anchorCornerIndex) { _, newValue in
@@ -1596,6 +1682,12 @@ private struct AngleCutRow: View {
         }
         .onChange(of: labels.count) { _, newValue in
             normalizeCornerSelection(count: newValue)
+        }
+        .onChange(of: angleCut.anchorOffset) { _, _ in
+            updateAngleFromDistances()
+        }
+        .onChange(of: angleCut.secondaryOffset) { _, _ in
+            updateAngleFromDistances()
         }
         .padding(10)
         .background(Theme.surface)
@@ -1667,6 +1759,73 @@ private struct AngleCutRow: View {
         HStack(spacing: 12) {
             labeledField("Along Edge 1 (in)", value: $angleCut.anchorOffset)
             labeledField("Along Edge 2 (in)", value: $angleCut.secondaryOffset)
+        }
+    }
+
+    private var angleDegreesRow: some View {
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Angle (°)")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Theme.secondaryText)
+                TextField("Angle", value: Binding(
+                    get: { angleCut.angleDegrees },
+                    set: { newValue in
+                        guard !isUpdatingFromDistance else { return }
+                        isUpdatingFromAngle = true
+                        angleCut.angleDegrees = newValue
+                        updateDistancesFromAngle()
+                        isUpdatingFromAngle = false
+                    }
+                ), format: .number)
+                .foregroundStyle(Theme.primaryText)
+                .padding(8)
+                .background(Theme.panel)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+                #if canImport(UIKit)
+                .keyboardType(.decimalPad)
+                #endif
+            }
+            Spacer()
+        }
+    }
+
+    private func updateAngleFromDistances() {
+        guard !isUpdatingFromAngle else { return }
+        isUpdatingFromDistance = true
+        
+        let edge1 = angleCut.anchorOffset
+        let edge2 = angleCut.secondaryOffset
+        
+        // Calculate angle using arctangent
+        // The angle is formed by the cut line relative to edge 1
+        if edge1 > 0 {
+            let angleRadians = atan(edge2 / edge1)
+            angleCut.angleDegrees = angleRadians * 180 / .pi
+        }
+        
+        isUpdatingFromDistance = false
+    }
+
+    private func updateDistancesFromAngle() {
+        guard !isUpdatingFromDistance else { return }
+        
+        let angleRadians = angleCut.angleDegrees * .pi / 180
+        
+        // Keep the hypotenuse length the same, adjust both edges
+        let currentHypotenuse = sqrt(pow(angleCut.anchorOffset, 2) + pow(angleCut.secondaryOffset, 2))
+        
+        // Use a minimum hypotenuse if both are zero
+        let hypotenuse = currentHypotenuse > 0 ? currentHypotenuse : 2.0
+        
+        // Calculate new edge distances based on angle
+        let newEdge1 = hypotenuse * cos(angleRadians)
+        let newEdge2 = hypotenuse * sin(angleRadians)
+        
+        // Only update if values are valid (positive)
+        if newEdge1 > 0 && newEdge2 > 0 {
+            angleCut.anchorOffset = newEdge1
+            angleCut.secondaryOffset = newEdge2
         }
     }
 

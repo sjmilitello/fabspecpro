@@ -1,4 +1,14 @@
+#if canImport(UIKit)
 import UIKit
+typealias PlatformFont = UIFont
+typealias PlatformColor = UIColor
+typealias PlatformImage = UIImage
+#else
+import AppKit
+typealias PlatformFont = NSFont
+typealias PlatformColor = NSColor
+typealias PlatformImage = NSImage
+#endif
 import SwiftUI
 
 enum PDFRenderer {
@@ -9,18 +19,20 @@ enum PDFRenderer {
 
     static func render(project: Project, header: BusinessHeader) -> Data {
         let pageSize = CGSize(width: 612, height: 792)
+        
+        #if canImport(UIKit)
         let renderer = UIGraphicsPDFRenderer(bounds: CGRect(origin: .zero, size: pageSize))
-
-        return renderer.pdfData { context in
+        return renderer.pdfData { rendererContext in
             var yOffset: CGFloat = 20
             var pageIndex = 1
             let leftMargin: CGFloat = 24
+            let totalPages = computeTotalPages(project: project, header: header, pageSize: pageSize)
 
             func beginPage() {
-                context.beginPage()
+                rendererContext.beginPage()
                 yOffset = 24
                 let headerHeight = drawHeader(
-                    in: context.cgContext,
+                    in: rendererContext.cgContext,
                     header: header,
                     projectName: project.name,
                     projectAddress: project.address,
@@ -29,91 +41,171 @@ enum PDFRenderer {
                     pageIndex: pageIndex,
                     totalPages: totalPages
                 )
-                drawFooterPageCount(in: context.cgContext, pageSize: pageSize, pageIndex: pageIndex, totalPages: totalPages)
+                drawFooterPageCount(in: rendererContext.cgContext, pageSize: pageSize, pageIndex: pageIndex, totalPages: totalPages)
                 yOffset = 24 + headerHeight + 10
             }
 
-            let totalPages = computeTotalPages(project: project, header: header, pageSize: pageSize)
             beginPage()
+            renderContent(
+                context: rendererContext.cgContext,
+                project: project,
+                header: header,
+                pageSize: pageSize,
+                leftMargin: leftMargin,
+                totalPages: totalPages,
+                yOffset: &yOffset,
+                pageIndex: &pageIndex,
+                beginPage: beginPage
+            )
+        }
+        #else
+        let pdfData = NSMutableData()
+        var mediaBox = CGRect(origin: .zero, size: pageSize)
+        guard let consumer = CGDataConsumer(data: pdfData as CFMutableData),
+              let pdfContext = CGContext(consumer: consumer, mediaBox: &mediaBox, nil) else {
+            return Data()
+        }
+        
+        var yOffset: CGFloat = 20
+        var pageIndex = 1
+        let leftMargin: CGFloat = 24
+        let totalPages = computeTotalPages(project: project, header: header, pageSize: pageSize)
 
-            let columnWidth = pageSize.width - (leftMargin * 2)
-            let blockSpacing: CGFloat = 6
-            let headerHeight: CGFloat = 18
-            let baseScale = pdfScaleOverridePointsPerInch ?? basePointsPerInch
+        func beginPage() {
+            pdfContext.beginPDFPage(nil)
+            // Flip coordinate system to match UIKit (origin at top-left)
+            pdfContext.translateBy(x: 0, y: pageSize.height)
+            pdfContext.scaleBy(x: 1, y: -1)
+            yOffset = 24
+            let headerHeight = drawHeader(
+                in: pdfContext,
+                header: header,
+                projectName: project.name,
+                projectAddress: project.address,
+                projectDate: project.updatedAt,
+                pageSize: pageSize,
+                pageIndex: pageIndex,
+                totalPages: totalPages
+            )
+            drawFooterPageCount(in: pdfContext, pageSize: pageSize, pageIndex: pageIndex, totalPages: totalPages)
+            yOffset = 24 + headerHeight + 10
+        }
 
+        beginPage()
+        renderContent(
+            context: pdfContext,
+            project: project,
+            header: header,
+            pageSize: pageSize,
+            leftMargin: leftMargin,
+            totalPages: totalPages,
+            yOffset: &yOffset,
+            pageIndex: &pageIndex,
+            beginPage: beginPage
+        )
+        
+        pdfContext.endPDFPage()
+        pdfContext.closePDF()
+        return pdfData as Data
+        #endif
+    }
+    
+    private static func renderContent(
+        context: CGContext,
+        project: Project,
+        header: BusinessHeader,
+        pageSize: CGSize,
+        leftMargin: CGFloat,
+        totalPages: Int,
+        yOffset: inout CGFloat,
+        pageIndex: inout Int,
+        beginPage: () -> Void
+    ) {
+        let columnWidth = pageSize.width - (leftMargin * 2)
+        let blockSpacing: CGFloat = 6
+        let headerHeight: CGFloat = 18
+        let baseScale = pdfScaleOverridePointsPerInch ?? basePointsPerInch
 
-            let materialGrouped = Dictionary(grouping: project.pieces) { piece in
-                let trimmed = piece.materialName.trimmingCharacters(in: .whitespacesAndNewlines)
-                return trimmed.isEmpty ? "Material" : trimmed
+        let materialGrouped = Dictionary(grouping: project.pieces) { piece in
+            let trimmed = piece.materialName.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? "Material" : trimmed
+        }
+        let sortedMaterials = materialGrouped.keys.sorted()
+
+        for (materialIndex, materialKey) in sortedMaterials.enumerated() {
+            if yOffset + 28 > pageSize.height - 60 {
+                #if !canImport(UIKit)
+                context.endPDFPage()
+                #endif
+                pageIndex += 1
+                beginPage()
             }
-            let sortedMaterials = materialGrouped.keys.sorted()
+            let thicknessGrouped = Dictionary(grouping: materialGrouped[materialKey] ?? []) { piece in
+                piece.thickness.rawValue
+            }
+            let sortedThickness = thicknessGrouped.keys.sorted()
 
-            for (materialIndex, materialKey) in sortedMaterials.enumerated() {
-                if yOffset + 28 > pageSize.height - 60 {
+            for thicknessKey in sortedThickness {
+                let pieces = thicknessGrouped[thicknessKey] ?? []
+                guard let firstPiece = pieces.first else { continue }
+                let firstLayout = blockLayout(for: firstPiece, columnWidth: columnWidth, scale: baseScale, maxBlockHeight: pageSize.height - 60 - 140)
+                let headerAndBlock = headerHeight + firstLayout.blockHeight
+                if yOffset + headerAndBlock > pageSize.height - 60 {
+                    #if !canImport(UIKit)
+                    context.endPDFPage()
+                    #endif
                     pageIndex += 1
                     beginPage()
                 }
-                let thicknessGrouped = Dictionary(grouping: materialGrouped[materialKey] ?? []) { piece in
-                    piece.thickness.rawValue
-                }
-                let sortedThickness = thicknessGrouped.keys.sorted()
 
-                for thicknessKey in sortedThickness {
-                    let pieces = thicknessGrouped[thicknessKey] ?? []
-                    guard let firstPiece = pieces.first else { continue }
-                    let firstLayout = blockLayout(for: firstPiece, columnWidth: columnWidth, scale: baseScale, maxBlockHeight: pageSize.height - 60 - 140)
-                    let headerAndBlock = headerHeight + firstLayout.blockHeight
-                    if yOffset + headerAndBlock > pageSize.height - 60 {
+                drawSectionHeader(
+                    in: context,
+                    title: "\(materialKey) - \(thicknessKey)",
+                    origin: CGPoint(x: leftMargin, y: yOffset + 4),
+                    maxWidth: pageSize.width - (leftMargin * 2)
+                )
+                yOffset += headerHeight
+
+                for piece in pieces {
+                    let layout = blockLayout(for: piece, columnWidth: columnWidth, scale: baseScale, maxBlockHeight: pageSize.height - 60 - 140)
+                    if yOffset + layout.blockHeight > pageSize.height - 60 {
+                        #if !canImport(UIKit)
+                        context.endPDFPage()
+                        #endif
                         pageIndex += 1
                         beginPage()
                     }
 
-                    drawSectionHeader(
-                        in: context.cgContext,
-                        title: "\(materialKey) - \(thicknessKey)",
-                        origin: CGPoint(x: leftMargin, y: yOffset + 4),
-                        maxWidth: pageSize.width - (leftMargin * 2)
+                    let xOffset: CGFloat = leftMargin
+                    let drawingRect = CGRect(
+                        x: xOffset + layout.drawingRect.origin.x,
+                        y: yOffset + layout.drawingRect.origin.y,
+                        width: layout.drawingRect.width,
+                        height: layout.drawingRect.height
                     )
-                    yOffset += headerHeight
+                    drawPieceBlock(
+                        in: context,
+                        piece: piece,
+                        origin: CGPoint(x: xOffset, y: yOffset),
+                        size: CGSize(width: CGFloat(columnWidth), height: layout.blockHeight),
+                        drawingRect: drawingRect,
+                        pieceHeaderY: yOffset + layout.pieceHeaderY,
+                        topMeasurementY: yOffset + layout.topMeasurementY,
+                        bottomMeasurementY: yOffset + layout.bottomMeasurementY,
+                        notesY: yOffset + layout.notesY,
+                        topEdgeLabelY: layout.topEdgeLabelY.map { yOffset + $0 },
+                        bottomEdgeLabelY: layout.bottomEdgeLabelY.map { yOffset + $0 }
+                    )
 
-                    for piece in pieces {
-                        let layout = blockLayout(for: piece, columnWidth: columnWidth, scale: baseScale, maxBlockHeight: pageSize.height - 60 - 140)
-                        if yOffset + layout.blockHeight > pageSize.height - 60 {
-                            pageIndex += 1
-                            beginPage()
-                        }
-
-                        let xOffset: CGFloat = leftMargin
-                        let drawingRect = CGRect(
-                            x: xOffset + layout.drawingRect.origin.x,
-                            y: yOffset + layout.drawingRect.origin.y,
-                            width: layout.drawingRect.width,
-                            height: layout.drawingRect.height
-                        )
-                        drawPieceBlock(
-                            in: context.cgContext,
-                            piece: piece,
-                            origin: CGPoint(x: xOffset, y: yOffset),
-                            size: CGSize(width: CGFloat(columnWidth), height: layout.blockHeight),
-                            drawingRect: drawingRect,
-                            pieceHeaderY: yOffset + layout.pieceHeaderY,
-                            topMeasurementY: yOffset + layout.topMeasurementY,
-                            bottomMeasurementY: yOffset + layout.bottomMeasurementY,
-                            notesY: yOffset + layout.notesY,
-                            topEdgeLabelY: layout.topEdgeLabelY.map { yOffset + $0 },
-                            bottomEdgeLabelY: layout.bottomEdgeLabelY.map { yOffset + $0 }
-                        )
-
-                        yOffset += layout.blockHeight + blockSpacing
-                    }
-
-                    yOffset += 12
+                    yOffset += layout.blockHeight + blockSpacing
                 }
 
-                if materialIndex == sortedMaterials.count - 1 {
-                    let legend = edgeLegend(for: project)
-                    drawNotes(in: context.cgContext, notes: project.notes, edgeLegend: legend, origin: CGPoint(x: leftMargin, y: yOffset), maxWidth: pageSize.width - (leftMargin * 2))
-                }
+                yOffset += 12
+            }
+
+            if materialIndex == sortedMaterials.count - 1 {
+                let legend = edgeLegend(for: project)
+                drawNotes(in: context, notes: project.notes, edgeLegend: legend, origin: CGPoint(x: leftMargin, y: yOffset), maxWidth: pageSize.width - (leftMargin * 2))
             }
         }
     }
@@ -130,9 +222,20 @@ enum PDFRenderer {
         if pageIndex == 1 {
             var textX: CGFloat = headerRect.minX + 12
             var headerHeight: CGFloat = 0
-            if let logoData = header.logoData, let image = UIImage(data: logoData) {
+            if let logoData = header.logoData, let image = PlatformImage(data: logoData) {
                 let logoRect = CGRect(x: headerRect.minX + 12, y: headerRect.minY + 12, width: 64, height: 64)
+                #if canImport(UIKit)
                 image.draw(in: logoRect)
+                #else
+                if let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) {
+                    context.saveGState()
+                    // Flip for image drawing (images need to be flipped back)
+                    context.translateBy(x: logoRect.minX, y: logoRect.maxY)
+                    context.scaleBy(x: 1, y: -1)
+                    context.draw(cgImage, in: CGRect(origin: .zero, size: logoRect.size))
+                    context.restoreGState()
+                }
+                #endif
                 textX = logoRect.maxX + 12
                 headerHeight = max(headerHeight, logoRect.maxY - headerOriginY)
             }
@@ -248,7 +351,7 @@ enum PDFRenderer {
 
         let cutoutLines = cutoutNoteLines(for: piece)
         let pieceLines = pieceNoteLines(for: piece)
-        let notesScaleFont = UIFont.systemFont(ofSize: 9, weight: .semibold)
+        let notesScaleFont = PlatformFont.systemFont(ofSize: 9, weight: .semibold)
         let pageWidth: CGFloat = 612
         let leftMargin: CGFloat = 24
         let centerPadding: CGFloat = 20
@@ -297,7 +400,7 @@ enum PDFRenderer {
     private static func drawSectionHeader(in context: CGContext, title: String, origin: CGPoint, maxWidth: CGFloat) {
         let headerRect = CGRect(x: origin.x, y: origin.y, width: maxWidth, height: 20)
         context.saveGState()
-        context.setFillColor(UIColor(white: 0.92, alpha: 1).cgColor)
+        context.setFillColor(PlatformColor(white: 0.92, alpha: 1).cgColor)
         context.fill(headerRect)
         context.restoreGState()
         drawText(title, in: context, frame: headerRect.insetBy(dx: 8, dy: 2), font: .systemFont(ofSize: 12, weight: .bold))
@@ -306,7 +409,7 @@ enum PDFRenderer {
     private static func drawSubheader(in context: CGContext, title: String, origin: CGPoint, maxWidth: CGFloat) {
         let headerRect = CGRect(x: origin.x, y: origin.y, width: maxWidth, height: 16)
         context.saveGState()
-        context.setFillColor(UIColor(white: 0.95, alpha: 1).cgColor)
+        context.setFillColor(PlatformColor(white: 0.95, alpha: 1).cgColor)
         context.fill(headerRect)
         context.restoreGState()
         drawText(title, in: context, frame: headerRect.insetBy(dx: 8, dy: 1), font: .systemFont(ofSize: 11, weight: .semibold))
@@ -332,7 +435,7 @@ enum PDFRenderer {
         let cgPath = path.cgPath.copy(using: &transform) ?? path.cgPath
 
         context.saveGState()
-        context.setStrokeColor(UIColor.black.cgColor)
+        context.setStrokeColor(PlatformColor.black.cgColor)
         context.setLineWidth(1.5)
         context.addPath(cgPath)
         context.strokePath()
@@ -1497,12 +1600,12 @@ enum PDFRenderer {
         drawText(line, in: context, frame: CGRect(x: x, y: y, width: width, height: 14), font: .systemFont(ofSize: fontSize, weight: .semibold), alignment: alignment)
     }
 
-    private static func textWidth(_ text: String, font: UIFont) -> CGFloat {
+    private static func textWidth(_ text: String, font: PlatformFont) -> CGFloat {
         let attributes: [NSAttributedString.Key: Any] = [.font: font]
         return (text as NSString).size(withAttributes: attributes).width
     }
 
-    private static func wrapLinesByWidth(_ lines: [String], maxWidth: CGFloat, font: UIFont) -> [String] {
+    private static func wrapLinesByWidth(_ lines: [String], maxWidth: CGFloat, font: PlatformFont) -> [String] {
         var wrapped: [String] = []
         for line in lines {
             if textWidth(line, font: font) <= maxWidth {
@@ -1546,7 +1649,7 @@ enum PDFRenderer {
         let inset: CGFloat = 15
         let headerRect = CGRect(x: origin.x, y: origin.y + 10, width: maxWidth, height: 18)
         context.saveGState()
-        context.setFillColor(UIColor(white: 0.92, alpha: 1).cgColor)
+        context.setFillColor(PlatformColor(white: 0.92, alpha: 1).cgColor)
         context.fill(headerRect)
         context.restoreGState()
         drawText("Project Notes:", in: context, frame: headerRect.insetBy(dx: 8, dy: 2), font: .systemFont(ofSize: 11, weight: .bold))
@@ -1563,13 +1666,13 @@ enum PDFRenderer {
         }
     }
 
-    private static func drawText(_ text: String, in context: CGContext, frame: CGRect, font: UIFont, alignment: NSTextAlignment = .left) {
+    private static func drawText(_ text: String, in context: CGContext, frame: CGRect, font: PlatformFont, alignment: NSTextAlignment = .left) {
         let paragraphStyle = NSMutableParagraphStyle()
         paragraphStyle.alignment = alignment
         let attributes: [NSAttributedString.Key: Any] = [
             .font: font,
             .paragraphStyle: paragraphStyle,
-            .foregroundColor: UIColor.black
+            .foregroundColor: PlatformColor.black
         ]
         let attributed = NSAttributedString(string: text, attributes: attributes)
         attributed.draw(in: frame)

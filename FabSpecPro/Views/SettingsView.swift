@@ -9,6 +9,7 @@ struct SettingsView: View {
     @Query private var edgeAssignments: [EdgeAssignment]
     @Query private var pieces: [Piece]
     @Query private var headers: [BusinessHeader]
+    @Query private var pieceDefaults: [PieceDefaults]
     @State private var newTreatmentName = ""
     @State private var newTreatmentCode = ""
     @State private var newMaterialName = ""
@@ -30,30 +31,51 @@ struct SettingsView: View {
                     .tabItem {
                         Label("Edges Library", systemImage: "line.diagonal")
                     }
+                pieceDefaultsTab
+                    .tabItem {
+                        Label("Piece Defaults", systemImage: "square.on.square")
+                    }
             }
         }
         .navigationTitle("Settings")
+        #if canImport(UIKit)
         .navigationBarTitleDisplayMode(.inline)
+        #endif
         .onAppear {
             ensureHeaderExists()
+            ensurePieceDefaultsExists()
         }
     }
 
     private var businessInfoTab: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                if let header = currentHeader {
-                    SectionCard(title: "Business Info") {
+        ZStack {
+            Theme.background.ignoresSafeArea()
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    if let header = currentHeader {
+                        SectionCard(title: "Business Info") {
                         VStack(spacing: 12) {
-                            TextField("Business name", text: binding(for: header, keyPath: \.businessName))
+                            TextField("Business name", text: binding(for: header, keyPath: \.businessName), prompt: Text("Business name").foregroundStyle(Theme.secondaryText))
+                                .foregroundStyle(Theme.primaryText)
+                                #if canImport(UIKit)
                                 .textInputAutocapitalization(.words)
-                            TextField("Address", text: binding(for: header, keyPath: \.address))
+                                #endif
+                            TextField("Address", text: binding(for: header, keyPath: \.address), prompt: Text("Address").foregroundStyle(Theme.secondaryText))
+                                .foregroundStyle(Theme.primaryText)
+                                #if canImport(UIKit)
                                 .textInputAutocapitalization(.words)
-                            TextField("Email", text: binding(for: header, keyPath: \.email))
+                                #endif
+                            TextField("Email", text: binding(for: header, keyPath: \.email), prompt: Text("Email").foregroundStyle(Theme.secondaryText))
+                                .foregroundStyle(Theme.primaryText)
+                                #if canImport(UIKit)
                                 .textInputAutocapitalization(.never)
                                 .keyboardType(.emailAddress)
-                            TextField("Phone", text: binding(for: header, keyPath: \.phone))
+                                #endif
+                            TextField("Phone", text: binding(for: header, keyPath: \.phone), prompt: Text("Phone").foregroundStyle(Theme.secondaryText))
+                                .foregroundStyle(Theme.primaryText)
+                                #if canImport(UIKit)
                                 .keyboardType(.phonePad)
+                                #endif
                             PhotosPicker("Choose Logo", selection: $logoItem, matching: .images)
                                 .buttonStyle(PillButtonStyle())
                                 .onChange(of: logoItem) { _, newValue in
@@ -69,11 +91,14 @@ struct SettingsView: View {
                 }
             }
             .padding(20)
+            }
         }
     }
 
     private var materialsTab: some View {
-        ScrollView {
+        ZStack {
+            Theme.background.ignoresSafeArea()
+            ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 SectionCard(title: "Materials Library") {
                     VStack(spacing: 12) {
@@ -97,6 +122,7 @@ struct SettingsView: View {
 
                         HStack {
                             TextField("Material name", text: $newMaterialName)
+                                .foregroundStyle(Theme.primaryText)
                             Button("Add") {
                                 addMaterial()
                             }
@@ -106,11 +132,14 @@ struct SettingsView: View {
                 }
             }
             .padding(20)
+            }
         }
     }
 
     private var edgesTab: some View {
-        ScrollView {
+        ZStack {
+            Theme.background.ignoresSafeArea()
+            ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 SectionCard(title: "Edges Library") {
                     VStack(spacing: 12) {
@@ -118,7 +147,9 @@ struct SettingsView: View {
                             HStack {
                                 TextField("Code", text: binding(for: treatment, keyPath: \.abbreviation))
                                     .frame(width: 70)
+                                    #if canImport(UIKit)
                                     .textInputAutocapitalization(.characters)
+                                    #endif
                                     .foregroundStyle(Theme.accent)
                                 TextField("Name", text: binding(for: treatment, keyPath: \.name))
                                     .foregroundStyle(Theme.primaryText)
@@ -138,7 +169,9 @@ struct SettingsView: View {
 
                         HStack {
                             TextField("Code", text: $newTreatmentCode)
+                                .foregroundStyle(Theme.accent)
                             TextField("Name", text: $newTreatmentName)
+                                .foregroundStyle(Theme.primaryText)
                             Button("Add") {
                                 addTreatment()
                             }
@@ -148,6 +181,293 @@ struct SettingsView: View {
                 }
             }
             .padding(20)
+            }
+        }
+    }
+
+    private var pieceDefaultsTab: some View {
+        ZStack {
+            Theme.background.ignoresSafeArea()
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    if let defaults = currentPieceDefaults {
+                        // Basic Defaults Section
+                        SectionCard(title: "Basic Defaults") {
+                            VStack(spacing: 12) {
+                                // Material picker
+                                HStack {
+                                    Text("Material")
+                                        .foregroundStyle(Theme.primaryText)
+                                    Spacer()
+                                    Picker("Material", selection: Binding(
+                                        get: { defaults.defaultMaterialName },
+                                        set: { defaults.defaultMaterialName = $0 }
+                                    )) {
+                                        Text("None").tag("")
+                                        ForEach(materials) { material in
+                                            Text(material.name).tag(material.name)
+                                        }
+                                    }
+                                    .pickerStyle(.menu)
+                                    .tint(Theme.accent)
+                                }
+
+                                // Thickness picker
+                                HStack {
+                                    Text("Thickness")
+                                        .foregroundStyle(Theme.primaryText)
+                                    Spacer()
+                                    Picker("Thickness", selection: Binding(
+                                        get: { defaults.defaultThickness },
+                                        set: { defaults.defaultThickness = $0 }
+                                    )) {
+                                        ForEach(MaterialThickness.allCases, id: \.self) { thickness in
+                                            Text(thickness.rawValue).tag(thickness.rawValue)
+                                        }
+                                    }
+                                    .pickerStyle(.menu)
+                                    .tint(Theme.accent)
+                                }
+
+                                // Shape picker
+                                HStack {
+                                    Text("Shape")
+                                        .foregroundStyle(Theme.primaryText)
+                                    Spacer()
+                                    Picker("Shape", selection: Binding(
+                                        get: { defaults.defaultShape },
+                                        set: { defaults.defaultShape = $0 }
+                                    )) {
+                                        ForEach(ShapeKind.allCases, id: \.self) { shape in
+                                            Text(shape.rawValue).tag(shape.rawValue)
+                                        }
+                                    }
+                                    .pickerStyle(.menu)
+                                    .tint(Theme.accent)
+                                }
+
+                                // Width
+                                HStack {
+                                    Text("Width")
+                                        .foregroundStyle(Theme.primaryText)
+                                    Spacer()
+                                    TextField("Width", text: Binding(
+                                        get: { defaults.defaultWidth },
+                                        set: { defaults.defaultWidth = $0 }
+                                    ), prompt: Text("24").foregroundStyle(Theme.secondaryText))
+                                    .foregroundStyle(Theme.primaryText)
+                                    .frame(width: 80)
+                                    .multilineTextAlignment(.trailing)
+                                    #if canImport(UIKit)
+                                    .keyboardType(.decimalPad)
+                                    #endif
+                                }
+
+                                // Height
+                                HStack {
+                                    Text("Height")
+                                        .foregroundStyle(Theme.primaryText)
+                                    Spacer()
+                                    TextField("Height", text: Binding(
+                                        get: { defaults.defaultHeight },
+                                        set: { defaults.defaultHeight = $0 }
+                                    ), prompt: Text("18").foregroundStyle(Theme.secondaryText))
+                                    .foregroundStyle(Theme.primaryText)
+                                    .frame(width: 80)
+                                    .multilineTextAlignment(.trailing)
+                                    #if canImport(UIKit)
+                                    .keyboardType(.decimalPad)
+                                    #endif
+                                }
+
+                                // Quantity
+                                HStack {
+                                    Text("Quantity")
+                                        .foregroundStyle(Theme.primaryText)
+                                    Spacer()
+                                    Stepper("\(defaults.defaultQuantity)", value: Binding(
+                                        get: { defaults.defaultQuantity },
+                                        set: { defaults.defaultQuantity = $0 }
+                                    ), in: 1...100)
+                                    .foregroundStyle(Theme.primaryText)
+                                }
+                            }
+                        }
+
+                        // Cutout Defaults Section
+                        SectionCard(title: "Cutout Defaults") {
+                            VStack(spacing: 12) {
+                                Toggle("Apply defaults when adding cutout", isOn: Binding(
+                                    get: { defaults.enableDefaultCutout },
+                                    set: { defaults.enableDefaultCutout = $0 }
+                                ))
+                                .foregroundStyle(Theme.primaryText)
+                                .tint(Theme.accent)
+
+                                if defaults.enableDefaultCutout {
+                                    HStack {
+                                        Text("Shape")
+                                            .foregroundStyle(Theme.primaryText)
+                                        Spacer()
+                                        HStack(spacing: 8) {
+                                            Button("Circle") {
+                                                defaults.defaultCutoutShape = "Circle"
+                                            }
+                                            .buttonStyle(PillButtonStyle(isProminent: defaults.defaultCutoutShape == "Circle"))
+
+                                            Button("Rectangle") {
+                                                defaults.defaultCutoutShape = "Rectangle"
+                                            }
+                                            .buttonStyle(PillButtonStyle(isProminent: defaults.defaultCutoutShape == "Rectangle"))
+                                        }
+                                    }
+
+                                    HStack {
+                                        Text("Width")
+                                            .foregroundStyle(Theme.primaryText)
+                                        Spacer()
+                                        TextField("Width", value: Binding(
+                                            get: { defaults.defaultCutoutWidth },
+                                            set: { defaults.defaultCutoutWidth = $0 }
+                                        ), format: .number)
+                                        .foregroundStyle(Theme.primaryText)
+                                        .frame(width: 80)
+                                        .multilineTextAlignment(.trailing)
+                                        #if canImport(UIKit)
+                                        .keyboardType(.decimalPad)
+                                        #endif
+                                    }
+
+                                    HStack {
+                                        Text("Length")
+                                            .foregroundStyle(Theme.primaryText)
+                                        Spacer()
+                                        TextField("Length", value: Binding(
+                                            get: { defaults.defaultCutoutHeight },
+                                            set: { defaults.defaultCutoutHeight = $0 }
+                                        ), format: .number)
+                                        .foregroundStyle(Theme.primaryText)
+                                        .frame(width: 80)
+                                        .multilineTextAlignment(.trailing)
+                                        #if canImport(UIKit)
+                                        .keyboardType(.decimalPad)
+                                        #endif
+                                    }
+                                }
+                            }
+                        }
+
+                        // Curve Defaults Section
+                        SectionCard(title: "Curve Defaults") {
+                            VStack(spacing: 12) {
+                                Toggle("Apply defaults when adding curve", isOn: Binding(
+                                    get: { defaults.enableDefaultCurve },
+                                    set: { defaults.enableDefaultCurve = $0 }
+                                ))
+                                .foregroundStyle(Theme.primaryText)
+                                .tint(Theme.accent)
+
+                                if defaults.enableDefaultCurve {
+                                    HStack {
+                                        Text("Arc Depth")
+                                            .foregroundStyle(Theme.primaryText)
+                                        Spacer()
+                                        TextField("Arc Depth", value: Binding(
+                                            get: { defaults.defaultCurveRadius },
+                                            set: { defaults.defaultCurveRadius = $0 }
+                                        ), format: .number)
+                                        .foregroundStyle(Theme.primaryText)
+                                        .frame(width: 80)
+                                        .multilineTextAlignment(.trailing)
+                                        #if canImport(UIKit)
+                                        .keyboardType(.decimalPad)
+                                        #endif
+                                    }
+
+                                    Toggle("Concave", isOn: Binding(
+                                        get: { defaults.defaultCurveIsConcave },
+                                        set: { defaults.defaultCurveIsConcave = $0 }
+                                    ))
+                                    .foregroundStyle(Theme.primaryText)
+                                    .tint(Theme.accent)
+                                }
+                            }
+                        }
+
+                        // Angle Defaults Section
+                        SectionCard(title: "Angle Defaults") {
+                            VStack(spacing: 12) {
+                                Toggle("Apply defaults when adding angle", isOn: Binding(
+                                    get: { defaults.enableDefaultAngle },
+                                    set: { defaults.enableDefaultAngle = $0 }
+                                ))
+                                .foregroundStyle(Theme.primaryText)
+                                .tint(Theme.accent)
+
+                                if defaults.enableDefaultAngle {
+                                    HStack {
+                                        Text("Degrees")
+                                            .foregroundStyle(Theme.primaryText)
+                                        Spacer()
+                                        TextField("Degrees", value: Binding(
+                                            get: { defaults.defaultAngleDegrees },
+                                            set: { defaults.defaultAngleDegrees = $0 }
+                                        ), format: .number)
+                                        .foregroundStyle(Theme.primaryText)
+                                        .frame(width: 80)
+                                        .multilineTextAlignment(.trailing)
+                                        #if canImport(UIKit)
+                                        .keyboardType(.decimalPad)
+                                        #endif
+                                    }
+                                }
+                            }
+                        }
+
+                        // Corner Radius Defaults Section
+                        SectionCard(title: "Corner Radius Defaults") {
+                            VStack(spacing: 12) {
+                                Toggle("Apply defaults when adding corner radius", isOn: Binding(
+                                    get: { defaults.enableDefaultCornerRadius },
+                                    set: { defaults.enableDefaultCornerRadius = $0 }
+                                ))
+                                .foregroundStyle(Theme.primaryText)
+                                .tint(Theme.accent)
+
+                                if defaults.enableDefaultCornerRadius {
+                                    HStack {
+                                        Text("Radius")
+                                            .foregroundStyle(Theme.primaryText)
+                                        Spacer()
+                                        TextField("Radius", value: Binding(
+                                            get: { defaults.defaultCornerRadiusValue },
+                                            set: { defaults.defaultCornerRadiusValue = $0 }
+                                        ), format: .number)
+                                        .foregroundStyle(Theme.primaryText)
+                                        .frame(width: 80)
+                                        .multilineTextAlignment(.trailing)
+                                        #if canImport(UIKit)
+                                        .keyboardType(.decimalPad)
+                                        #endif
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                .padding(20)
+            }
+        }
+    }
+
+    private var currentPieceDefaults: PieceDefaults? {
+        pieceDefaults.first
+    }
+
+    private func ensurePieceDefaultsExists() {
+        if pieceDefaults.isEmpty {
+            let defaults = PieceDefaults()
+            modelContext.insert(defaults)
         }
     }
 

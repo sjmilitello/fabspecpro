@@ -1,11 +1,17 @@
 import SwiftUI
 import SwiftData
+#if canImport(UIKit)
+import UIKit
+#else
+import AppKit
+#endif
 
 struct ProjectDetailView: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(\.dismiss) private var dismiss
     @Query private var headers: [BusinessHeader]
     @Query private var pieces: [Piece]
+    @Query private var pieceDefaults: [PieceDefaults]
     @Bindable var project: Project
     @State private var pdfData: Data?
     @State private var isShowingShare = false
@@ -26,11 +32,16 @@ struct ProjectDetailView: View {
                 VStack(alignment: .leading, spacing: 18) {
                     SectionCard(title: "Project") {
                         VStack(spacing: 12) {
-                            TextField("Project name", text: $project.name)
+                            TextField("Project name", text: $project.name, prompt: Text("Project name").foregroundStyle(Theme.secondaryText))
+                                .foregroundStyle(Theme.primaryText)
+                                #if canImport(UIKit)
                                 .textInputAutocapitalization(.words)
-                            TextField("Project address", text: $project.address, axis: .vertical)
+                                #endif
+                            TextField("Project address", text: $project.address, prompt: Text("Project address").foregroundStyle(Theme.secondaryText), axis: .vertical)
+                                .foregroundStyle(Theme.primaryText)
                                 .lineLimit(1...3)
-                            TextField("Project notes", text: $project.notes, axis: .vertical)
+                            TextField("Project notes", text: $project.notes, prompt: Text("Project notes").foregroundStyle(Theme.secondaryText), axis: .vertical)
+                                .foregroundStyle(Theme.primaryText)
                                 .lineLimit(3...6)
                             HStack(spacing: 12) {
                                 Button("Export PDF") {
@@ -89,15 +100,26 @@ struct ProjectDetailView: View {
             }
         }
         .navigationTitle(project.name)
+        #if canImport(UIKit)
         .navigationBarTitleDisplayMode(.inline)
+        #endif
         .navigationDestination(item: $selectedPiece) { piece in
             PieceEditorView(piece: piece)
         }
+#if canImport(UIKit)
         .sheet(isPresented: $isShowingShare) {
             if let pdfData {
                 ProjectShareSheet(activityItems: [pdfData])
             }
         }
+        #else
+        .onChange(of: isShowingShare) { _, newValue in
+            if newValue, let pdfData {
+                showMacShareSheet(data: pdfData)
+                isShowingShare = false
+            }
+        }
+        #endif
         .alert("Delete Piece?", isPresented: Binding(
             get: { pieceToDelete != nil },
             set: { if !$0 { pieceToDelete = nil } }
@@ -141,10 +163,37 @@ struct ProjectDetailView: View {
     private func addPiece() {
         let nextIndex = pieces.count + 1
         let piece = Piece(name: "Piece \(nextIndex)")
-        let lastMaterial = pieces.last(where: { !$0.materialName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })?.materialName
-        if let lastMaterial {
-            piece.materialName = lastMaterial
+        
+        // Apply defaults if available
+        if let defaults = pieceDefaults.first {
+            // Use default material if set, otherwise fall back to last used material
+            if !defaults.defaultMaterialName.isEmpty {
+                piece.materialName = defaults.defaultMaterialName
+            } else {
+                let lastMaterial = pieces.last(where: { !$0.materialName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })?.materialName
+                if let lastMaterial {
+                    piece.materialName = lastMaterial
+                }
+            }
+            
+            // Apply other basic defaults
+            if let thickness = MaterialThickness(rawValue: defaults.defaultThickness) {
+                piece.thickness = thickness
+            }
+            if let shape = ShapeKind(rawValue: defaults.defaultShape) {
+                piece.shape = shape
+            }
+            piece.widthText = defaults.defaultWidth
+            piece.heightText = defaults.defaultHeight
+            piece.quantity = defaults.defaultQuantity
+        } else {
+            // Fallback: use last material if no defaults
+            let lastMaterial = pieces.last(where: { !$0.materialName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })?.materialName
+            if let lastMaterial {
+                piece.materialName = lastMaterial
+            }
         }
+        
         piece.project = project
         modelContext.insert(piece)
         markUpdated()
@@ -170,6 +219,19 @@ struct ProjectDetailView: View {
         pdfData = PDFRenderer.render(project: project, header: header)
         isShowingShare = true
     }
+    
+    #if !canImport(UIKit)
+    private func showMacShareSheet(data: Data) {
+        let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent("\(project.name).pdf")
+        try? data.write(to: tempURL)
+        
+        let picker = NSSharingServicePicker(items: [tempURL])
+        if let window = NSApplication.shared.keyWindow,
+           let contentView = window.contentView {
+            picker.show(relativeTo: contentView.bounds, of: contentView, preferredEdge: .minY)
+        }
+    }
+    #endif
 
     private var groupedPieces: [PieceGroupKey: [Piece]] {
         Dictionary(grouping: pieces) { piece in
@@ -219,6 +281,7 @@ private struct PieceRow: View {
     }
 }
 
+#if canImport(UIKit)
 private struct ProjectShareSheet: UIViewControllerRepresentable {
     let activityItems: [Any]
 
@@ -228,3 +291,4 @@ private struct ProjectShareSheet: UIViewControllerRepresentable {
 
     func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) { }
 }
+#endif

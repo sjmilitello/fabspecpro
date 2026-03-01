@@ -21,7 +21,8 @@ struct FabSpecProApp: App {
             AngleCut.self,
             CornerRadius.self,
             BusinessHeader.self,
-            MaterialOption.self
+            MaterialOption.self,
+            PieceDefaults.self
         ])
         let modelConfiguration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
 
@@ -50,6 +51,7 @@ struct FabSpecProApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView()
+                .preferredColorScheme(.dark)
         }
         .modelContainer(sharedModelContainer)
     }

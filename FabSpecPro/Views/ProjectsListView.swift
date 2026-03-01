@@ -49,11 +49,19 @@ struct ProjectsListView: View {
                 }
             }
             .toolbar {
+                #if canImport(UIKit)
                 ToolbarItem(placement: .topBarTrailing) {
                     NavigationLink("Settings") {
                         SettingsView()
                     }
                 }
+                #else
+                ToolbarItem(placement: .automatic) {
+                    NavigationLink("Settings") {
+                        SettingsView()
+                    }
+                }
+                #endif
             }
             .alert("New Project", isPresented: $isShowingNewProject) {
                 TextField("Project name", text: $newProjectName)
