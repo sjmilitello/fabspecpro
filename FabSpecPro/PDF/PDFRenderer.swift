@@ -652,9 +652,7 @@ enum PDFRenderer {
     private static func edgeLabelPoint(edge: EdgePosition, piece: Piece, shape: ShapeKind, curves: [CurvedEdge], size: CGSize, scale: CGFloat, offsetX: CGFloat, offsetY: CGFloat, cutouts: [Cutout] = []) -> CGPoint {
         let width = size.width * scale
         let height = size.height * scale
-        let curveMap = Dictionary(grouping: curves, by: { $0.edge }).compactMapValues { list in
-            list.first(where: { !$0.hasSpan }) ?? list.first
-        }
+        let curveMap = Dictionary(grouping: curves, by: { $0.edge }).compactMapValues { $0.first }
 
         if shape == .circle {
             let center = CGPoint(x: offsetX + width / 2, y: offsetY + height / 2)
@@ -692,23 +690,7 @@ enum PDFRenderer {
         if let curve = curveMap[edge], curve.radius > 0 {
             let polygon = ShapePathBuilder.displayPolygonPoints(for: piece, includeAngles: true)
             let baseBounds = shape == .rightTriangle ? CGRect(origin: .zero, size: ShapePathBuilder.displaySize(for: piece)) : nil
-            let geometry: (start: CGPoint, end: CGPoint, normal: CGPoint)?
-            if curve.hasSpan, polygon.count > 1 {
-                let count = polygon.count
-                let startIndex = normalizedIndex(curve.startCornerIndex, count: count)
-                let endIndex = normalizedIndex(curve.endCornerIndex, count: count)
-                if startIndex == endIndex {
-                    geometry = nil
-                } else {
-                    let spanStart = polygon[startIndex]
-                    let spanEnd = polygon[endIndex]
-                    let normal = outwardNormal(from: spanStart, to: spanEnd, clockwise: polygonIsClockwise(polygon))
-                    geometry = (spanStart, spanEnd, normal)
-                }
-            } else {
-                geometry = edgeGeometryFromPolygon(edge: edge, polygon: polygon, shape: shape, baseBounds: baseBounds)
-            }
-            if let geometry {
+            if let geometry = edgeGeometryFromPolygon(edge: edge, polygon: polygon, shape: shape, baseBounds: baseBounds) {
                 let control = controlPoint(for: geometry, curve: curve)
                 let mid = quadBezierPoint(t: 0.5, start: geometry.start, control: control, end: geometry.end)
                 let baseOffset: CGFloat = edge == .hypotenuse ? 10 : 6
@@ -928,34 +910,6 @@ enum PDFRenderer {
         let direction: CGFloat = curve.isConcave ? -1 : 1
         let normal = normalized(geometry.normal)
         return CGPoint(x: mid.x + normal.x * curve.radius * 2 * direction, y: mid.y + normal.y * curve.radius * 2 * direction)
-    }
-
-    private static func normalizedIndex(_ index: Int, count: Int) -> Int {
-        guard count > 0 else { return 0 }
-        let mod = index % count
-        return mod < 0 ? mod + count : mod
-    }
-
-    private static func polygonIsClockwise(_ points: [CGPoint]) -> Bool {
-        guard points.count >= 3 else { return true }
-        var area: CGFloat = 0
-        for i in 0..<points.count {
-            let p1 = points[i]
-            let p2 = points[(i + 1) % points.count]
-            area += (p1.x * p2.y) - (p2.x * p1.y)
-        }
-        return area > 0
-    }
-
-    private static func outwardNormal(from start: CGPoint, to end: CGPoint, clockwise: Bool) -> CGPoint {
-        let dx = end.x - start.x
-        let dy = end.y - start.y
-        let length = max(sqrt(dx * dx + dy * dy), 0.0001)
-        let ux = dx / length
-        let uy = dy / length
-        let left = CGPoint(x: -uy, y: ux)
-        let right = CGPoint(x: uy, y: -ux)
-        return clockwise ? left : right
     }
 
     private static func quadBezierPoint(t: CGFloat, start: CGPoint, control: CGPoint, end: CGPoint) -> CGPoint {

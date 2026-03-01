@@ -430,133 +430,6 @@ struct DrawingCanvasView: View {
         return area > 0
     }
 
-    private func normalizedIndex(_ index: Int, count: Int) -> Int {
-        guard count > 0 else { return 0 }
-        let mod = index % count
-        return mod < 0 ? mod + count : mod
-    }
-
-    private func outwardNormal(from start: CGPoint, to end: CGPoint, clockwise: Bool) -> CGPoint {
-        let dx = end.x - start.x
-        let dy = end.y - start.y
-        let length = max(sqrt(dx * dx + dy * dy), 0.0001)
-        let ux = dx / length
-        let uy = dy / length
-        let left = CGPoint(x: -uy, y: ux)
-        let right = CGPoint(x: uy, y: -ux)
-        return clockwise ? left : right
-    }
-
-    private func tForSpan(point: CGPoint, start: CGPoint, end: CGPoint) -> CGFloat {
-        let dx = end.x - start.x
-        let dy = end.y - start.y
-        if abs(dx) < 0.0001 && abs(dy) < 0.0001 { return 0 }
-        if abs(dx) >= abs(dy) {
-            let denom = dx
-            if abs(denom) < 0.0001 { return 0 }
-            return (point.x - start.x) / denom
-        }
-        let denom = dy
-        if abs(denom) < 0.0001 { return 0 }
-        return (point.y - start.y) / denom
-    }
-
-    private func tForEdge(point: CGPoint, geometry: (start: CGPoint, end: CGPoint, normal: CGPoint), edge: EdgePosition) -> CGFloat {
-        switch edge {
-        case .top, .bottom, .legA:
-            let denom = geometry.end.x - geometry.start.x
-            if abs(denom) < 0.0001 { return 0 }
-            return (point.x - geometry.start.x) / denom
-        case .left, .right, .legB:
-            let denom = geometry.end.y - geometry.start.y
-            if abs(denom) < 0.0001 { return 0 }
-            return (point.y - geometry.start.y) / denom
-        case .hypotenuse:
-            let total = distance(geometry.start, geometry.end)
-            if total < 0.0001 { return 0 }
-            return distance(geometry.start, point) / total
-        }
-    }
-
-    private func edgeForSpanPoints(start: CGPoint, end: CGPoint, polygon: [CGPoint], baseBounds: CGRect?) -> EdgePosition? {
-        let bounds = baseBounds ?? bounds(for: polygon)
-        let edgeTolerance: CGFloat = 0.5
-        switch piece.shape {
-        case .rightTriangle:
-            let eps: CGFloat = 0.01
-            let onLegA = abs(start.y - bounds.minY) < edgeTolerance && abs(end.y - bounds.minY) < edgeTolerance
-            if onLegA { return .legA }
-            let onLegB = abs(start.x - bounds.minX) < edgeTolerance && abs(end.x - bounds.minX) < edgeTolerance
-            if onLegB { return .legB }
-            let a = CGPoint(x: bounds.maxX, y: bounds.minY)
-            let b = CGPoint(x: bounds.minX, y: bounds.maxY)
-            let onHypotenuse = pointLineDistance(point: start, a: a, b: b) < eps &&
-                pointLineDistance(point: end, a: a, b: b) < eps
-            return onHypotenuse ? .hypotenuse : nil
-        default:
-            let minX = bounds.minX
-            let maxX = bounds.maxX
-            let minY = bounds.minY
-            let maxY = bounds.maxY
-            let onTop = abs(start.y - minY) < edgeTolerance && abs(end.y - minY) < edgeTolerance
-            if onTop { return .top }
-            let onBottom = abs(start.y - maxY) < edgeTolerance && abs(end.y - maxY) < edgeTolerance
-            if onBottom { return .bottom }
-            let onLeft = abs(start.x - minX) < edgeTolerance && abs(end.x - minX) < edgeTolerance
-            if onLeft { return .left }
-            let onRight = abs(start.x - maxX) < edgeTolerance && abs(end.x - maxX) < edgeTolerance
-            if onRight { return .right }
-            return nil
-        }
-    }
-
-    private func curveForSegment(_ segment: BoundarySegment, polygon: [CGPoint]) -> CurvedEdge? {
-        let curvesForEdge = piece.curvedEdges.filter { $0.edge == segment.edge && $0.radius > 0 }
-        guard !curvesForEdge.isEmpty else { return nil }
-        let count = polygon.count
-        let baseBounds = piece.shape == .rightTriangle ? CGRect(origin: .zero, size: ShapePathBuilder.displaySize(for: piece)) : nil
-        for curve in curvesForEdge where curve.hasSpan {
-            if curve.startCornerIndex < 0 || curve.endCornerIndex < 0 { continue }
-            if curve.startCornerIndex >= count || curve.endCornerIndex >= count { continue }
-            let startIndex = normalizedIndex(curve.startCornerIndex, count: count)
-            let endIndex = normalizedIndex(curve.endCornerIndex, count: count)
-            if startIndex == endIndex { continue }
-            let spanStart = polygon[startIndex]
-            let spanEnd = polygon[endIndex]
-            guard let spanEdge = edgeForSpanPoints(start: spanStart, end: spanEnd, polygon: polygon, baseBounds: baseBounds),
-                  spanEdge == segment.edge
-            else { continue }
-            let segments = ShapePathBuilder.boundarySegments(for: piece).filter { $0.edge == spanEdge }
-            guard let startPos = segments.firstIndex(where: { $0.start == spanStart || $0.end == spanStart }),
-                  let endPos = segments.firstIndex(where: { $0.start == spanEnd || $0.end == spanEnd })
-            else { continue }
-            let lower = min(startPos, endPos)
-            let upper = max(startPos, endPos)
-            if let currentPos = segments.firstIndex(where: { $0.startIndex == segment.startIndex && $0.endIndex == segment.endIndex }) {
-                if currentPos >= lower && currentPos <= upper {
-                    return curve
-                }
-            }
-        }
-        return curvesForEdge.first(where: { !$0.hasSpan }) ?? curvesForEdge.first
-    }
-
-    private func spanSegmentRange(curve: CurvedEdge, polygon: [CGPoint]) -> (lower: Int, upper: Int, segments: [BoundarySegment])? {
-        guard curve.hasSpan else { return nil }
-        let count = polygon.count
-        guard count > 1 else { return nil }
-        let startIndex = normalizedIndex(curve.startCornerIndex, count: count)
-        let endIndex = normalizedIndex(curve.endCornerIndex, count: count)
-        if startIndex == endIndex { return nil }
-        let spanStart = polygon[startIndex]
-        let spanEnd = polygon[endIndex]
-        let segments = ShapePathBuilder.boundarySegments(for: piece).filter { $0.edge == curve.edge }
-        guard let startPos = segments.firstIndex(where: { $0.start == spanStart || $0.end == spanStart }),
-              let endPos = segments.firstIndex(where: { $0.start == spanEnd || $0.end == spanEnd })
-        else { return nil }
-        return (min(startPos, endPos), max(startPos, endPos), segments)
-    }
-
     private func bounds(for points: [CGPoint]) -> CGRect {
         guard let first = points.first else { return .zero }
         var minX = first.x
@@ -942,9 +815,7 @@ struct DrawingCanvasView: View {
         let width = metrics.pieceSize.width * metrics.scale
         let height = metrics.pieceSize.height * metrics.scale
         let origin = metrics.origin
-        let curveMap = Dictionary(grouping: curves, by: { $0.edge }).compactMapValues { list in
-            list.first(where: { !$0.hasSpan }) ?? list.first
-        }
+        let curveMap = Dictionary(grouping: curves, by: { $0.edge }).compactMapValues { $0.first }
         let left = origin.x
         let right = origin.x + width
         let top = origin.y
@@ -1044,19 +915,11 @@ struct DrawingCanvasView: View {
 
     private func segmentLabelPosition(segment: BoundarySegment, metrics: DrawingMetrics) -> CGPoint {
         let mid = CGPoint(x: (segment.start.x + segment.end.x) / 2, y: (segment.start.y + segment.end.y) / 2)
-        let polygon = ShapePathBuilder.displayPolygonPoints(for: piece, includeAngles: true)
-        if let curve = curveForSegment(segment, polygon: polygon), curve.radius > 0 {
+        if let curve = piece.curve(for: segment.edge), curve.radius > 0 {
+            let polygon = ShapePathBuilder.displayPolygonPoints(for: piece, includeAngles: true)
             let baseBounds = piece.shape == .rightTriangle ? CGRect(origin: .zero, size: ShapePathBuilder.displaySize(for: piece)) : nil
             let geometry: (start: CGPoint, end: CGPoint, normal: CGPoint)?
-            if curve.hasSpan, let range = spanSegmentRange(curve: curve, polygon: polygon), range.lower < range.upper {
-                let count = polygon.count
-                let startIndex = normalizedIndex(curve.startCornerIndex, count: count)
-                let endIndex = normalizedIndex(curve.endCornerIndex, count: count)
-                let spanStart = polygon[startIndex]
-                let spanEnd = polygon[endIndex]
-                let normal = outwardNormal(from: spanStart, to: spanEnd, clockwise: polygonIsClockwise(polygon))
-                geometry = (spanStart, spanEnd, normal)
-            } else if piece.shape == .rectangle {
+            if piece.shape == .rectangle {
                 let size = ShapePathBuilder.displaySize(for: piece)
                 switch segment.edge {
                 case .top:
@@ -1074,21 +937,18 @@ struct DrawingCanvasView: View {
                 geometry = edgeGeometryFromPolygon(edge: segment.edge, polygon: polygon, shape: piece.shape, baseBounds: baseBounds)
             }
             if let geometry {
+                let denom: CGFloat
                 let t: CGFloat
-                if curve.hasSpan {
-                    t = tForSpan(point: mid, start: geometry.start, end: geometry.end)
-                } else {
-                    switch segment.edge {
-                    case .top, .bottom, .legA:
-                        let denom = geometry.end.x - geometry.start.x
-                        t = denom == 0 ? 0.5 : (mid.x - geometry.start.x) / denom
-                    case .left, .right, .legB:
-                        let denom = geometry.end.y - geometry.start.y
-                        t = denom == 0 ? 0.5 : (mid.y - geometry.start.y) / denom
-                    case .hypotenuse:
-                        let total = distance(geometry.start, geometry.end)
-                        t = total == 0 ? 0.5 : distance(geometry.start, mid) / total
-                    }
+                switch segment.edge {
+                case .top, .bottom, .legA:
+                    denom = geometry.end.x - geometry.start.x
+                    t = denom == 0 ? 0.5 : (mid.x - geometry.start.x) / denom
+                case .left, .right, .legB:
+                    denom = geometry.end.y - geometry.start.y
+                    t = denom == 0 ? 0.5 : (mid.y - geometry.start.y) / denom
+                case .hypotenuse:
+                    let total = distance(geometry.start, geometry.end)
+                    t = total == 0 ? 0.5 : distance(geometry.start, mid) / total
                 }
                 let clampedT = min(max(t, 0), 1)
                 let control = controlPointDisplay(for: geometry, curve: curve)
@@ -1145,19 +1005,11 @@ struct DrawingCanvasView: View {
 
     private func segmentEdgeLabelPosition(segment: BoundarySegment, metrics: DrawingMetrics) -> CGPoint {
         let mid = CGPoint(x: (segment.start.x + segment.end.x) / 2, y: (segment.start.y + segment.end.y) / 2)
-        let polygon = ShapePathBuilder.displayPolygonPoints(for: piece, includeAngles: true)
-        if let curve = curveForSegment(segment, polygon: polygon), curve.radius > 0 {
+        if let curve = piece.curve(for: segment.edge), curve.radius > 0 {
+            let polygon = ShapePathBuilder.displayPolygonPoints(for: piece, includeAngles: true)
             let baseBounds = piece.shape == .rightTriangle ? CGRect(origin: .zero, size: ShapePathBuilder.displaySize(for: piece)) : nil
             let geometry: (start: CGPoint, end: CGPoint, normal: CGPoint)?
-            if curve.hasSpan, let range = spanSegmentRange(curve: curve, polygon: polygon), range.lower < range.upper {
-                let count = polygon.count
-                let startIndex = normalizedIndex(curve.startCornerIndex, count: count)
-                let endIndex = normalizedIndex(curve.endCornerIndex, count: count)
-                let spanStart = polygon[startIndex]
-                let spanEnd = polygon[endIndex]
-                let normal = outwardNormal(from: spanStart, to: spanEnd, clockwise: polygonIsClockwise(polygon))
-                geometry = (spanStart, spanEnd, normal)
-            } else if piece.shape == .rectangle {
+            if piece.shape == .rectangle {
                 let size = ShapePathBuilder.displaySize(for: piece)
                 switch segment.edge {
                 case .top:
@@ -1175,28 +1027,27 @@ struct DrawingCanvasView: View {
                 geometry = edgeGeometryFromPolygon(edge: segment.edge, polygon: polygon, shape: piece.shape, baseBounds: baseBounds)
             }
             if let geometry {
+                let denom: CGFloat
                 let t: CGFloat
-                if curve.hasSpan {
-                    t = tForSpan(point: mid, start: geometry.start, end: geometry.end)
-                } else {
-                    switch segment.edge {
-                    case .top, .bottom, .legA:
-                        let denom = geometry.end.x - geometry.start.x
-                        t = denom == 0 ? 0.5 : (mid.x - geometry.start.x) / denom
-                    case .left, .right, .legB:
-                        let denom = geometry.end.y - geometry.start.y
-                        t = denom == 0 ? 0.5 : (mid.y - geometry.start.y) / denom
-                    case .hypotenuse:
-                        let total = distance(geometry.start, geometry.end)
-                        t = total == 0 ? 0.5 : distance(geometry.start, mid) / total
-                    }
+                switch segment.edge {
+                case .top, .bottom, .legA:
+                    denom = geometry.end.x - geometry.start.x
+                    t = denom == 0 ? 0.5 : (mid.x - geometry.start.x) / denom
+                case .left, .right, .legB:
+                    denom = geometry.end.y - geometry.start.y
+                    t = denom == 0 ? 0.5 : (mid.y - geometry.start.y) / denom
+                case .hypotenuse:
+                    let total = distance(geometry.start, geometry.end)
+                    t = total == 0 ? 0.5 : distance(geometry.start, mid) / total
                 }
                 let clampedT = min(max(t, 0), 1)
                 let control = controlPointDisplay(for: geometry, curve: curve)
                 let curvePoint = quadBezierPoint(t: clampedT, start: geometry.start, control: control, end: geometry.end)
                 let offsetDistance = 6 / max(metrics.scale, 0.01)
-                let outward = normalized(geometry.normal)
-                var adjusted = offsetRelativeToPolygon(
+                let centroid = polygon.reduce(CGPoint.zero) { CGPoint(x: $0.x + $1.x, y: $0.y + $1.y) }
+                let center = CGPoint(x: centroid.x / CGFloat(polygon.count), y: centroid.y / CGFloat(polygon.count))
+                let outward = normalized(CGPoint(x: curvePoint.x - center.x, y: curvePoint.y - center.y))
+                let adjusted = offsetRelativeToPolygon(
                     point: curvePoint,
                     segmentStart: geometry.start,
                     segmentEnd: geometry.end,
@@ -1205,12 +1056,6 @@ struct DrawingCanvasView: View {
                     preferInside: false,
                     preferredDirection: outward
                 )
-                if pointIsInsidePolygon(adjusted, polygon: polygon) {
-                    adjusted = CGPoint(
-                        x: curvePoint.x - outward.x * offsetDistance,
-                        y: curvePoint.y - outward.y * offsetDistance
-                    )
-                }
                 return metrics.toCanvas(adjusted)
             }
         }
@@ -1806,9 +1651,7 @@ private extension EdgeTapGestureOverlay {
         let height = metrics.pieceSize.height * metrics.scale
         let rect = CGRect(x: origin.x, y: origin.y, width: width, height: height)
         let threshold: CGFloat = 28
-        let curveMap = Dictionary(grouping: curves, by: { $0.edge }).compactMapValues { list in
-            list.first(where: { !$0.hasSpan }) ?? list.first
-        }
+        let curveMap = Dictionary(grouping: curves, by: { $0.edge }).compactMapValues { $0.first }
 
         switch shape {
         case .rectangle:
