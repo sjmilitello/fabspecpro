@@ -455,20 +455,12 @@ enum PDFRenderer {
             if let logoData = headerData.logoData, let image = PlatformImage(data: logoData) {
                 let logoRect = CGRect(x: headerRect.minX + 12, y: headerRect.minY + 12, width: 64, height: 64)
                 #if canImport(UIKit)
-                context.saveGState()
-                context.translateBy(x: logoRect.minX, y: logoRect.maxY)
-                context.scaleBy(x: 1, y: -1)
                 UIGraphicsPushContext(context)
-                image.draw(in: CGRect(origin: .zero, size: logoRect.size))
+                image.draw(in: logoRect)
                 UIGraphicsPopContext()
-                context.restoreGState()
                 #else
                 if let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) {
-                    context.saveGState()
-                    context.translateBy(x: logoRect.minX, y: logoRect.maxY)
-                    context.scaleBy(x: 1, y: -1)
-                    context.draw(cgImage, in: CGRect(origin: .zero, size: logoRect.size))
-                    context.restoreGState()
+                    context.draw(cgImage, in: logoRect)
                 }
                 #endif
                 textX = logoRect.maxX + 12

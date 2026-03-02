@@ -114,22 +114,70 @@ struct LogoHeaderView: View {
 
 #if canImport(UIKit)
 extension View {
-    /// Adds a swipe-down gesture to dismiss the keyboard
+    /// Configures ScrollView to dismiss keyboard when scrolling
     func dismissKeyboardOnSwipe() -> some View {
-        self.gesture(
-            DragGesture(minimumDistance: 20, coordinateSpace: .local)
-                .onEnded { value in
-                    // Swipe down to dismiss
-                    if value.translation.height > 0 && abs(value.translation.height) > abs(value.translation.width) {
-                        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
-                    }
-                }
-        )
+        self.scrollDismissesKeyboard(.interactively)
+    }
+    
+    /// Dismisses keyboard when tapping outside text fields
+    func dismissKeyboardOnTap() -> some View {
+        self.contentShape(Rectangle())
+            .onTapGesture {
+                UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+            }
+    }
+    
+    /// Applies tap-to-dismiss keyboard to the entire view hierarchy
+    func dismissKeyboardOnTapOutside() -> some View {
+        self.onAppear {
+            setupKeyboardDismissGesture()
+        }
+    }
+}
+
+/// Sets up a global tap gesture to dismiss keyboard when tapping outside text fields
+private func setupKeyboardDismissGesture() {
+    guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+          let window = windowScene.windows.first else { return }
+    
+    // Check if we already added the gesture
+    let gestureTag = 999
+    if window.gestureRecognizers?.contains(where: { $0.view?.tag == gestureTag }) == true {
+        return
+    }
+    
+    let tapGesture = UITapGestureRecognizer(target: window, action: nil)
+    tapGesture.requiresExclusiveTouchType = false
+    tapGesture.cancelsTouchesInView = false
+    tapGesture.delegate = KeyboardDismissGestureDelegate.shared
+    window.addGestureRecognizer(tapGesture)
+}
+
+/// Gesture delegate that dismisses keyboard on any tap
+class KeyboardDismissGestureDelegate: NSObject, UIGestureRecognizerDelegate {
+    static let shared = KeyboardDismissGestureDelegate()
+    
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+        // Dismiss keyboard on any touch
+        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+        return false // Don't consume the touch
+    }
+    
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
+        return true
     }
 }
 #else
 extension View {
     func dismissKeyboardOnSwipe() -> some View {
+        self // No-op on macOS
+    }
+    
+    func dismissKeyboardOnTap() -> some View {
+        self // No-op on macOS
+    }
+    
+    func dismissKeyboardOnTapOutside() -> some View {
         self // No-op on macOS
     }
 }

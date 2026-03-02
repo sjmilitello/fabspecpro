@@ -119,13 +119,14 @@ struct PieceEditorView: View {
                     .padding(.horizontal, 20)
                     .padding(.bottom, 20)
                 }
+                .dismissKeyboardOnSwipe()
             }
         }
+        .dismissKeyboardOnTapOutside()
         .navigationTitle(piece.name)
         #if canImport(UIKit)
         .navigationBarTitleDisplayMode(.inline)
         #endif
-        .dismissKeyboardOnSwipe()
         .onChange(of: piece.shape) { _, newShape in
             enforceShapeDefaults(newShape)
             markUpdated()
@@ -724,6 +725,7 @@ struct PieceEditorView: View {
     private func deletePiece() {
         modelContext.delete(piece)
         markUpdated()
+        dismiss()
     }
 
     private var selectedTreatment: EdgeTreatment? {

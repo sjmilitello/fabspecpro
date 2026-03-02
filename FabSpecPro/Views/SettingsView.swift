@@ -14,6 +14,7 @@ struct SettingsView: View {
     @State private var newTreatmentCode = ""
     @State private var newMaterialName = ""
     @State private var logoItem: PhotosPickerItem?
+    @State private var showLogoFileImporter = false
 
     var body: some View {
         ZStack {
@@ -41,7 +42,6 @@ struct SettingsView: View {
         #if canImport(UIKit)
         .navigationBarTitleDisplayMode(.inline)
         #endif
-        .dismissKeyboardOnSwipe()
         .onAppear {
             ensureHeaderExists()
             ensurePieceDefaultsExists()
@@ -77,22 +77,43 @@ struct SettingsView: View {
                                 #if canImport(UIKit)
                                 .keyboardType(.phonePad)
                                 #endif
-                            PhotosPicker("Choose Logo", selection: $logoItem, matching: .images)
-                                .buttonStyle(PillButtonStyle())
-                                .onChange(of: logoItem) { _, newValue in
-                                    guard let newValue else { return }
-                                    Task {
-                                        if let data = try? await newValue.loadTransferable(type: Data.self) {
-                                            header.logoData = data
-                                        }
+                            Menu("Choose Logo") {
+                                Button("None") {
+                                    header.logoData = nil
+                                    logoItem = nil
+                                }
+
+                                PhotosPicker("Photo Library", selection: $logoItem, matching: .images)
+
+                                Button("Choose File") {
+                                    showLogoFileImporter = true
+                                }
+                            }
+                            .buttonStyle(PillButtonStyle())
+                            .onChange(of: logoItem) { _, newValue in
+                                guard let newValue else { return }
+                                Task {
+                                    if let data = try? await newValue.loadTransferable(type: Data.self) {
+                                        header.logoData = data
                                     }
                                 }
+                            }
+                            .fileImporter(
+                                isPresented: $showLogoFileImporter,
+                                allowedContentTypes: [.image],
+                                allowsMultipleSelection: false
+                            ) { result in
+                                guard let url = try? result.get().first else { return }
+                                guard let data = try? Data(contentsOf: url) else { return }
+                                header.logoData = data
+                            }
                         }
                     }
                 }
             }
             .padding(20)
             }
+            .dismissKeyboardOnSwipe()
         }
     }
 
@@ -134,6 +155,7 @@ struct SettingsView: View {
             }
             .padding(20)
             }
+            .dismissKeyboardOnSwipe()
         }
     }
 
@@ -183,6 +205,7 @@ struct SettingsView: View {
             }
             .padding(20)
             }
+            .dismissKeyboardOnSwipe()
         }
     }
 
@@ -494,6 +517,7 @@ struct SettingsView: View {
                 }
                 .padding(20)
             }
+            .dismissKeyboardOnSwipe()
         }
     }
 

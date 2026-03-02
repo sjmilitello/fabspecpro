@@ -128,12 +128,12 @@ struct ProjectDetailView: View {
                 }
                 .padding(20)
             }
+            .dismissKeyboardOnSwipe()
         }
         .navigationTitle(project.name)
         #if canImport(UIKit)
         .navigationBarTitleDisplayMode(.inline)
         #endif
-        .dismissKeyboardOnSwipe()
         .navigationDestination(item: $selectedPiece) { piece in
             PieceEditorView(piece: piece) { newPiece in
                 selectedPiece = newPiece
