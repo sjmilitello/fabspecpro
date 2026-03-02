@@ -4,14 +4,15 @@ import SwiftData
 struct DrawingCanvasView: View {
     @Bindable var piece: Piece
     let selectedTreatment: EdgeTreatment?
+    var isReadOnly: Bool = false
     @Environment(\.modelContext) private var modelContext
     @State private var lastEdgeTapId = UUID()
     private let lengthYOffsetPoints: CGFloat = -17
     private let lengthYOffsetInches: CGFloat = 0.125
     private let noteYOffsetInches: CGFloat = 2.0
     private let noteYOffsetPoints: CGFloat = 30
-    private let lengthLabelPadding: CGFloat = 15
-    private let widthLabelPadding: CGFloat = 30
+    private let lengthLabelPadding: CGFloat = 28
+    private let widthLabelPadding: CGFloat = 42
 
     var body: some View {
         GeometryReader { proxy in
@@ -24,14 +25,16 @@ struct DrawingCanvasView: View {
                     context.drawLayer { layerContext in
                         layerContext.translateBy(x: metrics.origin.x, y: metrics.origin.y)
                         layerContext.scaleBy(x: metrics.scale, y: metrics.scale)
-                        layerContext.stroke(path, with: .color(Theme.primaryText), lineWidth: 0.5)
+                        // Use consistent line width by dividing by scale (so it doesn't change with zoom)
+                        let strokeWidth = 1.5 / metrics.scale
+                        layerContext.stroke(path, with: .color(Theme.primaryText), lineWidth: strokeWidth)
 
                     for cutout in piece.cutouts where cutout.centerX >= 0 && cutout.centerY >= 0 && !isEffectiveNotch(cutout, piece: piece, pieceSize: metrics.pieceSize) {
                         let displayCutout = rotatedCutout(cutout)
                         let angleCuts = localAngleCuts(for: cutout)
                         let cornerRadii = localCornerRadii(for: cutout)
                         let cutoutPath = ShapePathBuilder.cutoutPath(displayCutout, angleCuts: angleCuts, cornerRadii: cornerRadii)
-                        layerContext.stroke(cutoutPath, with: .color(Theme.accent), lineWidth: 0.5)
+                        layerContext.stroke(cutoutPath, with: .color(Theme.accent), lineWidth: strokeWidth)
                     }
                 }
 
@@ -43,77 +46,88 @@ struct DrawingCanvasView: View {
 
                     drawDimensionLabels(in: &context, metrics: metrics)
                     drawEdgeLabels(in: &context, metrics: metrics, refreshToken: lastEdgeTapId)
-                    drawCornerLabels(in: &context, metrics: metrics)
-                    drawCutoutNotes(in: &context, metrics: metrics)
+                    // Only show corner labels and cutout notes in interactive mode, not in read-only thumbnails
+                    if !isReadOnly {
+                        drawCornerLabels(in: &context, metrics: metrics)
+                    }
+                    if !isReadOnly {
+                        drawCutoutNotes(in: &context, metrics: metrics)
+                    }
                 }
 
-                let expanded = expandedDisplayBounds(metrics: metrics)
-                let totalWidth = MeasurementParser.formatInches(Double(expanded.height))
-                let totalLength = MeasurementParser.formatInches(Double(expanded.width))
-                Text("\(totalWidth) in W x \(totalLength) in L")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(Theme.secondaryText)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                    .padding(12)
+                // Only show total dimensions text in interactive mode
+                if !isReadOnly {
+                    let expanded = expandedDisplayBounds(metrics: metrics)
+                    let totalWidth = MeasurementParser.formatInches(Double(expanded.height))
+                    let totalLength = MeasurementParser.formatInches(Double(expanded.width))
+                    Text("\(totalWidth) in W x \(totalLength) in L")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(Theme.secondaryText)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                        .padding(12)
+                }
 
-                EdgeTapGestureOverlay(
-                    metrics: metrics,
-                    shape: piece.shape,
-                    curves: piece.curvedEdges,
-                    cutouts: piece.cutouts,
-                    angleSegments: ShapePathBuilder.angleSegments(for: piece),
-                    boundarySegments: ShapePathBuilder.boundarySegments(for: piece)
-                ) { target in
-                    if piece.shape == .rightTriangle {
-                        switch target.edge {
-                        case .top, .right, .bottom, .left:
-                            return
-                        default:
-                            break
+                // Only show interactive overlay in non-read-only mode
+                if !isReadOnly {
+                    EdgeTapGestureOverlay(
+                        metrics: metrics,
+                        shape: piece.shape,
+                        curves: piece.curvedEdges,
+                        cutouts: piece.cutouts,
+                        angleSegments: ShapePathBuilder.angleSegments(for: piece),
+                        boundarySegments: ShapePathBuilder.boundarySegments(for: piece)
+                    ) { target in
+                        if piece.shape == .rightTriangle {
+                            switch target.edge {
+                            case .top, .right, .bottom, .left:
+                                return
+                            default:
+                                break
+                            }
                         }
-                    }
-                    if let selectedTreatment {
-                        if let segmentIndex = target.segmentIndex {
-                            if piece.segmentTreatment(for: target.edge, index: segmentIndex)?.id == selectedTreatment.id {
-                                piece.clearSegmentTreatment(for: target.edge, index: segmentIndex)
+                        if let selectedTreatment {
+                            if let segmentIndex = target.segmentIndex {
+                                if piece.segmentTreatment(for: target.edge, index: segmentIndex)?.id == selectedTreatment.id {
+                                    piece.clearSegmentTreatment(for: target.edge, index: segmentIndex)
+                                } else {
+                                    piece.setSegmentTreatment(selectedTreatment, for: target.edge, index: segmentIndex, context: modelContext)
+                                }
                             } else {
-                                piece.setSegmentTreatment(selectedTreatment, for: target.edge, index: segmentIndex, context: modelContext)
+                                if piece.treatment(for: target.edge)?.id == selectedTreatment.id {
+                                    piece.clearTreatment(for: target.edge)
+                                } else {
+                                    piece.setTreatment(selectedTreatment, for: target.edge, context: modelContext)
+                                }
+                            }
+                        } else if let segmentIndex = target.segmentIndex {
+                            piece.clearSegmentTreatment(for: target.edge, index: segmentIndex)
+                        } else {
+                            piece.clearTreatment(for: target.edge)
+                        }
+                        lastEdgeTapId = UUID()
+                    } cutoutEdgeTapped: { cutoutId, edge in
+                        if let selectedTreatment {
+                            if piece.cutoutTreatment(for: cutoutId, edge: edge)?.id == selectedTreatment.id {
+                                piece.clearCutoutTreatment(for: cutoutId, edge: edge)
+                            } else {
+                                piece.setCutoutTreatment(selectedTreatment, for: cutoutId, edge: edge, context: modelContext)
                             }
                         } else {
-                            if piece.treatment(for: target.edge)?.id == selectedTreatment.id {
-                                piece.clearTreatment(for: target.edge)
-                            } else {
-                                piece.setTreatment(selectedTreatment, for: target.edge, context: modelContext)
-                            }
-                        }
-                    } else if let segmentIndex = target.segmentIndex {
-                        piece.clearSegmentTreatment(for: target.edge, index: segmentIndex)
-                    } else {
-                        piece.clearTreatment(for: target.edge)
-                    }
-                    lastEdgeTapId = UUID()
-                } cutoutEdgeTapped: { cutoutId, edge in
-                    if let selectedTreatment {
-                        if piece.cutoutTreatment(for: cutoutId, edge: edge)?.id == selectedTreatment.id {
                             piece.clearCutoutTreatment(for: cutoutId, edge: edge)
-                        } else {
-                            piece.setCutoutTreatment(selectedTreatment, for: cutoutId, edge: edge, context: modelContext)
                         }
-                    } else {
-                        piece.clearCutoutTreatment(for: cutoutId, edge: edge)
-                    }
-                    lastEdgeTapId = UUID()
-                } angleEdgeTapped: { angleId in
-                    if let selectedTreatment {
-                        if piece.angleTreatment(for: angleId)?.id == selectedTreatment.id {
+                        lastEdgeTapId = UUID()
+                    } angleEdgeTapped: { angleId in
+                        if let selectedTreatment {
+                            if piece.angleTreatment(for: angleId)?.id == selectedTreatment.id {
+                                piece.clearAngleTreatment(for: angleId)
+                            } else {
+                                piece.setAngleTreatment(selectedTreatment, for: angleId, context: modelContext)
+                            }
+                        } else {
                             piece.clearAngleTreatment(for: angleId)
-                        } else {
-                            piece.setAngleTreatment(selectedTreatment, for: angleId, context: modelContext)
                         }
-                    } else {
-                        piece.clearAngleTreatment(for: angleId)
+                        lastEdgeTapId = UUID()
                     }
-                    lastEdgeTapId = UUID()
                 }
 
             }

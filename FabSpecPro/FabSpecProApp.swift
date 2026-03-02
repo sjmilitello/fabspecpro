@@ -48,10 +48,19 @@ struct FabSpecProApp: App {
         }
     }()
 
+    @State private var showLaunchScreen = true
+    
     var body: some Scene {
         WindowGroup {
-            ContentView()
-                .preferredColorScheme(.dark)
+            ZStack {
+                ContentView()
+                    .preferredColorScheme(.dark)
+                
+                if showLaunchScreen {
+                    LaunchScreenView(isActive: $showLaunchScreen)
+                        .zIndex(1)
+                }
+            }
         }
         .modelContainer(sharedModelContainer)
     }

@@ -6,11 +6,15 @@ import UIKit
 import AppKit
 #endif
 
+enum PieceViewMode: String, CaseIterable {
+    case list = "List"
+    case image = "Image"
+}
+
 struct ProjectDetailView: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(\.dismiss) private var dismiss
     @Query private var headers: [BusinessHeader]
-    @Query private var pieces: [Piece]
     @Query private var pieceDefaults: [PieceDefaults]
     @Bindable var project: Project
     @State private var pdfData: Data?
@@ -18,11 +22,12 @@ struct ProjectDetailView: View {
     @State private var pieceToDelete: Piece?
     @State private var selectedPiece: Piece?
     @State private var isShowingDeleteProject = false
-
-    init(project: Project) {
-        self.project = project
-        let projectId = project.id
-        _pieces = Query(filter: #Predicate<Piece> { $0.project?.id == projectId })
+    @State private var viewMode: PieceViewMode = .list
+    
+    /// Access pieces through the project relationship to avoid SwiftData exclusivity violations
+    /// when generating PDFs (which also accesses piece data)
+    private var pieces: [Piece] {
+        project.pieces
     }
 
     var body: some View {
@@ -58,10 +63,22 @@ struct ProjectDetailView: View {
 
                     SectionCard(title: "Pieces") {
                         VStack(spacing: 12) {
-                            Button("Add Piece") {
-                                addPiece()
+                            HStack {
+                                Button("Add Piece") {
+                                    addPiece()
+                                }
+                                .buttonStyle(PillButtonStyle(isProminent: true))
+                                
+                                Spacer()
+                                
+                                Picker("View", selection: $viewMode) {
+                                    ForEach(PieceViewMode.allCases, id: \.self) { mode in
+                                        Text(mode.rawValue).tag(mode)
+                                    }
+                                }
+                                .pickerStyle(.segmented)
+                                .frame(width: 140)
                             }
-                            .buttonStyle(PillButtonStyle(isProminent: true))
 
                             ForEach(groupedKeys, id: \.self) { key in
                                 VStack(alignment: .leading, spacing: 8) {
@@ -72,12 +89,16 @@ struct ProjectDetailView: View {
                                         .font(.system(size: 11, weight: .semibold))
                                         .foregroundStyle(Theme.secondaryText)
 
-                                    LazyVGrid(columns: gridColumns, spacing: 10) {
+                                    LazyVGrid(columns: viewMode == .list ? gridColumns : imageGridColumns, spacing: 10) {
                                         ForEach(groupedPieces[key, default: []]) { piece in
                                             Button {
                                                 selectedPiece = piece
                                             } label: {
-                                                PieceRow(piece: piece)
+                                                if viewMode == .list {
+                                                    PieceRow(piece: piece)
+                                                } else {
+                                                    PieceImageRow(piece: piece)
+                                                }
                                             }
                                             .buttonStyle(.plain)
                                             .contextMenu {
@@ -104,7 +125,9 @@ struct ProjectDetailView: View {
         .navigationBarTitleDisplayMode(.inline)
         #endif
         .navigationDestination(item: $selectedPiece) { piece in
-            PieceEditorView(piece: piece)
+            PieceEditorView(piece: piece) { newPiece in
+                selectedPiece = newPiece
+            }
         }
 #if canImport(UIKit)
         .sheet(isPresented: $isShowingShare) {
@@ -216,6 +239,7 @@ struct ProjectDetailView: View {
 
     private func generatePDF() {
         guard let header = currentHeader else { return }
+        // Generate PDF synchronously - async dispatch can cause SwiftData exclusivity violations
         pdfData = PDFRenderer.render(project: project, header: header)
         isShowingShare = true
     }
@@ -245,6 +269,10 @@ struct ProjectDetailView: View {
 
     private var gridColumns: [GridItem] {
         [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)]
+    }
+    
+    private var imageGridColumns: [GridItem] {
+        [GridItem(.flexible(), spacing: 10)]
     }
 }
 
@@ -278,6 +306,48 @@ private struct PieceRow: View {
         .padding(12)
         .background(Theme.panel)
         .clipShape(RoundedRectangle(cornerRadius: 12))
+    }
+}
+
+private struct PieceImageRow: View {
+    @Bindable var piece: Piece
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            // Piece name header in upper left, quantity on right
+            HStack {
+                Text(piece.name)
+                    .foregroundStyle(Theme.primaryText)
+                    .font(.system(size: 13, weight: .semibold))
+                Spacer()
+                Text("Qty \(piece.quantity)")
+                    .foregroundStyle(Theme.secondaryText)
+                    .font(.system(size: 12, weight: .semibold))
+            }
+            .padding(.horizontal, 12)
+            .padding(.top, 8)
+            .padding(.bottom, 2)
+            
+            // Full drawing canvas in read-only mode - shows measurements and edge notations
+            DrawingCanvasView(piece: piece, selectedTreatment: nil, isReadOnly: true)
+                .frame(height: calculateDrawingHeight())
+                .padding(.horizontal, 2)
+                .padding(.bottom, 4)
+        }
+        .background(Theme.panel)
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+    }
+    
+    private func calculateDrawingHeight() -> CGFloat {
+        let size = ShapePathBuilder.displaySize(for: piece)
+        let aspectRatio = size.height / max(size.width, 1)
+        // Larger base height for better visibility
+        // Taller pieces get more height, wider pieces get less
+        let baseHeight: CGFloat = 260
+        let minHeight: CGFloat = 220
+        let maxHeight: CGFloat = 360
+        let adjustedHeight = baseHeight * max(0.85, min(1.3, aspectRatio))
+        return min(max(adjustedHeight, minHeight), maxHeight)
     }
 }
 

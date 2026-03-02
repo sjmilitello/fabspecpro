@@ -1434,7 +1434,7 @@ enum ShapePathBuilder {
             }
             result.append(point)
         }
-        if result.count > 1, distance(result.first!, result.last!) < 0.0001 {
+        if result.count > 1, let first = result.first, let last = result.last, distance(first, last) < 0.0001 {
             result.removeLast()
         }
         return result

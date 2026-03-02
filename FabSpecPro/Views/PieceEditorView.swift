@@ -3,13 +3,14 @@ import SwiftData
 
 struct PieceEditorView: View {
     @Environment(\.modelContext) private var modelContext
+    @Environment(\.dismiss) private var dismiss
     @Query private var treatments: [EdgeTreatment]
     @Query private var materials: [MaterialOption]
     @Query private var pieceDefaults: [PieceDefaults]
     @Bindable var piece: Piece
+    var onNavigateToPiece: ((Piece) -> Void)?
 
     @State private var selectedTreatmentId: UUID?
-    @State private var nextPiece: Piece?
     @State private var isMaterialOpen = false
     @State private var isShapeOpen = false
     @State private var isDrawingOpen = false
@@ -32,83 +33,92 @@ struct PieceEditorView: View {
     var body: some View {
         ZStack {
             Theme.background.ignoresSafeArea()
-            ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
-                    collapsibleSection(title: "Material", isOpen: $isMaterialOpen) {
-                        VStack(spacing: 12) {
-                            TextField("Piece name", text: $piece.name, prompt: Text("Piece name").foregroundStyle(Theme.secondaryText))
-                                .foregroundStyle(Theme.primaryText)
-                                #if canImport(UIKit)
-                                .textInputAutocapitalization(.words)
-                                #endif
-                            TextField("Material name", text: $piece.materialName, prompt: Text("Material name").foregroundStyle(Theme.secondaryText))
-                                .foregroundStyle(Theme.primaryText)
-                                #if canImport(UIKit)
-                                .textInputAutocapitalization(.words)
-                                #endif
-                            HStack {
-                                Picker("Thickness", selection: $piece.thicknessRaw) {
-                                    ForEach(MaterialThickness.allCases) { thickness in
-                                        Text(thickness.rawValue).tag(thickness.rawValue)
+            VStack(spacing: 0) {
+                // Drawing section pinned to top
+                collapsibleSection(title: "Drawing", isOpen: $isDrawingOpen) {
+                    VStack(spacing: 12) {
+                        DrawingCanvasView(piece: piece, selectedTreatment: selectedTreatment)
+                            .frame(height: 320)
+                        edgeTreatmentPicker
+                    }
+                }
+                .padding(.horizontal, 20)
+                .padding(.top, 20)
+                .padding(.bottom, 18)
+                .background(Theme.background)
+                
+                // Scrollable content below
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 18) {
+                        collapsibleSection(title: "Material", isOpen: $isMaterialOpen) {
+                            VStack(spacing: 12) {
+                                TextField("Piece name", text: $piece.name, prompt: Text("Piece name").foregroundStyle(Theme.secondaryText))
+                                    .foregroundStyle(Theme.primaryText)
+                                    #if canImport(UIKit)
+                                    .textInputAutocapitalization(.words)
+                                    #endif
+                                TextField("Material name", text: $piece.materialName, prompt: Text("Material name").foregroundStyle(Theme.secondaryText))
+                                    .foregroundStyle(Theme.primaryText)
+                                    #if canImport(UIKit)
+                                    .textInputAutocapitalization(.words)
+                                    #endif
+                                HStack {
+                                    Picker("Thickness", selection: $piece.thicknessRaw) {
+                                        ForEach(MaterialThickness.allCases) { thickness in
+                                            Text(thickness.rawValue).tag(thickness.rawValue)
+                                        }
                                     }
-                                }
-                                .pickerStyle(.menu)
-                                Spacer()
-                                Menu("Saved") {
-                                    ForEach(materials) { material in
-                                        Button(material.name) { piece.materialName = material.name }
+                                    .pickerStyle(.menu)
+                                    Spacer()
+                                    Menu("Saved") {
+                                        ForEach(materials) { material in
+                                            Button(material.name) { piece.materialName = material.name }
+                                        }
                                     }
                                 }
                             }
                         }
-                    }
 
-                    collapsibleSection(title: "Shape", isOpen: $isShapeOpen) {
-                        VStack(spacing: 12) {
-                            shapeButtons
-                            dimensionFields
-                            Stepper("Qty \(piece.quantity)", value: $piece.quantity, in: 1...99)
+                        collapsibleSection(title: "Shape", isOpen: $isShapeOpen) {
+                            VStack(spacing: 12) {
+                                shapeButtons
+                                dimensionFields
+                                Stepper("Qty \(piece.quantity)", value: $piece.quantity, in: 1...99)
+                                    .foregroundStyle(Theme.primaryText)
+                            }
+                        }
+
+                        optionsSection
+
+                        collapsibleSection(title: "Notes", isOpen: $isNotesOpen) {
+                            TextField("Notes", text: $piece.notes, prompt: Text("Notes").foregroundStyle(Theme.secondaryText), axis: .vertical)
                                 .foregroundStyle(Theme.primaryText)
+                                .lineLimit(3...6)
+                        }
+
+                        HStack(spacing: 12) {
+                            Button("Add Another Piece") {
+                                addAnotherPiece()
+                            }
+                            .buttonStyle(PillButtonStyle(isProminent: true))
+
+                            Spacer()
+
+                            Button("Delete Piece", role: .destructive) {
+                                showDeletePieceConfirm = true
+                            }
+                            .buttonStyle(PillButtonStyle(textColor: .white, backgroundColor: .red))
+                        }
+                        .alert("Delete Piece?", isPresented: $showDeletePieceConfirm) {
+                            Button("Delete", role: .destructive) { deletePiece() }
+                            Button("Cancel", role: .cancel) {}
+                        } message: {
+                            Text("This will remove the piece and its details.")
                         }
                     }
-
-                    collapsibleSection(title: "Drawing", isOpen: $isDrawingOpen) {
-                        VStack(spacing: 12) {
-                            DrawingCanvasView(piece: piece, selectedTreatment: selectedTreatment)
-                                .frame(height: 320)
-                            edgeTreatmentPicker
-                        }
-                    }
-
-                    optionsSection
-
-                    collapsibleSection(title: "Notes", isOpen: $isNotesOpen) {
-                        TextField("Notes", text: $piece.notes, prompt: Text("Notes").foregroundStyle(Theme.secondaryText), axis: .vertical)
-                            .foregroundStyle(Theme.primaryText)
-                            .lineLimit(3...6)
-                    }
-
-                    HStack(spacing: 12) {
-                        Button("Add Another Piece") {
-                            addAnotherPiece()
-                        }
-                        .buttonStyle(PillButtonStyle(isProminent: true))
-
-                        Spacer()
-
-                        Button("Delete Piece", role: .destructive) {
-                            showDeletePieceConfirm = true
-                        }
-                        .buttonStyle(PillButtonStyle(textColor: .white, backgroundColor: .red))
-                    }
-                    .alert("Delete Piece?", isPresented: $showDeletePieceConfirm) {
-                        Button("Delete", role: .destructive) { deletePiece() }
-                        Button("Cancel", role: .cancel) {}
-                    } message: {
-                        Text("This will remove the piece and its details.")
-                    }
+                    .padding(.horizontal, 20)
+                    .padding(.bottom, 20)
                 }
-                .padding(20)
             }
         }
         .navigationTitle(piece.name)
@@ -148,9 +158,6 @@ struct PieceEditorView: View {
         .onChange(of: piece.angleCuts.count) { _, _ in markUpdated() }
         .onChange(of: piece.cornerRadii.count) { _, _ in markUpdated() }
         .onChange(of: piece.edgeAssignments.count) { _, _ in markUpdated() }
-        .navigationDestination(item: $nextPiece) { piece in
-            PieceEditorView(piece: piece)
-        }
     }
 
     private var shapeButtons: some View {
@@ -664,7 +671,14 @@ struct PieceEditorView: View {
         newPiece.project = project
         modelContext.insert(newPiece)
         markUpdated()
-        nextPiece = newPiece
+        
+        // Navigate via callback to avoid deep navigation stack
+        if let onNavigateToPiece {
+            dismiss()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                onNavigateToPiece(newPiece)
+            }
+        }
     }
 
     private func deletePiece() {
@@ -1772,10 +1786,8 @@ private struct AngleCutRow: View {
                     get: { angleCut.angleDegrees },
                     set: { newValue in
                         guard !isUpdatingFromDistance else { return }
-                        isUpdatingFromAngle = true
                         angleCut.angleDegrees = newValue
                         updateDistancesFromAngle()
-                        isUpdatingFromAngle = false
                     }
                 ), format: .number)
                 .foregroundStyle(Theme.primaryText)
@@ -1810,6 +1822,9 @@ private struct AngleCutRow: View {
     private func updateDistancesFromAngle() {
         guard !isUpdatingFromDistance else { return }
         
+        // Set flag BEFORE modifying distances to prevent .onChange from recalculating angle
+        isUpdatingFromAngle = true
+        
         let angleRadians = angleCut.angleDegrees * .pi / 180
         
         // Keep the hypotenuse length the same, adjust both edges
@@ -1826,6 +1841,11 @@ private struct AngleCutRow: View {
         if newEdge1 > 0 && newEdge2 > 0 {
             angleCut.anchorOffset = newEdge1
             angleCut.secondaryOffset = newEdge2
+        }
+        
+        // Reset flag after a short delay to allow .onChange to complete
+        DispatchQueue.main.async {
+            self.isUpdatingFromAngle = false
         }
     }
 
