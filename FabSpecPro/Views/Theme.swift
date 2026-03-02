@@ -1,4 +1,7 @@
 import SwiftUI
+#if canImport(UIKit)
+import UIKit
+#endif
 
 enum Theme {
     static let background = LinearGradient(
@@ -106,3 +109,28 @@ struct LogoHeaderView: View {
         }
     }
 }
+
+// MARK: - Keyboard Dismissal
+
+#if canImport(UIKit)
+extension View {
+    /// Adds a swipe-down gesture to dismiss the keyboard
+    func dismissKeyboardOnSwipe() -> some View {
+        self.gesture(
+            DragGesture(minimumDistance: 20, coordinateSpace: .local)
+                .onEnded { value in
+                    // Swipe down to dismiss
+                    if value.translation.height > 0 && abs(value.translation.height) > abs(value.translation.width) {
+                        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+                    }
+                }
+        )
+    }
+}
+#else
+extension View {
+    func dismissKeyboardOnSwipe() -> some View {
+        self // No-op on macOS
+    }
+}
+#endif

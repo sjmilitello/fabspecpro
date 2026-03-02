@@ -28,15 +28,19 @@ final class PieceDefaults {
     var enableDefaultCurve: Bool = false
     var defaultCurveRadius: Double = 2.0
     var defaultCurveIsConcave: Bool = false
+    var defaultCurveStartCorner: Int = -1  // -1 means "None"
+    var defaultCurveEndCorner: Int = -1    // -1 means "None"
 
     // Angle defaults (optional - applied when adding angle)
     var enableDefaultAngle: Bool = false
     var defaultAngleDegrees: Double = 45.0
+    var defaultAngleCorner: Int = -1  // -1 means "None"
 
     // Corner radius defaults (optional - applied when adding corner radius)
     var enableDefaultCornerRadius: Bool = false
     var defaultCornerRadiusValue: Double = 1.0
     var defaultCornerRadiusIsInside: Bool = false
+    var defaultCornerRadiusCorner: Int = -1  // -1 means "None"
 
     init() {}
 }

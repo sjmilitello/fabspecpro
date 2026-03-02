@@ -125,6 +125,7 @@ struct PieceEditorView: View {
         #if canImport(UIKit)
         .navigationBarTitleDisplayMode(.inline)
         #endif
+        .dismissKeyboardOnSwipe()
         .onChange(of: piece.shape) { _, newShape in
             enforceShapeDefaults(newShape)
             markUpdated()
@@ -319,7 +320,7 @@ struct PieceEditorView: View {
         HStack(spacing: 10) {
             Button("Add Cutout") {
                 let defaultKind: CutoutKind
-                if let defaults = pieceDefaults.first, defaults.enableDefaultCutout {
+                if let defaults = pieceDefaults.first {
                     defaultKind = defaults.defaultCutoutShape == "Rectangle" ? .rectangle : .circle
                 } else {
                     defaultKind = .circle
@@ -404,10 +405,10 @@ struct PieceEditorView: View {
     private func addCutout(kind: CutoutKind) {
         let size = ShapePathBuilder.pieceSize(for: piece)
         
-        // Apply defaults if enabled
+        // Apply defaults
         var cutoutWidth: Double = 3
         var cutoutHeight: Double = 3
-        if let defaults = pieceDefaults.first, defaults.enableDefaultCutout {
+        if let defaults = pieceDefaults.first {
             cutoutWidth = defaults.defaultCutoutWidth
             cutoutHeight = defaults.defaultCutoutHeight
         }
@@ -433,10 +434,14 @@ struct PieceEditorView: View {
         // Determine radius - use defaults if enabled, otherwise use shape-based default
         var curveRadius: Double = piece.shape == .rightTriangle ? triangleQuarterCircleRadius() : 2
         var curveIsConcave: Bool = false
+        var defaultStartCorner: Int = -1
+        var defaultEndCorner: Int = -1
         
-        if let defaults = pieceDefaults.first, defaults.enableDefaultCurve {
+        if let defaults = pieceDefaults.first {
             curveRadius = defaults.defaultCurveRadius
             curveIsConcave = defaults.defaultCurveIsConcave
+            defaultStartCorner = defaults.defaultCurveStartCorner
+            defaultEndCorner = defaults.defaultCurveEndCorner
         }
         
         let maxCurves = piece.shape == .rightTriangle ? 3 : 4
@@ -467,6 +472,13 @@ struct PieceEditorView: View {
             }
         }
         let curve = CurvedEdge(edge: defaultEdge, radius: curveRadius, isConcave: curveIsConcave)
+        
+        // Apply default corner selection if both start and end are set
+        if defaultStartCorner >= 0 && defaultEndCorner >= 0 && defaultStartCorner != defaultEndCorner {
+            curve.startCornerIndex = defaultStartCorner
+            curve.endCornerIndex = defaultEndCorner
+        }
+        
         curve.piece = piece
         modelContext.insert(curve)
         openCurveIds = [curve.id]
@@ -489,17 +501,32 @@ struct PieceEditorView: View {
         let usedAngles = Set(piece.angleCuts.map { $0.anchorCornerIndex })
         let usedRadii = Set(piece.cornerRadii.map { $0.cornerIndex })
         let avoid = usedAngles.union(usedRadii)
-        let index = nextAvailableCornerIndex(count: cornerCount, avoiding: avoid) ?? -1
-        if index >= 0 {
-            removeAngle(at: index)
-        }
         
-        // Apply defaults if enabled
+        // Use default corner if set, otherwise find next available
+        var index: Int = -1
         var radiusValue: Double = 1
         var isInside: Bool = false
-        if let defaults = pieceDefaults.first, defaults.enableDefaultCornerRadius {
+        
+        if let defaults = pieceDefaults.first {
             radiusValue = defaults.defaultCornerRadiusValue
             isInside = defaults.defaultCornerRadiusIsInside
+            
+            if defaults.defaultCornerRadiusCorner >= 0 {
+                // Use the default corner if it's not already used
+                if !avoid.contains(defaults.defaultCornerRadiusCorner) && defaults.defaultCornerRadiusCorner < cornerCount {
+                    index = defaults.defaultCornerRadiusCorner
+                } else {
+                    index = nextAvailableCornerIndex(count: cornerCount, avoiding: avoid) ?? -1
+                }
+            } else {
+                index = nextAvailableCornerIndex(count: cornerCount, avoiding: avoid) ?? -1
+            }
+        } else {
+            index = nextAvailableCornerIndex(count: cornerCount, avoiding: avoid) ?? -1
+        }
+        
+        if index >= 0 {
+            removeAngle(at: index)
         }
         
         let cornerRadius = CornerRadius(cornerIndex: index, radius: radiusValue, isInside: isInside)
@@ -525,14 +552,27 @@ struct PieceEditorView: View {
         let usedAngles = Set(piece.angleCuts.map { $0.anchorCornerIndex })
         let usedRadii = Set(piece.cornerRadii.map { $0.cornerIndex })
         let avoid = usedAngles.union(usedRadii)
-        let defaultCorner = nextAvailableCornerIndex(count: cornerCount, avoiding: avoid) ?? -1
+        
+        // Use default corner if set, otherwise find next available
+        var defaultCorner: Int = -1
+        if let defaults = pieceDefaults.first, defaults.defaultAngleCorner >= 0 {
+            // Use the default corner if it's not already used
+            if !avoid.contains(defaults.defaultAngleCorner) && defaults.defaultAngleCorner < cornerCount {
+                defaultCorner = defaults.defaultAngleCorner
+            } else {
+                defaultCorner = nextAvailableCornerIndex(count: cornerCount, avoiding: avoid) ?? -1
+            }
+        } else {
+            defaultCorner = nextAvailableCornerIndex(count: cornerCount, avoiding: avoid) ?? -1
+        }
+        
         if defaultCorner >= 0 {
             removeCornerRadius(at: defaultCorner)
         }
         let angle = AngleCut(anchorCornerIndex: defaultCorner)
         
-        // Apply defaults if enabled
-        if let defaults = pieceDefaults.first, defaults.enableDefaultAngle {
+        // Apply default degrees
+        if let defaults = pieceDefaults.first {
             angle.angleDegrees = defaults.defaultAngleDegrees
         }
         

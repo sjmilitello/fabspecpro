@@ -846,7 +846,6 @@ enum PDFRenderer {
         let pieceHeaderToTopMeasurementGap: CGFloat = 14
         let topMeasurementToEdgeGap: CGFloat = 4
         let bottomMeasurementToEdgeGap: CGFloat = 6
-        let notesToNextHeaderGap: CGFloat = 6
         let minTopMargin: CGFloat = 10
         let noteOffsetMultiplier: CGFloat = 7.6
         let notesLineHeight: CGFloat = 12
@@ -881,7 +880,6 @@ enum PDFRenderer {
         let topPadding = max(rightPadding * 0.55, requiredTopPadding)
         let drawingWidth = size.width * resolvedScale
         let drawingHeight = size.height * resolvedScale
-        let notesOffset = max(resolvedScale * noteOffsetMultiplier, notesToNextHeaderGap)
 
         let drawingRect = CGRect(
             x: leftPadding,

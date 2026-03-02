@@ -23,6 +23,7 @@ struct ProjectDetailView: View {
     @State private var selectedPiece: Piece?
     @State private var isShowingDeleteProject = false
     @State private var viewMode: PieceViewMode = .list
+    @State private var isGeneratingPDF = false
     
     /// Access pieces through the project relationship to avoid SwiftData exclusivity violations
     /// when generating PDFs (which also accesses piece data)
@@ -49,10 +50,18 @@ struct ProjectDetailView: View {
                                 .foregroundStyle(Theme.primaryText)
                                 .lineLimit(3...6)
                             HStack(spacing: 12) {
-                                Button("Export PDF") {
+                                Button {
                                     generatePDF()
+                                } label: {
+                                    if isGeneratingPDF {
+                                        ProgressView()
+                                            .progressViewStyle(CircularProgressViewStyle(tint: Theme.primaryText))
+                                    } else {
+                                        Text("Export PDF")
+                                    }
                                 }
                                 .buttonStyle(PillButtonStyle(isProminent: true))
+                                .disabled(isGeneratingPDF)
                                 Button("Delete Project") {
                                     isShowingDeleteProject = true
                                 }
@@ -124,6 +133,7 @@ struct ProjectDetailView: View {
         #if canImport(UIKit)
         .navigationBarTitleDisplayMode(.inline)
         #endif
+        .dismissKeyboardOnSwipe()
         .navigationDestination(item: $selectedPiece) { piece in
             PieceEditorView(piece: piece) { newPiece in
                 selectedPiece = newPiece
@@ -239,9 +249,17 @@ struct ProjectDetailView: View {
 
     private func generatePDF() {
         guard let header = currentHeader else { return }
-        // Generate PDF synchronously - async dispatch can cause SwiftData exclusivity violations
-        pdfData = PDFRenderer.render(project: project, header: header)
-        isShowingShare = true
+        guard !isGeneratingPDF else { return }
+        
+        isGeneratingPDF = true
+        
+        // Use a small delay to allow the loading indicator to appear before blocking the main thread
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            // Generate PDF synchronously on main thread - required for SwiftData access
+            pdfData = PDFRenderer.render(project: project, header: header)
+            isGeneratingPDF = false
+            isShowingShare = true
+        }
     }
     
     #if !canImport(UIKit)

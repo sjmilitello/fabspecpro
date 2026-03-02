@@ -41,6 +41,7 @@ struct SettingsView: View {
         #if canImport(UIKit)
         .navigationBarTitleDisplayMode(.inline)
         #endif
+        .dismissKeyboardOnSwipe()
         .onAppear {
             ensureHeaderExists()
             ensurePieceDefaultsExists()
@@ -263,12 +264,12 @@ struct SettingsView: View {
                                     #endif
                                 }
 
-                                // Height
+                                // Length
                                 HStack {
-                                    Text("Height")
+                                    Text("Length")
                                         .foregroundStyle(Theme.primaryText)
                                     Spacer()
-                                    TextField("Height", text: Binding(
+                                    TextField("Length", text: Binding(
                                         get: { defaults.defaultHeight },
                                         set: { defaults.defaultHeight = $0 }
                                     ), prompt: Text("18").foregroundStyle(Theme.secondaryText))
@@ -297,62 +298,53 @@ struct SettingsView: View {
                         // Cutout Defaults Section
                         SectionCard(title: "Cutout Defaults") {
                             VStack(spacing: 12) {
-                                Toggle("Apply defaults when adding cutout", isOn: Binding(
-                                    get: { defaults.enableDefaultCutout },
-                                    set: { defaults.enableDefaultCutout = $0 }
-                                ))
-                                .foregroundStyle(Theme.primaryText)
-                                .tint(Theme.accent)
-
-                                if defaults.enableDefaultCutout {
-                                    HStack {
-                                        Text("Shape")
-                                            .foregroundStyle(Theme.primaryText)
-                                        Spacer()
-                                        HStack(spacing: 8) {
-                                            Button("Circle") {
-                                                defaults.defaultCutoutShape = "Circle"
-                                            }
-                                            .buttonStyle(PillButtonStyle(isProminent: defaults.defaultCutoutShape == "Circle"))
-
-                                            Button("Rectangle") {
-                                                defaults.defaultCutoutShape = "Rectangle"
-                                            }
-                                            .buttonStyle(PillButtonStyle(isProminent: defaults.defaultCutoutShape == "Rectangle"))
+                                HStack {
+                                    Text("Shape")
+                                        .foregroundStyle(Theme.primaryText)
+                                    Spacer()
+                                    HStack(spacing: 8) {
+                                        Button("Circle") {
+                                            defaults.defaultCutoutShape = "Circle"
                                         }
-                                    }
+                                        .buttonStyle(PillButtonStyle(isProminent: defaults.defaultCutoutShape == "Circle"))
 
-                                    HStack {
-                                        Text("Width")
-                                            .foregroundStyle(Theme.primaryText)
-                                        Spacer()
-                                        TextField("Width", value: Binding(
-                                            get: { defaults.defaultCutoutWidth },
-                                            set: { defaults.defaultCutoutWidth = $0 }
-                                        ), format: .number)
-                                        .foregroundStyle(Theme.primaryText)
-                                        .frame(width: 80)
-                                        .multilineTextAlignment(.trailing)
-                                        #if canImport(UIKit)
-                                        .keyboardType(.decimalPad)
-                                        #endif
+                                        Button("Rectangle") {
+                                            defaults.defaultCutoutShape = "Rectangle"
+                                        }
+                                        .buttonStyle(PillButtonStyle(isProminent: defaults.defaultCutoutShape == "Rectangle"))
                                     }
+                                }
 
-                                    HStack {
-                                        Text("Length")
-                                            .foregroundStyle(Theme.primaryText)
-                                        Spacer()
-                                        TextField("Length", value: Binding(
-                                            get: { defaults.defaultCutoutHeight },
-                                            set: { defaults.defaultCutoutHeight = $0 }
-                                        ), format: .number)
+                                HStack {
+                                    Text("Width")
                                         .foregroundStyle(Theme.primaryText)
-                                        .frame(width: 80)
-                                        .multilineTextAlignment(.trailing)
-                                        #if canImport(UIKit)
-                                        .keyboardType(.decimalPad)
-                                        #endif
-                                    }
+                                    Spacer()
+                                    TextField("Width", value: Binding(
+                                        get: { defaults.defaultCutoutWidth },
+                                        set: { defaults.defaultCutoutWidth = $0 }
+                                    ), format: .number)
+                                    .foregroundStyle(Theme.primaryText)
+                                    .frame(width: 80)
+                                    .multilineTextAlignment(.trailing)
+                                    #if canImport(UIKit)
+                                    .keyboardType(.decimalPad)
+                                    #endif
+                                }
+
+                                HStack {
+                                    Text("Length")
+                                        .foregroundStyle(Theme.primaryText)
+                                    Spacer()
+                                    TextField("Length", value: Binding(
+                                        get: { defaults.defaultCutoutHeight },
+                                        set: { defaults.defaultCutoutHeight = $0 }
+                                    ), format: .number)
+                                    .foregroundStyle(Theme.primaryText)
+                                    .frame(width: 80)
+                                    .multilineTextAlignment(.trailing)
+                                    #if canImport(UIKit)
+                                    .keyboardType(.decimalPad)
+                                    #endif
                                 }
                             }
                         }
@@ -360,35 +352,62 @@ struct SettingsView: View {
                         // Curve Defaults Section
                         SectionCard(title: "Curve Defaults") {
                             VStack(spacing: 12) {
-                                Toggle("Apply defaults when adding curve", isOn: Binding(
-                                    get: { defaults.enableDefaultCurve },
-                                    set: { defaults.enableDefaultCurve = $0 }
+                                HStack {
+                                    Text("Arc Depth")
+                                        .foregroundStyle(Theme.primaryText)
+                                    Spacer()
+                                    TextField("Arc Depth", value: Binding(
+                                        get: { defaults.defaultCurveRadius },
+                                        set: { defaults.defaultCurveRadius = $0 }
+                                    ), format: .number)
+                                    .foregroundStyle(Theme.primaryText)
+                                    .frame(width: 80)
+                                    .multilineTextAlignment(.trailing)
+                                    #if canImport(UIKit)
+                                    .keyboardType(.decimalPad)
+                                    #endif
+                                }
+
+                                Toggle("Concave", isOn: Binding(
+                                    get: { defaults.defaultCurveIsConcave },
+                                    set: { defaults.defaultCurveIsConcave = $0 }
                                 ))
                                 .foregroundStyle(Theme.primaryText)
                                 .tint(Theme.accent)
-
-                                if defaults.enableDefaultCurve {
-                                    HStack {
-                                        Text("Arc Depth")
-                                            .foregroundStyle(Theme.primaryText)
-                                        Spacer()
-                                        TextField("Arc Depth", value: Binding(
-                                            get: { defaults.defaultCurveRadius },
-                                            set: { defaults.defaultCurveRadius = $0 }
-                                        ), format: .number)
+                                
+                                HStack {
+                                    Text("Start Corner")
                                         .foregroundStyle(Theme.primaryText)
-                                        .frame(width: 80)
-                                        .multilineTextAlignment(.trailing)
-                                        #if canImport(UIKit)
-                                        .keyboardType(.decimalPad)
-                                        #endif
+                                    Spacer()
+                                    Picker("Start Corner", selection: Binding(
+                                        get: { defaults.defaultCurveStartCorner },
+                                        set: { defaults.defaultCurveStartCorner = $0 }
+                                    )) {
+                                        Text("None").tag(-1)
+                                        Text("A").tag(0)
+                                        Text("B").tag(1)
+                                        Text("C").tag(2)
+                                        Text("D").tag(3)
                                     }
-
-                                    Toggle("Concave", isOn: Binding(
-                                        get: { defaults.defaultCurveIsConcave },
-                                        set: { defaults.defaultCurveIsConcave = $0 }
-                                    ))
-                                    .foregroundStyle(Theme.primaryText)
+                                    .pickerStyle(.menu)
+                                    .tint(Theme.accent)
+                                }
+                                
+                                HStack {
+                                    Text("End Corner")
+                                        .foregroundStyle(Theme.primaryText)
+                                    Spacer()
+                                    Picker("End Corner", selection: Binding(
+                                        get: { defaults.defaultCurveEndCorner },
+                                        set: { defaults.defaultCurveEndCorner = $0 }
+                                    )) {
+                                        Text("None").tag(-1)
+                                        Text("A").tag(0)
+                                        Text("B").tag(1)
+                                        Text("C").tag(2)
+                                        Text("D").tag(3)
+                                    }
+                                    .pickerStyle(.menu)
                                     .tint(Theme.accent)
                                 }
                             }
@@ -397,29 +416,38 @@ struct SettingsView: View {
                         // Angle Defaults Section
                         SectionCard(title: "Angle Defaults") {
                             VStack(spacing: 12) {
-                                Toggle("Apply defaults when adding angle", isOn: Binding(
-                                    get: { defaults.enableDefaultAngle },
-                                    set: { defaults.enableDefaultAngle = $0 }
-                                ))
-                                .foregroundStyle(Theme.primaryText)
-                                .tint(Theme.accent)
-
-                                if defaults.enableDefaultAngle {
-                                    HStack {
-                                        Text("Degrees")
-                                            .foregroundStyle(Theme.primaryText)
-                                        Spacer()
-                                        TextField("Degrees", value: Binding(
-                                            get: { defaults.defaultAngleDegrees },
-                                            set: { defaults.defaultAngleDegrees = $0 }
-                                        ), format: .number)
+                                HStack {
+                                    Text("Corner")
                                         .foregroundStyle(Theme.primaryText)
-                                        .frame(width: 80)
-                                        .multilineTextAlignment(.trailing)
-                                        #if canImport(UIKit)
-                                        .keyboardType(.decimalPad)
-                                        #endif
+                                    Spacer()
+                                    Picker("Corner", selection: Binding(
+                                        get: { defaults.defaultAngleCorner },
+                                        set: { defaults.defaultAngleCorner = $0 }
+                                    )) {
+                                        Text("None").tag(-1)
+                                        Text("A").tag(0)
+                                        Text("B").tag(1)
+                                        Text("C").tag(2)
+                                        Text("D").tag(3)
                                     }
+                                    .pickerStyle(.menu)
+                                    .tint(Theme.accent)
+                                }
+                                
+                                HStack {
+                                    Text("Degrees")
+                                        .foregroundStyle(Theme.primaryText)
+                                    Spacer()
+                                    TextField("Degrees", value: Binding(
+                                        get: { defaults.defaultAngleDegrees },
+                                        set: { defaults.defaultAngleDegrees = $0 }
+                                    ), format: .number)
+                                    .foregroundStyle(Theme.primaryText)
+                                    .frame(width: 80)
+                                    .multilineTextAlignment(.trailing)
+                                    #if canImport(UIKit)
+                                    .keyboardType(.decimalPad)
+                                    #endif
                                 }
                             }
                         }
@@ -427,29 +455,38 @@ struct SettingsView: View {
                         // Corner Radius Defaults Section
                         SectionCard(title: "Corner Radius Defaults") {
                             VStack(spacing: 12) {
-                                Toggle("Apply defaults when adding corner radius", isOn: Binding(
-                                    get: { defaults.enableDefaultCornerRadius },
-                                    set: { defaults.enableDefaultCornerRadius = $0 }
-                                ))
-                                .foregroundStyle(Theme.primaryText)
-                                .tint(Theme.accent)
-
-                                if defaults.enableDefaultCornerRadius {
-                                    HStack {
-                                        Text("Radius")
-                                            .foregroundStyle(Theme.primaryText)
-                                        Spacer()
-                                        TextField("Radius", value: Binding(
-                                            get: { defaults.defaultCornerRadiusValue },
-                                            set: { defaults.defaultCornerRadiusValue = $0 }
-                                        ), format: .number)
+                                HStack {
+                                    Text("Radius")
                                         .foregroundStyle(Theme.primaryText)
-                                        .frame(width: 80)
-                                        .multilineTextAlignment(.trailing)
-                                        #if canImport(UIKit)
-                                        .keyboardType(.decimalPad)
-                                        #endif
+                                    Spacer()
+                                    TextField("Radius", value: Binding(
+                                        get: { defaults.defaultCornerRadiusValue },
+                                        set: { defaults.defaultCornerRadiusValue = $0 }
+                                    ), format: .number)
+                                    .foregroundStyle(Theme.primaryText)
+                                    .frame(width: 80)
+                                    .multilineTextAlignment(.trailing)
+                                    #if canImport(UIKit)
+                                    .keyboardType(.decimalPad)
+                                    #endif
+                                }
+                                
+                                HStack {
+                                    Text("Corner")
+                                        .foregroundStyle(Theme.primaryText)
+                                    Spacer()
+                                    Picker("Corner", selection: Binding(
+                                        get: { defaults.defaultCornerRadiusCorner },
+                                        set: { defaults.defaultCornerRadiusCorner = $0 }
+                                    )) {
+                                        Text("None").tag(-1)
+                                        Text("A").tag(0)
+                                        Text("B").tag(1)
+                                        Text("C").tag(2)
+                                        Text("D").tag(3)
                                     }
+                                    .pickerStyle(.menu)
+                                    .tint(Theme.accent)
                                 }
                             }
                         }
