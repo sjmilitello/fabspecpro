@@ -34,6 +34,8 @@ final class PieceDefaults {
     // Angle defaults (optional - applied when adding angle)
     var enableDefaultAngle: Bool = false
     var defaultAngleDegrees: Double = 45.0
+    var defaultAngleEdge1: Double = 2.0
+    var defaultAngleEdge2: Double = 2.0
     var defaultAngleCorner: Int = -1  // -1 means "None"
 
     // Corner radius defaults (optional - applied when adding corner radius)

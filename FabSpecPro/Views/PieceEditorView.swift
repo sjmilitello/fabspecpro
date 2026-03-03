@@ -1,5 +1,8 @@
 import SwiftUI
 import SwiftData
+#if canImport(UIKit)
+import UIKit
+#endif
 
 struct PieceEditorView: View {
     @Environment(\.modelContext) private var modelContext
@@ -29,6 +32,10 @@ struct PieceEditorView: View {
     @State private var showDeleteCurvesConfirm = false
     @State private var showDeleteAnglesConfirm = false
     @State private var showDeleteCornerRadiiConfirm = false
+    @State private var keyboardHeight: CGFloat = 0
+    @State private var isKeyboardVisible = false
+
+    private let keyboardOverlapHeight: CGFloat = 200
 
     var body: some View {
         ZStack {
@@ -120,9 +127,18 @@ struct PieceEditorView: View {
                     .padding(.bottom, 20)
                 }
                 .dismissKeyboardOnSwipe()
+                .modifier(KeyboardOverlapModifier(isKeyboardVisible: isKeyboardVisible, keyboardHeight: keyboardHeight, overlapHeight: keyboardOverlapHeight))
             }
         }
-        .dismissKeyboardOnTapOutside()
+        #if canImport(UIKit)
+        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillChangeFrameNotification)) { notification in
+            updateKeyboardState(from: notification)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { _ in
+            keyboardHeight = 0
+            isKeyboardVisible = false
+        }
+        #endif
         .navigationTitle(piece.name)
         #if canImport(UIKit)
         .navigationBarTitleDisplayMode(.inline)
@@ -161,6 +177,31 @@ struct PieceEditorView: View {
         .onChange(of: piece.cornerRadii.count) { _, _ in markUpdated() }
         .onChange(of: piece.edgeAssignments.count) { _, _ in markUpdated() }
     }
+
+    #if canImport(UIKit)
+    private func updateKeyboardState(from notification: Notification) {
+        guard let userInfo = notification.userInfo,
+              let endFrame = userInfo[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect else { return }
+        let window = keyWindow()
+        let screenHeight = window?.windowScene?.screen.bounds.height ?? endFrame.maxY
+        let overlap = max(0, screenHeight - endFrame.origin.y)
+        let safeAreaBottom = window?.safeAreaInsets.bottom ?? 0
+        let adjustedHeight = max(0, overlap - safeAreaBottom)
+        keyboardHeight = adjustedHeight
+        isKeyboardVisible = adjustedHeight > 0
+    }
+
+    private func keyWindow() -> UIWindow? {
+        let scenes = UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+        for scene in scenes {
+            if let window = scene.windows.first(where: { $0.isKeyWindow }) {
+                return window
+            }
+        }
+        return nil
+    }
+    #endif
 
     private var shapeButtons: some View {
         let availableShapes = ShapeKind.allCases.filter { $0 != .quarterCircle }
@@ -572,8 +613,10 @@ struct PieceEditorView: View {
         }
         let angle = AngleCut(anchorCornerIndex: defaultCorner)
         
-        // Apply default degrees
+        // Apply default sizes and degrees
         if let defaults = pieceDefaults.first {
+            angle.anchorOffset = defaults.defaultAngleEdge1
+            angle.secondaryOffset = defaults.defaultAngleEdge2
             angle.angleDegrees = defaults.defaultAngleDegrees
         }
         
@@ -1208,6 +1251,26 @@ private struct SignToggleStyle: ToggleStyle {
                 )
         }
         .buttonStyle(.plain)
+    }
+}
+
+private struct KeyboardOverlapModifier: ViewModifier {
+    let isKeyboardVisible: Bool
+    let keyboardHeight: CGFloat
+    let overlapHeight: CGFloat
+
+    func body(content: Content) -> some View {
+        #if canImport(UIKit)
+        let effectiveOverlap = min(overlapHeight, keyboardHeight * 0.8)
+        let bottomPadding = max(0, keyboardHeight - effectiveOverlap)
+        content
+            .padding(.top, isKeyboardVisible ? -effectiveOverlap : 0)
+            .padding(.bottom, isKeyboardVisible ? bottomPadding : 0)
+            .zIndex(isKeyboardVisible ? 1 : 0)
+            .animation(.easeInOut(duration: 0.2), value: isKeyboardVisible)
+        #else
+        content
+        #endif
     }
 }
 

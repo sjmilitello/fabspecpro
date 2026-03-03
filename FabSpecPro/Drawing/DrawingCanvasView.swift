@@ -17,6 +17,7 @@ struct DrawingCanvasView: View {
     var body: some View {
         GeometryReader { proxy in
             let metrics = DrawingMetrics(piece: piece, in: proxy.size)
+            let rawPieceSize = ShapePathBuilder.pieceSize(for: piece)
 
             ZStack {
                 Canvas { context, _ in
@@ -29,7 +30,7 @@ struct DrawingCanvasView: View {
                         let strokeWidth = 1.5 / metrics.scale
                         layerContext.stroke(path, with: .color(Theme.primaryText), lineWidth: strokeWidth)
 
-                    for cutout in piece.cutouts where cutout.centerX >= 0 && cutout.centerY >= 0 && !isEffectiveNotch(cutout, piece: piece, pieceSize: metrics.pieceSize) {
+                    for cutout in piece.cutouts where cutout.centerX >= 0 && cutout.centerY >= 0 && !isEffectiveNotch(cutout, piece: piece, pieceSize: rawPieceSize) {
                         let displayCutout = rotatedCutout(cutout)
                         let angleCuts = localAngleCuts(for: cutout)
                         let cornerRadii = localCornerRadii(for: cutout)
@@ -39,7 +40,7 @@ struct DrawingCanvasView: View {
                 }
 
                 for cutout in piece.cutouts where cutout.centerX >= 0 && cutout.centerY >= 0 {
-                    if isEffectiveNotch(cutout, piece: piece, pieceSize: metrics.pieceSize) {
+                    if isEffectiveNotch(cutout, piece: piece, pieceSize: rawPieceSize) {
                         drawNotchDimensionLabels(in: &context, cutout: cutout, metrics: metrics)
                     }
                 }
@@ -540,7 +541,7 @@ struct DrawingCanvasView: View {
     }
 
     private func drawCutoutNotes(in context: inout GraphicsContext, metrics: DrawingMetrics) {
-        let visibleCutouts = piece.cutouts.filter { $0.centerX >= 0 && $0.centerY >= 0 && !isEffectiveNotch($0, piece: piece, pieceSize: metrics.pieceSize) }
+        let visibleCutouts = piece.cutouts.filter { $0.centerX >= 0 && $0.centerY >= 0 && !isEffectiveNotch($0, piece: piece, pieceSize: ShapePathBuilder.pieceSize(for: piece)) }
         guard !visibleCutouts.isEmpty else { return }
         let origin = metrics.origin
         let height = metrics.pieceSize.height * metrics.scale

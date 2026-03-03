@@ -47,6 +47,7 @@ struct ProjectsListView: View {
                     }
                     .padding(20)
                 }
+                .dismissKeyboardOnSwipe()
             }
             .toolbar {
                 #if canImport(UIKit)

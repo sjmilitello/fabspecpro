@@ -37,6 +37,7 @@ struct ExportView: View {
                     }
                     .padding(20)
                 }
+                .dismissKeyboardOnSwipe()
             }
             .navigationTitle("Export PDF")
             #if canImport(UIKit)

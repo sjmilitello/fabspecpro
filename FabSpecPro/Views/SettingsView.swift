@@ -15,6 +15,8 @@ struct SettingsView: View {
     @State private var newMaterialName = ""
     @State private var logoItem: PhotosPickerItem?
     @State private var showLogoFileImporter = false
+    @State private var isUpdatingAngleDefaultsFromDistance = false
+    @State private var isUpdatingAngleDefaultsFromAngle = false
 
     var body: some View {
         ZStack {
@@ -440,6 +442,63 @@ struct SettingsView: View {
                         SectionCard(title: "Angle Defaults") {
                             VStack(spacing: 12) {
                                 HStack {
+                                    Text("Along Edge 1 (in)")
+                                        .foregroundStyle(Theme.primaryText)
+                                    Spacer()
+                                    TextField("Edge 1", value: Binding(
+                                        get: { defaults.defaultAngleEdge1 },
+                                        set: { newValue in
+                                            defaults.defaultAngleEdge1 = newValue
+                                            updateDefaultAngleFromDistances(defaults)
+                                        }
+                                    ), format: .number)
+                                    .foregroundStyle(Theme.primaryText)
+                                    .frame(width: 80)
+                                    .multilineTextAlignment(.trailing)
+                                    #if canImport(UIKit)
+                                    .keyboardType(.decimalPad)
+                                    #endif
+                                }
+
+                                HStack {
+                                    Text("Along Edge 2 (in)")
+                                        .foregroundStyle(Theme.primaryText)
+                                    Spacer()
+                                    TextField("Edge 2", value: Binding(
+                                        get: { defaults.defaultAngleEdge2 },
+                                        set: { newValue in
+                                            defaults.defaultAngleEdge2 = newValue
+                                            updateDefaultAngleFromDistances(defaults)
+                                        }
+                                    ), format: .number)
+                                    .foregroundStyle(Theme.primaryText)
+                                    .frame(width: 80)
+                                    .multilineTextAlignment(.trailing)
+                                    #if canImport(UIKit)
+                                    .keyboardType(.decimalPad)
+                                    #endif
+                                }
+
+                                HStack {
+                                    Text("Degrees")
+                                        .foregroundStyle(Theme.primaryText)
+                                    Spacer()
+                                    TextField("Degrees", value: Binding(
+                                        get: { defaults.defaultAngleDegrees },
+                                        set: { newValue in
+                                            defaults.defaultAngleDegrees = newValue
+                                            updateDefaultAngleDistancesFromAngle(defaults)
+                                        }
+                                    ), format: .number)
+                                    .foregroundStyle(Theme.primaryText)
+                                    .frame(width: 80)
+                                    .multilineTextAlignment(.trailing)
+                                    #if canImport(UIKit)
+                                    .keyboardType(.decimalPad)
+                                    #endif
+                                }
+
+                                HStack {
                                     Text("Corner")
                                         .foregroundStyle(Theme.primaryText)
                                     Spacer()
@@ -455,22 +514,6 @@ struct SettingsView: View {
                                     }
                                     .pickerStyle(.menu)
                                     .tint(Theme.accent)
-                                }
-                                
-                                HStack {
-                                    Text("Degrees")
-                                        .foregroundStyle(Theme.primaryText)
-                                    Spacer()
-                                    TextField("Degrees", value: Binding(
-                                        get: { defaults.defaultAngleDegrees },
-                                        set: { defaults.defaultAngleDegrees = $0 }
-                                    ), format: .number)
-                                    .foregroundStyle(Theme.primaryText)
-                                    .frame(width: 80)
-                                    .multilineTextAlignment(.trailing)
-                                    #if canImport(UIKit)
-                                    .keyboardType(.decimalPad)
-                                    #endif
                                 }
                             }
                         }
@@ -519,6 +562,34 @@ struct SettingsView: View {
             }
             .dismissKeyboardOnSwipe()
         }
+    }
+
+    private func updateDefaultAngleFromDistances(_ defaults: PieceDefaults) {
+        guard !isUpdatingAngleDefaultsFromAngle else { return }
+        isUpdatingAngleDefaultsFromDistance = true
+        let edge1 = defaults.defaultAngleEdge1
+        let edge2 = defaults.defaultAngleEdge2
+        if edge1 > 0 {
+            defaults.defaultAngleDegrees = atan(edge2 / edge1) * 180 / .pi
+        }
+        isUpdatingAngleDefaultsFromDistance = false
+    }
+
+    private func updateDefaultAngleDistancesFromAngle(_ defaults: PieceDefaults) {
+        guard !isUpdatingAngleDefaultsFromDistance else { return }
+        isUpdatingAngleDefaultsFromAngle = true
+        let edge1 = defaults.defaultAngleEdge1
+        let edge2 = defaults.defaultAngleEdge2
+        let currentHypotenuse = sqrt(pow(edge1, 2) + pow(edge2, 2))
+        let hypotenuse = currentHypotenuse > 0 ? currentHypotenuse : 2.0
+        let angleRadians = defaults.defaultAngleDegrees * .pi / 180
+        let newEdge1 = hypotenuse * cos(angleRadians)
+        let newEdge2 = hypotenuse * sin(angleRadians)
+        if newEdge1 > 0 && newEdge2 > 0 {
+            defaults.defaultAngleEdge1 = newEdge1
+            defaults.defaultAngleEdge2 = newEdge2
+        }
+        isUpdatingAngleDefaultsFromAngle = false
     }
 
     private var currentPieceDefaults: PieceDefaults? {

@@ -10,6 +10,9 @@ struct LaunchScreenView: View {
     @State private var logoOpacity: Double = 0
     @State private var screenOpacity: Double = 1
     @Binding var isActive: Bool
+
+    private let logoSize: CGFloat = 150
+    private var logoCornerRadius: CGFloat { logoSize * 0.22 }
     
     var body: some View {
         ZStack {
@@ -19,7 +22,8 @@ struct LaunchScreenView: View {
             Image("AppLogo")
                 .resizable()
                 .scaledToFit()
-                .frame(width: 150, height: 150)
+                .frame(width: logoSize, height: logoSize)
+                .clipShape(RoundedRectangle(cornerRadius: logoCornerRadius, style: .continuous))
                 .scaleEffect(scale)
                 .opacity(logoOpacity)
         }

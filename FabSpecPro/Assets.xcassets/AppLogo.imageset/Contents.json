@@ -1,15 +1,17 @@
 {
   "images" : [
     {
-      "filename" : "fabspecprologo.png",
+      "filename" : "FabSpecProSquareCorner.png",
       "idiom" : "universal",
       "scale" : "1x"
     },
     {
+      "filename" : "FabSpecProSquareCorner.png",
       "idiom" : "universal",
       "scale" : "2x"
     },
     {
+      "filename" : "FabSpecProSquareCorner.png",
       "idiom" : "universal",
       "scale" : "3x"
     }
