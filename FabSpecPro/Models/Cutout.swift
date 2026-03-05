@@ -51,6 +51,19 @@ final class CurvedEdge {
     /// End corner index for corner-based curve selection (-1 means use legacy edge-based)
     var endCornerIndex: Int = -1
 
+    /// Stable boundary segment index for the start point (-1 means unset)
+    var startBoundarySegmentIndex: Int = -1
+    /// True if the start point is the end of the boundary segment
+    var startBoundaryIsEnd: Bool = false
+    /// Stable boundary segment index for the end point (-1 means unset)
+    var endBoundarySegmentIndex: Int = -1
+    /// True if the end point is the end of the boundary segment
+    var endBoundaryIsEnd: Bool = false
+    /// Normalized progress along the edge for the start point (-1 means unset)
+    var startEdgeProgress: Double = -1
+    /// Normalized progress along the edge for the end point (-1 means unset)
+    var endEdgeProgress: Double = -1
+
     /// Legacy initializer for edge-based curves (backward compatibility)
     init(edge: EdgePosition, radius: Double, isConcave: Bool) {
         self.id = UUID()
@@ -59,6 +72,12 @@ final class CurvedEdge {
         self.isConcave = isConcave
         self.startCornerIndex = -1
         self.endCornerIndex = -1
+        self.startBoundarySegmentIndex = -1
+        self.startBoundaryIsEnd = false
+        self.endBoundarySegmentIndex = -1
+        self.endBoundaryIsEnd = false
+        self.startEdgeProgress = -1
+        self.endEdgeProgress = -1
     }
     
     /// New initializer for corner-based curves
@@ -66,6 +85,12 @@ final class CurvedEdge {
         self.id = UUID()
         self.startCornerIndex = startCornerIndex
         self.endCornerIndex = endCornerIndex
+        self.startBoundarySegmentIndex = -1
+        self.startBoundaryIsEnd = false
+        self.endBoundarySegmentIndex = -1
+        self.endBoundaryIsEnd = false
+        self.startEdgeProgress = -1
+        self.endEdgeProgress = -1
         self.radius = radius
         self.isConcave = isConcave
         self.edgeRaw = edge.rawValue
@@ -76,13 +101,29 @@ final class CurvedEdge {
         set { edgeRaw = newValue.rawValue }
     }
     
-    /// Returns true if this curve uses the new corner-based selection
+    /// Returns true if this curve uses the legacy corner-based selection
     var usesCornerIndices: Bool {
         startCornerIndex >= 0 && endCornerIndex >= 0
     }
+
+    /// Returns true if this curve uses stable boundary endpoints
+    var usesBoundaryEndpoints: Bool {
+        startBoundarySegmentIndex >= 0 && endBoundarySegmentIndex >= 0
+    }
+
+    /// Returns true if this curve uses stable edge progress values
+    var usesEdgeProgress: Bool {
+        startEdgeProgress >= 0 && endEdgeProgress >= 0
+    }
     
-    /// Returns true if this curve has a valid span (different start and end corners)
+    /// Returns true if this curve has a valid span
     var hasSpan: Bool {
-        startCornerIndex >= 0 && endCornerIndex >= 0 && startCornerIndex != endCornerIndex
+        if usesEdgeProgress {
+            return startEdgeProgress != endEdgeProgress
+        }
+        if usesBoundaryEndpoints {
+            return startBoundarySegmentIndex != endBoundarySegmentIndex || startBoundaryIsEnd != endBoundaryIsEnd
+        }
+        return startCornerIndex >= 0 && endCornerIndex >= 0 && startCornerIndex != endCornerIndex
     }
 }
