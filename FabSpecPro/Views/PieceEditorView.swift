@@ -519,10 +519,21 @@ struct PieceEditorView: View {
         if defaultStartCorner >= 0 && defaultEndCorner >= 0 && defaultStartCorner != defaultEndCorner {
             curve.startCornerIndex = defaultStartCorner
             curve.endCornerIndex = defaultEndCorner
+        } else if curveIndex < maxCurves {
+            if let span = defaultSpanForEdge(edge: defaultEdge) {
+                curve.startCornerIndex = span.start
+                curve.endCornerIndex = span.end
+            } else {
+                curve.startCornerIndex = 0
+                curve.endCornerIndex = 1
+            }
         }
         
         curve.piece = piece
         modelContext.insert(curve)
+        if curve.radius > 0 {
+            removeCornerRadiiOnEdge(curve.edge)
+        }
         openCurveIds = [curve.id]
     }
 
@@ -542,7 +553,14 @@ struct PieceEditorView: View {
         guard cornerCount > 0 else { return }
         let usedAngles = Set(piece.angleCuts.map { $0.anchorCornerIndex })
         let usedRadii = Set(piece.cornerRadii.map { $0.cornerIndex })
-        let avoid = usedAngles.union(usedRadii)
+        var curveBlocked: Set<Int> = []
+        let baseCount = ShapePathBuilder.pieceCornerCount(for: piece)
+        if baseCount > 0 {
+            for index in 0..<baseCount where cornerIsOnCurvedEdge(index, requireConvex: true) {
+                curveBlocked.insert(index)
+            }
+        }
+        let avoid = usedAngles.union(usedRadii).union(curveBlocked)
         
         // Use default corner if set, otherwise find next available
         var index: Int = -1
@@ -660,6 +678,185 @@ struct PieceEditorView: View {
         }
     }
 
+    private func defaultSpanForEdge(edge: EdgePosition) -> (start: Int, end: Int)? {
+        let points = ShapePathBuilder.displayPolygonPoints(for: piece, includeAngles: true)
+        let segments = ShapePathBuilder.boundarySegments(for: piece)
+        let edgeSegments = segments.filter { $0.edge == edge }
+        guard !edgeSegments.isEmpty, !points.isEmpty else { return nil }
+
+        var candidates: [(index: Int, point: CGPoint)] = []
+        for segment in edgeSegments {
+            if segment.startIndex >= 0 && segment.startIndex < points.count {
+                candidates.append((segment.startIndex, points[segment.startIndex]))
+            }
+            if segment.endIndex >= 0 && segment.endIndex < points.count {
+                candidates.append((segment.endIndex, points[segment.endIndex]))
+            }
+        }
+        guard !candidates.isEmpty else { return nil }
+
+        let bounds = bounds(for: points)
+        func extremeIndex(by key: (CGPoint) -> CGFloat, pickMax: Bool) -> Int {
+            let sorted = candidates.sorted { a, b in
+                let av = key(a.point)
+                let bv = key(b.point)
+                return pickMax ? av > bv : av < bv
+            }
+            return sorted.first?.index ?? candidates[0].index
+        }
+
+        switch edge {
+        case .top, .legA, .bottom:
+            let minIndex = extremeIndex(by: { $0.x }, pickMax: false)
+            let maxIndex = extremeIndex(by: { $0.x }, pickMax: true)
+            return (start: minIndex, end: maxIndex)
+        case .left, .legB, .right:
+            let minIndex = extremeIndex(by: { $0.y }, pickMax: false)
+            let maxIndex = extremeIndex(by: { $0.y }, pickMax: true)
+            return (start: minIndex, end: maxIndex)
+        case .hypotenuse:
+            let a = CGPoint(x: bounds.maxX, y: bounds.minY)
+            let b = CGPoint(x: bounds.minX, y: bounds.maxY)
+            let dx = b.x - a.x
+            let dy = b.y - a.y
+            let denom = dx * dx + dy * dy
+            if denom <= 0 { return (start: candidates[0].index, end: candidates[0].index) }
+            func projection(_ p: CGPoint) -> CGFloat {
+                ((p.x - a.x) * dx + (p.y - a.y) * dy) / denom
+            }
+            let minIndex = extremeIndex(by: { projection($0) }, pickMax: false)
+            let maxIndex = extremeIndex(by: { projection($0) }, pickMax: true)
+            return (start: minIndex, end: maxIndex)
+        }
+    }
+
+    private func removeCornerRadiiOnEdge(_ edge: EdgePosition) {
+        let indices = cornerIndices(on: edge, requireConvex: true)
+        guard !indices.isEmpty else { return }
+        for index in indices {
+            removeCornerRadius(at: index)
+        }
+    }
+
+    private func cornerIndices(on edge: EdgePosition, requireConvex: Bool) -> Set<Int> {
+        let baseCount = ShapePathBuilder.pieceCornerCount(for: piece)
+        guard baseCount > 0 else { return [] }
+        let points = ShapePathBuilder.cornerPoints(for: piece, includeAngles: false)
+        guard baseCount <= points.count else { return [] }
+        let bounds = bounds(for: points)
+        let clockwise = polygonIsClockwise(points)
+        var indices = Set<Int>()
+        for index in 0..<baseCount {
+            if requireConvex && isConcaveCorner(points: points, index: index, clockwise: clockwise) {
+                continue
+            }
+            if pointIsOnEdge(points[index], edge: edge, bounds: bounds, tolerance: 0.5) {
+                indices.insert(index)
+            }
+        }
+        return indices
+    }
+
+    private func cornerIsOnCurvedEdge(_ cornerIndex: Int, requireConvex: Bool) -> Bool {
+        let baseCount = ShapePathBuilder.pieceCornerCount(for: piece)
+        guard cornerIndex >= 0, cornerIndex < baseCount else { return false }
+        let points = ShapePathBuilder.cornerPoints(for: piece, includeAngles: false)
+        guard baseCount <= points.count else { return false }
+        let bounds = bounds(for: points)
+        let clockwise = polygonIsClockwise(points)
+        if requireConvex && isConcaveCorner(points: points, index: cornerIndex, clockwise: clockwise) {
+            return false
+        }
+        let point = points[cornerIndex]
+        for curve in piece.curvedEdges where curve.radius > 0 {
+            if pointIsOnEdge(point, edge: curve.edge, bounds: bounds, tolerance: 0.5) {
+                return true
+            }
+        }
+        return false
+    }
+
+    private func bounds(for points: [CGPoint]) -> CGRect {
+        guard let first = points.first else { return .zero }
+        var minX = first.x
+        var maxX = first.x
+        var minY = first.y
+        var maxY = first.y
+        for point in points.dropFirst() {
+            minX = min(minX, point.x)
+            maxX = max(maxX, point.x)
+            minY = min(minY, point.y)
+            maxY = max(maxY, point.y)
+        }
+        return CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
+    }
+
+    private func polygonIsClockwise(_ points: [CGPoint]) -> Bool {
+        guard points.count >= 3 else { return false }
+        var sum: CGFloat = 0
+        for index in points.indices {
+            let nextIndex = (index + 1) % points.count
+            let p1 = points[index]
+            let p2 = points[nextIndex]
+            sum += (p2.x - p1.x) * (p2.y + p1.y)
+        }
+        return sum > 0
+    }
+
+    private func isConcaveCorner(points: [CGPoint], index: Int, clockwise: Bool) -> Bool {
+        guard points.count > 2 else { return false }
+        let count = points.count
+        let prev = points[(index - 1 + count) % count]
+        let curr = points[index]
+        let next = points[(index + 1) % count]
+        let v1 = CGPoint(x: curr.x - prev.x, y: curr.y - prev.y)
+        let v2 = CGPoint(x: next.x - curr.x, y: next.y - curr.y)
+        let cross = v1.x * v2.y - v1.y * v2.x
+        return clockwise ? cross > 0 : cross < 0
+    }
+
+    private func pointIsOnEdge(_ point: CGPoint, edge: EdgePosition, bounds: CGRect, tolerance: CGFloat) -> Bool {
+        switch edge {
+        case .top:
+            return abs(point.y - bounds.minY) <= tolerance
+        case .bottom:
+            return abs(point.y - bounds.maxY) <= tolerance
+        case .left:
+            return abs(point.x - bounds.minX) <= tolerance
+        case .right:
+            return abs(point.x - bounds.maxX) <= tolerance
+        case .legA:
+            return abs(point.x - bounds.minX) <= tolerance
+        case .legB:
+            return abs(point.y - bounds.minY) <= tolerance
+        case .hypotenuse:
+            let start = CGPoint(x: bounds.minX, y: bounds.maxY)
+            let end = CGPoint(x: bounds.maxX, y: bounds.minY)
+            let distance = pointLineDistance(point: point, a: start, b: end)
+            if distance > tolerance { return false }
+            let minX = min(start.x, end.x) - tolerance
+            let maxX = max(start.x, end.x) + tolerance
+            let minY = min(start.y, end.y) - tolerance
+            let maxY = max(start.y, end.y) + tolerance
+            return point.x >= minX && point.x <= maxX && point.y >= minY && point.y <= maxY
+        }
+    }
+
+    private func pointLineDistance(point: CGPoint, a: CGPoint, b: CGPoint) -> CGFloat {
+        let dx = b.x - a.x
+        let dy = b.y - a.y
+        if dx == 0 && dy == 0 {
+            let px = point.x - a.x
+            let py = point.y - a.y
+            return sqrt(px * px + py * py)
+        }
+        let t = max(0, min(1, ((point.x - a.x) * dx + (point.y - a.y) * dy) / (dx * dx + dy * dy)))
+        let proj = CGPoint(x: a.x + t * dx, y: a.y + t * dy)
+        let rx = point.x - proj.x
+        let ry = point.y - proj.y
+        return sqrt(rx * rx + ry * ry)
+    }
+
     private func sortedCurvedEdges() -> [CurvedEdge] {
         piece.curvedEdges.sorted { lhs, rhs in
             let leftOrder = curveEdgeOrder(lhs)
@@ -672,16 +869,20 @@ struct PieceEditorView: View {
     }
 
     private func curveEdgeOrder(_ curve: CurvedEdge) -> Int {
+        curveEdgeOrder(curve.edge)
+    }
+
+    private func curveEdgeOrder(_ edge: EdgePosition) -> Int {
         switch piece.shape {
         case .rightTriangle:
-            switch curve.edge {
+            switch edge {
             case .hypotenuse: return 0
             case .legB: return 1
             case .legA: return 2
             default: return 3
             }
         default:
-            switch curve.edge {
+            switch edge {
             case .top: return 0
             case .right: return 1
             case .bottom: return 2
@@ -1630,8 +1831,60 @@ private struct CurveRow: View {
     private func defaultSpanForEdge(points: [CGPoint]) -> (start: Int, end: Int)? {
         let segments = ShapePathBuilder.boundarySegments(for: piece)
         let edgeSegments = segments.filter { $0.edge == curve.edge }
-        guard let first = edgeSegments.first, let last = edgeSegments.last else { return nil }
-        return (start: first.startIndex, end: last.endIndex)
+        guard !edgeSegments.isEmpty else { return nil }
+
+        var candidates: [(index: Int, point: CGPoint)] = []
+        for segment in edgeSegments {
+            if segment.startIndex >= 0 && segment.startIndex < points.count {
+                candidates.append((segment.startIndex, points[segment.startIndex]))
+            }
+            if segment.endIndex >= 0 && segment.endIndex < points.count {
+                candidates.append((segment.endIndex, points[segment.endIndex]))
+            }
+        }
+        guard !candidates.isEmpty else { return nil }
+
+        let bounds = bounds(for: points)
+        func extremeIndex(by key: (CGPoint) -> CGFloat, pickMax: Bool) -> Int {
+            let sorted = candidates.sorted { a, b in
+                let av = key(a.point)
+                let bv = key(b.point)
+                return pickMax ? av > bv : av < bv
+            }
+            return sorted.first?.index ?? candidates[0].index
+        }
+
+        switch curve.edge {
+        case .top, .legA:
+            let minIndex = extremeIndex(by: { $0.x }, pickMax: false)
+            let maxIndex = extremeIndex(by: { $0.x }, pickMax: true)
+            return (start: minIndex, end: maxIndex)
+        case .bottom:
+            let minIndex = extremeIndex(by: { $0.x }, pickMax: false)
+            let maxIndex = extremeIndex(by: { $0.x }, pickMax: true)
+            return (start: minIndex, end: maxIndex)
+        case .left, .legB:
+            let minIndex = extremeIndex(by: { $0.y }, pickMax: false)
+            let maxIndex = extremeIndex(by: { $0.y }, pickMax: true)
+            return (start: minIndex, end: maxIndex)
+        case .right:
+            let minIndex = extremeIndex(by: { $0.y }, pickMax: false)
+            let maxIndex = extremeIndex(by: { $0.y }, pickMax: true)
+            return (start: minIndex, end: maxIndex)
+        case .hypotenuse:
+            let a = CGPoint(x: bounds.maxX, y: bounds.minY)
+            let b = CGPoint(x: bounds.minX, y: bounds.maxY)
+            let dx = b.x - a.x
+            let dy = b.y - a.y
+            let denom = dx * dx + dy * dy
+            if denom <= 0 { return (start: candidates[0].index, end: candidates[0].index) }
+            func projection(_ p: CGPoint) -> CGFloat {
+                ((p.x - a.x) * dx + (p.y - a.y) * dy) / denom
+            }
+            let minIndex = extremeIndex(by: { projection($0) }, pickMax: false)
+            let maxIndex = extremeIndex(by: { projection($0) }, pickMax: true)
+            return (start: minIndex, end: maxIndex)
+        }
     }
 
     private func spanPathIsValid(edge: EdgePosition) -> Bool {
@@ -1707,16 +1960,57 @@ private struct CurveRow: View {
         return sqrt(diffX * diffX + diffY * diffY)
     }
 
+    private func curveEdgeOrder(_ edge: EdgePosition) -> Int {
+        switch piece.shape {
+        case .rightTriangle:
+            switch edge {
+            case .hypotenuse: return 0
+            case .legB: return 1
+            case .legA: return 2
+            default: return 3
+            }
+        default:
+            switch edge {
+            case .top: return 0
+            case .right: return 1
+            case .bottom: return 2
+            case .left: return 3
+            default: return 4
+            }
+        }
+    }
+
     private func spanCornerPoints() -> [CGPoint] {
-        ShapePathBuilder.cornerPoints(for: piece, includeAngles: false)
+        let segments = ShapePathBuilder.boundarySegments(for: piece)
+        guard !segments.isEmpty else { return [] }
+        let orderedSegments = segments.sorted { lhs, rhs in
+            if lhs.edge != rhs.edge {
+                return curveEdgeOrder(lhs.edge) < curveEdgeOrder(rhs.edge)
+            }
+            return lhs.index < rhs.index
+        }
+        var points: [CGPoint] = []
+        let tolerance: CGFloat = 0.01
+        for segment in orderedSegments {
+            if points.isEmpty {
+                points.append(segment.start)
+            }
+            let last = points.last ?? segment.start
+            let dx = segment.end.x - last.x
+            let dy = segment.end.y - last.y
+            if dx * dx + dy * dy > tolerance * tolerance {
+                points.append(segment.end)
+            }
+        }
+        return points
     }
 
     private func spanCornerIndexMap() -> [Int] {
         let labelPoints = spanCornerPoints()
         let polygonPoints = ShapePathBuilder.displayPolygonPoints(for: piece, includeAngles: true)
         guard !labelPoints.isEmpty, !polygonPoints.isEmpty else { return [] }
-        var used: Set<Int> = []
         var mapping: [Int] = []
+        var used: Set<Int> = []
         for labelPoint in labelPoints {
             var bestIndex = 0
             var bestDistance = CGFloat.greatestFiniteMagnitude
@@ -1742,6 +2036,7 @@ private struct CurveRow: View {
         }
         return map
     }
+
 
     private func spanBinding(
         polygonIndex: Binding<Int>,
@@ -1837,41 +2132,107 @@ private struct AngleCutRow: View {
     }
     
     private func curveOccupiedBaseCorners() -> Set<Int> {
-        // Map polygon indices back to base corner indices
-        let baseCorners = ShapePathBuilder.cornerPoints(for: piece, includeAngles: false)
-        let polygonPoints = ShapePathBuilder.displayPolygonPoints(for: piece, includeAngles: true)
-        guard !baseCorners.isEmpty, !polygonPoints.isEmpty else { return [] }
-        
-        // Build reverse mapping: polygon index -> base corner index (if it's a base corner)
-        var polygonToBase: [Int: Int] = [:]
-        for (baseIndex, basePoint) in baseCorners.enumerated() {
-            var bestPolygonIndex = 0
-            var bestDistance = CGFloat.greatestFiniteMagnitude
-            for (polygonIndex, polygonPoint) in polygonPoints.enumerated() {
-                let dx = basePoint.x - polygonPoint.x
-                let dy = basePoint.y - polygonPoint.y
-                let distance = dx * dx + dy * dy
-                if distance < bestDistance {
-                    bestDistance = distance
-                    bestPolygonIndex = polygonIndex
-                }
-            }
-            if bestDistance < 0.01 { // Only if it's actually the same point
-                polygonToBase[bestPolygonIndex] = baseIndex
-            }
-        }
-        
-        // Find base corners occupied by curve endpoints
+        let baseCount = ShapePathBuilder.pieceCornerCount(for: piece)
+        guard baseCount > 0 else { return [] }
+        let points = ShapePathBuilder.cornerPoints(for: piece, includeAngles: false)
+        guard baseCount <= points.count else { return [] }
+        let bounds = bounds(for: points)
+        let clockwise = polygonIsClockwise(points)
         var occupied: Set<Int> = []
-        for curve in piece.curvedEdges where curve.hasSpan {
-            if let baseIndex = polygonToBase[curve.startCornerIndex] {
-                occupied.insert(baseIndex)
+        for index in 0..<baseCount {
+            if isConcaveCorner(points: points, index: index, clockwise: clockwise) {
+                continue
             }
-            if let baseIndex = polygonToBase[curve.endCornerIndex] {
-                occupied.insert(baseIndex)
+            let point = points[index]
+            for curve in piece.curvedEdges where curve.radius > 0 {
+                if pointIsOnEdge(point, edge: curve.edge, bounds: bounds, tolerance: 0.5) {
+                    occupied.insert(index)
+                    break
+                }
             }
         }
         return occupied
+    }
+
+    private func bounds(for points: [CGPoint]) -> CGRect {
+        guard let first = points.first else { return .zero }
+        var minX = first.x
+        var maxX = first.x
+        var minY = first.y
+        var maxY = first.y
+        for point in points.dropFirst() {
+            minX = min(minX, point.x)
+            maxX = max(maxX, point.x)
+            minY = min(minY, point.y)
+            maxY = max(maxY, point.y)
+        }
+        return CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
+    }
+
+    private func polygonIsClockwise(_ points: [CGPoint]) -> Bool {
+        guard points.count >= 3 else { return false }
+        var sum: CGFloat = 0
+        for index in points.indices {
+            let nextIndex = (index + 1) % points.count
+            let p1 = points[index]
+            let p2 = points[nextIndex]
+            sum += (p2.x - p1.x) * (p2.y + p1.y)
+        }
+        return sum > 0
+    }
+
+    private func isConcaveCorner(points: [CGPoint], index: Int, clockwise: Bool) -> Bool {
+        guard points.count > 2 else { return false }
+        let count = points.count
+        let prev = points[(index - 1 + count) % count]
+        let curr = points[index]
+        let next = points[(index + 1) % count]
+        let v1 = CGPoint(x: curr.x - prev.x, y: curr.y - prev.y)
+        let v2 = CGPoint(x: next.x - curr.x, y: next.y - curr.y)
+        let cross = v1.x * v2.y - v1.y * v2.x
+        return clockwise ? cross > 0 : cross < 0
+    }
+
+    private func pointIsOnEdge(_ point: CGPoint, edge: EdgePosition, bounds: CGRect, tolerance: CGFloat) -> Bool {
+        switch edge {
+        case .top:
+            return abs(point.y - bounds.minY) <= tolerance
+        case .bottom:
+            return abs(point.y - bounds.maxY) <= tolerance
+        case .left:
+            return abs(point.x - bounds.minX) <= tolerance
+        case .right:
+            return abs(point.x - bounds.maxX) <= tolerance
+        case .legA:
+            return abs(point.x - bounds.minX) <= tolerance
+        case .legB:
+            return abs(point.y - bounds.minY) <= tolerance
+        case .hypotenuse:
+            let start = CGPoint(x: bounds.minX, y: bounds.maxY)
+            let end = CGPoint(x: bounds.maxX, y: bounds.minY)
+            let distance = pointLineDistance(point: point, a: start, b: end)
+            if distance > tolerance { return false }
+            let minX = min(start.x, end.x) - tolerance
+            let maxX = max(start.x, end.x) + tolerance
+            let minY = min(start.y, end.y) - tolerance
+            let maxY = max(start.y, end.y) + tolerance
+            return point.x >= minX && point.x <= maxX && point.y >= minY && point.y <= maxY
+        }
+    }
+
+    private func pointLineDistance(point: CGPoint, a: CGPoint, b: CGPoint) -> CGFloat {
+        let dx = b.x - a.x
+        let dy = b.y - a.y
+        if dx == 0 && dy == 0 {
+            let px = point.x - a.x
+            let py = point.y - a.y
+            return sqrt(px * px + py * py)
+        }
+        let t = max(0, min(1, ((point.x - a.x) * dx + (point.y - a.y) * dy) / (dx * dx + dy * dy)))
+        let proj = CGPoint(x: a.x + t * dx, y: a.y + t * dy)
+        let rx = point.x - proj.x
+        let ry = point.y - proj.y
+        return sqrt(rx * rx + ry * ry)
     }
 
     private var edgeDistancesRow: some View {
@@ -2147,5 +2508,86 @@ private struct CornerRadiusRow: View {
         for angle in matching {
             modelContext.delete(angle)
         }
+    }
+
+    private func bounds(for points: [CGPoint]) -> CGRect {
+        guard let first = points.first else { return .zero }
+        var minX = first.x
+        var maxX = first.x
+        var minY = first.y
+        var maxY = first.y
+        for point in points.dropFirst() {
+            minX = min(minX, point.x)
+            maxX = max(maxX, point.x)
+            minY = min(minY, point.y)
+            maxY = max(maxY, point.y)
+        }
+        return CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
+    }
+
+    private func polygonIsClockwise(_ points: [CGPoint]) -> Bool {
+        guard points.count >= 3 else { return false }
+        var sum: CGFloat = 0
+        for index in points.indices {
+            let nextIndex = (index + 1) % points.count
+            let p1 = points[index]
+            let p2 = points[nextIndex]
+            sum += (p2.x - p1.x) * (p2.y + p1.y)
+        }
+        return sum > 0
+    }
+
+    private func isConcaveCorner(points: [CGPoint], index: Int, clockwise: Bool) -> Bool {
+        guard points.count > 2 else { return false }
+        let count = points.count
+        let prev = points[(index - 1 + count) % count]
+        let curr = points[index]
+        let next = points[(index + 1) % count]
+        let v1 = CGPoint(x: curr.x - prev.x, y: curr.y - prev.y)
+        let v2 = CGPoint(x: next.x - curr.x, y: next.y - curr.y)
+        let cross = v1.x * v2.y - v1.y * v2.x
+        return clockwise ? cross > 0 : cross < 0
+    }
+
+    private func pointIsOnEdge(_ point: CGPoint, edge: EdgePosition, bounds: CGRect, tolerance: CGFloat) -> Bool {
+        switch edge {
+        case .top:
+            return abs(point.y - bounds.minY) <= tolerance
+        case .bottom:
+            return abs(point.y - bounds.maxY) <= tolerance
+        case .left:
+            return abs(point.x - bounds.minX) <= tolerance
+        case .right:
+            return abs(point.x - bounds.maxX) <= tolerance
+        case .legA:
+            return abs(point.x - bounds.minX) <= tolerance
+        case .legB:
+            return abs(point.y - bounds.minY) <= tolerance
+        case .hypotenuse:
+            let start = CGPoint(x: bounds.minX, y: bounds.maxY)
+            let end = CGPoint(x: bounds.maxX, y: bounds.minY)
+            let distance = pointLineDistance(point: point, a: start, b: end)
+            if distance > tolerance { return false }
+            let minX = min(start.x, end.x) - tolerance
+            let maxX = max(start.x, end.x) + tolerance
+            let minY = min(start.y, end.y) - tolerance
+            let maxY = max(start.y, end.y) + tolerance
+            return point.x >= minX && point.x <= maxX && point.y >= minY && point.y <= maxY
+        }
+    }
+
+    private func pointLineDistance(point: CGPoint, a: CGPoint, b: CGPoint) -> CGFloat {
+        let dx = b.x - a.x
+        let dy = b.y - a.y
+        if dx == 0 && dy == 0 {
+            let px = point.x - a.x
+            let py = point.y - a.y
+            return sqrt(px * px + py * py)
+        }
+        let t = max(0, min(1, ((point.x - a.x) * dx + (point.y - a.y) * dy) / (dx * dx + dy * dy)))
+        let proj = CGPoint(x: a.x + t * dx, y: a.y + t * dy)
+        let rx = point.x - proj.x
+        let ry = point.y - proj.y
+        return sqrt(rx * rx + ry * ry)
     }
 }
