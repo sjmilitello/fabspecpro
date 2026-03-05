@@ -1740,7 +1740,8 @@ private struct CurveRow: View {
                     selection: spanBinding(
                         polygonIndex: $curve.startCornerIndex,
                         labelToPolygon: labelToPolygon,
-                        polygonToLabel: polygonToLabel
+                        polygonToLabel: polygonToLabel,
+                        isStart: true
                     ),
                     labels: labels,
                     dimmedIndices: []
@@ -1750,7 +1751,8 @@ private struct CurveRow: View {
                     selection: spanBinding(
                         polygonIndex: $curve.endCornerIndex,
                         labelToPolygon: labelToPolygon,
-                        polygonToLabel: polygonToLabel
+                        polygonToLabel: polygonToLabel,
+                        isStart: false
                     ),
                     labels: labels,
                     dimmedIndices: []
@@ -1772,8 +1774,31 @@ private struct CurveRow: View {
     }
 
     private func spanCornerLabels() -> [String] {
-        let count = spanCornerPoints().count
-        return (0..<count).map { cornerLabel(for: $0) }
+        let polygonPoints = ShapePathBuilder.displayPolygonPoints(for: piece, includeAngles: true)
+        let baseCorners = ShapePathBuilder.cornerPoints(for: piece, includeAngles: false)
+        
+        // Map each polygon point to its nearest base corner label
+        return polygonPoints.indices.map { polygonIndex in
+            let point = polygonPoints[polygonIndex]
+            let nearestBaseIndex = nearestCornerIndex(for: point, in: baseCorners)
+            return cornerLabel(for: nearestBaseIndex)
+        }
+    }
+    
+    private func nearestCornerIndex(for point: CGPoint, in corners: [CGPoint]) -> Int {
+        guard !corners.isEmpty else { return 0 }
+        var bestIndex = 0
+        var bestDistance = CGFloat.greatestFiniteMagnitude
+        for (index, corner) in corners.enumerated() {
+            let dx = point.x - corner.x
+            let dy = point.y - corner.y
+            let distance = dx * dx + dy * dy
+            if distance < bestDistance {
+                bestDistance = distance
+                bestIndex = index
+            }
+        }
+        return bestIndex
     }
 
     private func cornerLabel(for index: Int) -> String {
@@ -1794,7 +1819,27 @@ private struct CurveRow: View {
         if count <= 1 {
             curve.startCornerIndex = 0
             curve.endCornerIndex = 0
+            curve.startBoundarySegmentIndex = -1
+            curve.endBoundarySegmentIndex = -1
+            curve.startEdgeProgress = -1
+            curve.endEdgeProgress = -1
             return
+        }
+        if curve.usesEdgeProgress {
+            if let startIndex = resolveCornerIndex(for: curve.startEdgeProgress) {
+                curve.startCornerIndex = startIndex
+            }
+            if let endIndex = resolveCornerIndex(for: curve.endEdgeProgress) {
+                curve.endCornerIndex = endIndex
+            }
+        } else if curve.usesBoundaryEndpoints {
+            let segments = ShapePathBuilder.boundarySegments(for: piece)
+            if let startSegment = segments.first(where: { $0.edge == curve.edge && $0.index == curve.startBoundarySegmentIndex }) {
+                curve.startCornerIndex = curve.startBoundaryIsEnd ? startSegment.endIndex : startSegment.startIndex
+            }
+            if let endSegment = segments.first(where: { $0.edge == curve.edge && $0.index == curve.endBoundarySegmentIndex }) {
+                curve.endCornerIndex = curve.endBoundaryIsEnd ? endSegment.endIndex : endSegment.startIndex
+            }
         }
         if curve.startCornerIndex < 0 || curve.startCornerIndex >= count ||
             curve.endCornerIndex < 0 || curve.endCornerIndex >= count ||
@@ -1807,7 +1852,16 @@ private struct CurveRow: View {
                 curve.endCornerIndex = min(1, count - 1)
             }
         }
+        let labelToPolygon = spanCornerIndexMap()
+        let polygonToLabel = spanPolygonToLabelMap(from: labelToPolygon)
+        syncBoundaryEndpoints(polygonToLabel: polygonToLabel)
         updateEdgeFromSpan()
+    }
+
+    private func syncBoundaryEndpoints(polygonToLabel: [Int: Int]) {
+        _ = polygonToLabel
+        syncBoundaryEndpoint(for: curve.startCornerIndex, isStart: true)
+        syncBoundaryEndpoint(for: curve.endCornerIndex, isStart: false)
     }
 
     private func inferredEdgeFromSpan() -> EdgePosition? {
@@ -1825,6 +1879,8 @@ private struct CurveRow: View {
     private func updateEdgeFromSpan() {
         if let edge = inferredEdgeFromSpan(), spanPathIsValid(edge: edge) {
             curve.edgeRaw = edge.rawValue
+            syncBoundaryEndpoint(for: curve.startCornerIndex, isStart: true)
+            syncBoundaryEndpoint(for: curve.endCornerIndex, isStart: false)
         }
     }
 
@@ -1980,53 +2036,18 @@ private struct CurveRow: View {
         }
     }
 
+    private func spanCornerPolygonIndices() -> [Int] {
+        let polygonPoints = ShapePathBuilder.displayPolygonPoints(for: piece, includeAngles: true)
+        return Array(polygonPoints.indices)
+    }
+
     private func spanCornerPoints() -> [CGPoint] {
-        let segments = ShapePathBuilder.boundarySegments(for: piece)
-        guard !segments.isEmpty else { return [] }
-        let orderedSegments = segments.sorted { lhs, rhs in
-            if lhs.edge != rhs.edge {
-                return curveEdgeOrder(lhs.edge) < curveEdgeOrder(rhs.edge)
-            }
-            return lhs.index < rhs.index
-        }
-        var points: [CGPoint] = []
-        let tolerance: CGFloat = 0.01
-        for segment in orderedSegments {
-            if points.isEmpty {
-                points.append(segment.start)
-            }
-            let last = points.last ?? segment.start
-            let dx = segment.end.x - last.x
-            let dy = segment.end.y - last.y
-            if dx * dx + dy * dy > tolerance * tolerance {
-                points.append(segment.end)
-            }
-        }
-        return points
+        let polygonPoints = ShapePathBuilder.displayPolygonPoints(for: piece, includeAngles: true)
+        return spanCornerPolygonIndices().map { polygonPoints[$0] }
     }
 
     private func spanCornerIndexMap() -> [Int] {
-        let labelPoints = spanCornerPoints()
-        let polygonPoints = ShapePathBuilder.displayPolygonPoints(for: piece, includeAngles: true)
-        guard !labelPoints.isEmpty, !polygonPoints.isEmpty else { return [] }
-        var mapping: [Int] = []
-        var used: Set<Int> = []
-        for labelPoint in labelPoints {
-            var bestIndex = 0
-            var bestDistance = CGFloat.greatestFiniteMagnitude
-            for (index, point) in polygonPoints.enumerated() where !used.contains(index) {
-                let dx = labelPoint.x - point.x
-                let dy = labelPoint.y - point.y
-                let distance = dx * dx + dy * dy
-                if distance < bestDistance {
-                    bestDistance = distance
-                    bestIndex = index
-                }
-            }
-            used.insert(bestIndex)
-            mapping.append(bestIndex)
-        }
-        return mapping
+        spanCornerPolygonIndices()
     }
 
     private func spanPolygonToLabelMap(from labelToPolygon: [Int]) -> [Int: Int] {
@@ -2041,7 +2062,8 @@ private struct CurveRow: View {
     private func spanBinding(
         polygonIndex: Binding<Int>,
         labelToPolygon: [Int],
-        polygonToLabel: [Int: Int]
+        polygonToLabel: [Int: Int],
+        isStart: Bool
     ) -> Binding<Int> {
         Binding(
             get: {
@@ -2050,9 +2072,81 @@ private struct CurveRow: View {
             set: { newLabelIndex in
                 if newLabelIndex >= 0 && newLabelIndex < labelToPolygon.count {
                     polygonIndex.wrappedValue = labelToPolygon[newLabelIndex]
+                    syncBoundaryEndpoint(for: polygonIndex.wrappedValue, isStart: isStart)
                 }
             }
         )
+    }
+
+    private func syncBoundaryEndpoint(for polygonIndex: Int, isStart: Bool) {
+        guard let progress = edgeProgress(for: polygonIndex) else {
+            if isStart {
+                curve.startEdgeProgress = -1
+            } else {
+                curve.endEdgeProgress = -1
+            }
+            return
+        }
+        if isStart {
+            curve.startEdgeProgress = Double(progress)
+        } else {
+            curve.endEdgeProgress = Double(progress)
+        }
+        let segments = ShapePathBuilder.boundarySegments(for: piece)
+        if let segment = segments.first(where: { $0.startIndex == polygonIndex || $0.endIndex == polygonIndex }) {
+            let isEnd = segment.endIndex == polygonIndex
+            if isStart {
+                curve.startBoundarySegmentIndex = segment.index
+                curve.startBoundaryIsEnd = isEnd
+            } else {
+                curve.endBoundarySegmentIndex = segment.index
+                curve.endBoundaryIsEnd = isEnd
+            }
+        } else {
+            if isStart {
+                curve.startBoundarySegmentIndex = -1
+                curve.startBoundaryIsEnd = false
+            } else {
+                curve.endBoundarySegmentIndex = -1
+                curve.endBoundaryIsEnd = false
+            }
+        }
+    }
+
+    private func edgeProgress(for polygonIndex: Int) -> CGFloat? {
+        let points = ShapePathBuilder.displayPolygonPoints(for: piece, includeAngles: true)
+        guard polygonIndex >= 0 && polygonIndex < points.count else { return nil }
+        let bounds = bounds(for: points)
+        return ShapePathBuilder.edgeProgress(for: points[polygonIndex], edge: curve.edge, shape: piece.shape, bounds: bounds)
+    }
+
+    private func resolveCornerIndex(for progress: Double) -> Int? {
+        let points = ShapePathBuilder.displayPolygonPoints(for: piece, includeAngles: true)
+        guard !points.isEmpty else { return nil }
+        let bounds = bounds(for: points)
+        let segments = ShapePathBuilder.boundarySegments(for: piece).filter { $0.edge == curve.edge }
+        guard !segments.isEmpty else { return nil }
+        var endpoints: [(index: Int, progress: CGFloat)] = []
+        endpoints.reserveCapacity(segments.count * 2)
+        for segment in segments {
+            endpoints.append((segment.startIndex, ShapePathBuilder.edgeProgress(for: segment.start, edge: curve.edge, shape: piece.shape, bounds: bounds)))
+            endpoints.append((segment.endIndex, ShapePathBuilder.edgeProgress(for: segment.end, edge: curve.edge, shape: piece.shape, bounds: bounds)))
+        }
+        return nearestEndpointIndex(progress: CGFloat(progress), endpoints: endpoints)
+    }
+
+    private func nearestEndpointIndex(progress: CGFloat, endpoints: [(index: Int, progress: CGFloat)]) -> Int? {
+        guard let first = endpoints.first else { return nil }
+        var bestIndex = first.index
+        var bestDistance = abs(first.progress - progress)
+        for endpoint in endpoints.dropFirst() {
+            let distance = abs(endpoint.progress - progress)
+            if distance < bestDistance {
+                bestDistance = distance
+                bestIndex = endpoint.index
+            }
+        }
+        return bestIndex
     }
 
     private func cornerPickerField(title: String, selection: Binding<Int>, labels: [String], dimmedIndices: Set<Int>) -> some View {
