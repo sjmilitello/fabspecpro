@@ -232,29 +232,55 @@ struct PieceEditorView: View {
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(Theme.secondaryText)
             }
-            Picker("Edge Treatment", selection: $selectedTreatmentId) {
-                Text("None").tag(UUID?.none)
-                ForEach(treatments) { treatment in
-                    Text("\(treatment.abbreviation) – \(treatment.name)")
-                        .tag(Optional(treatment.id))
+            HStack(alignment: .top, spacing: 12) {
+                Picker(selection: $selectedTreatmentId, label: edgeTreatmentPickerLabel) {
+                    Text("None").tag(UUID?.none)
+                    ForEach(treatments) { treatment in
+                        Text("\(treatment.abbreviation) – \(treatment.name)")
+                            .tag(Optional(treatment.id))
+                    }
                 }
-            }
-            .pickerStyle(.menu)
-            Button(edgeAssignmentsPresent ? "Remove All" : "Apply to All Edges") {
-                if edgeAssignmentsPresent {
-                    removeAllEdgeTreatments()
-                } else {
-                    applySelectedTreatmentToAllEdges()
+                .pickerStyle(.menu)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+                Button(edgeAssignmentsPresent ? "Remove All" : "Apply All") {
+                    if edgeAssignmentsPresent {
+                        removeAllEdgeTreatments()
+                    } else {
+                        applySelectedTreatmentToAllEdges()
+                    }
                 }
-            }
-            .buttonStyle(
-                PillButtonStyle(
-                    isProminent: true,
-                    textColor: edgeAssignmentsPresent ? Theme.primaryText : nil,
-                    backgroundColor: edgeAssignmentsPresent ? Color.red : nil
+                .buttonStyle(
+                    PillButtonStyle(
+                        isProminent: true,
+                        textColor: edgeAssignmentsPresent ? Theme.primaryText : nil,
+                        backgroundColor: edgeAssignmentsPresent ? Color.red : nil
+                    )
                 )
-            )
+                .font(.system(size: 12, weight: .semibold))
+            }
         }
+    }
+
+    private var edgeTreatmentPickerLabel: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text("Edge Treatment")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(Theme.secondaryText)
+            Text(selectedTreatmentDisplay)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(Theme.primaryText)
+                .lineLimit(2)
+                .multilineTextAlignment(.leading)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var selectedTreatmentDisplay: String {
+        if let selectedTreatment {
+            return "\(selectedTreatment.abbreviation) – \(selectedTreatment.name)"
+        }
+        return "None"
     }
 
     private var optionsSection: some View {

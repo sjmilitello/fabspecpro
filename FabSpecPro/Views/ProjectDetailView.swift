@@ -18,6 +18,7 @@ struct ProjectDetailView: View {
     @Query private var pieceDefaults: [PieceDefaults]
     @Bindable var project: Project
     @State private var pdfData: Data?
+    @State private var isShowingPreview = false
     @State private var isShowingShare = false
     @State private var pieceToDelete: Piece?
     @State private var selectedPiece: Piece?
@@ -139,6 +140,11 @@ struct ProjectDetailView: View {
                 selectedPiece = newPiece
             }
         }
+        .sheet(isPresented: $isShowingPreview) {
+            if let pdfData {
+                PDFPreviewView(pdfData: pdfData, projectName: project.name)
+            }
+        }
 #if canImport(UIKit)
         .sheet(isPresented: $isShowingShare) {
             if let pdfData {
@@ -258,7 +264,7 @@ struct ProjectDetailView: View {
             // Generate PDF synchronously on main thread - required for SwiftData access
             pdfData = PDFRenderer.render(project: project, header: header)
             isGeneratingPDF = false
-            isShowingShare = true
+            isShowingPreview = true
         }
     }
     

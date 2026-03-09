@@ -1,5 +1,6 @@
 import SwiftUI
 import SwiftData
+import PDFKit
 #if canImport(UIKit)
 import UIKit
 #else
@@ -11,6 +12,7 @@ struct ExportView: View {
     @Environment(\.dismiss) private var dismiss
     @Query private var headers: [BusinessHeader]
     @State private var pdfData: Data?
+    @State private var isShowingPreview = false
     @State private var isShowingShare = false
 
     @Bindable var project: Project
@@ -29,7 +31,7 @@ struct ExportView: View {
                         }
 
                         SectionCard(title: "Export") {
-                            Button("Generate PDF") {
+                            Button("Preview PDF") {
                                 generatePDF()
                             }
                             .buttonStyle(PillButtonStyle(isProminent: true))
@@ -53,6 +55,11 @@ struct ExportView: View {
                     Button("Done") { dismiss() }
                 }
                 #endif
+            }
+            .sheet(isPresented: $isShowingPreview) {
+                if let pdfData {
+                    PDFPreviewView(pdfData: pdfData, projectName: project.name)
+                }
             }
             #if canImport(UIKit)
             .sheet(isPresented: $isShowingShare) {
@@ -88,7 +95,7 @@ struct ExportView: View {
     private func generatePDF() {
         guard let header = currentHeader else { return }
         pdfData = PDFRenderer.render(project: project, header: header)
-        isShowingShare = true
+        isShowingPreview = true
     }
     
     #if !canImport(UIKit)
@@ -114,5 +121,117 @@ struct ShareSheet: UIViewControllerRepresentable {
     }
 
     func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) { }
+}
+#endif
+
+// MARK: - PDF Preview View
+
+struct PDFPreviewView: View {
+    @Environment(\.dismiss) private var dismiss
+    let pdfData: Data
+    let projectName: String
+    @State private var isShowingShare = false
+    
+    var body: some View {
+        NavigationStack {
+            ZStack {
+                Theme.background.ignoresSafeArea()
+                PDFKitView(data: pdfData)
+            }
+            .navigationTitle("PDF Preview")
+            #if canImport(UIKit)
+            .navigationBarTitleDisplayMode(.inline)
+            #endif
+            .toolbar {
+                #if canImport(UIKit)
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("Close") { dismiss() }
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        isShowingShare = true
+                    } label: {
+                        Image(systemName: "square.and.arrow.up")
+                    }
+                }
+                #else
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Close") { dismiss() }
+                }
+                ToolbarItem(placement: .primaryAction) {
+                    Button {
+                        showMacShareSheet()
+                    } label: {
+                        Image(systemName: "square.and.arrow.up")
+                    }
+                }
+                #endif
+            }
+            #if canImport(UIKit)
+            .sheet(isPresented: $isShowingShare) {
+                ShareSheet(activityItems: [pdfData])
+            }
+            #endif
+        }
+    }
+    
+    #if !canImport(UIKit)
+    private func showMacShareSheet() {
+        let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent("\(projectName).pdf")
+        try? pdfData.write(to: tempURL)
+        
+        let picker = NSSharingServicePicker(items: [tempURL])
+        if let window = NSApplication.shared.keyWindow,
+           let contentView = window.contentView {
+            picker.show(relativeTo: contentView.bounds, of: contentView, preferredEdge: .minY)
+        }
+    }
+    #endif
+}
+
+// MARK: - PDFKit View
+
+#if canImport(UIKit)
+struct PDFKitView: UIViewRepresentable {
+    let data: Data
+    
+    func makeUIView(context: Context) -> PDFView {
+        let pdfView = PDFView()
+        pdfView.autoScales = true
+        pdfView.displayMode = .singlePageContinuous
+        pdfView.displayDirection = .vertical
+        pdfView.backgroundColor = .systemBackground
+        if let document = PDFDocument(data: data) {
+            pdfView.document = document
+        }
+        return pdfView
+    }
+    
+    func updateUIView(_ uiView: PDFView, context: Context) {
+        if let document = PDFDocument(data: data) {
+            uiView.document = document
+        }
+    }
+}
+#else
+struct PDFKitView: NSViewRepresentable {
+    let data: Data
+    
+    func makeNSView(context: Context) -> PDFView {
+        let pdfView = PDFView()
+        pdfView.autoScales = true
+        pdfView.displayMode = .singlePageContinuous
+        pdfView.displayDirection = .vertical
+        if let document = PDFDocument(data: data) {
+            pdfView.document = document
+        }
+        return pdfView
+    }
+    
+    func updateNSView(_ nsView: PDFView, context: Context) {
+        if let document = PDFDocument(data: data) {
+            nsView.document = document
+        }
+    }
 }
 #endif
