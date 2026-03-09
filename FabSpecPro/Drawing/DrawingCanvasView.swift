@@ -42,6 +42,8 @@ struct DrawingCanvasView: View {
                 for cutout in piece.cutouts where cutout.centerX >= 0 && cutout.centerY >= 0 {
                     if isEffectiveNotch(cutout, piece: piece, pieceSize: rawPieceSize) {
                         drawNotchDimensionLabels(in: &context, cutout: cutout, metrics: metrics)
+                    } else {
+                        drawCutoutDimensionLabels(in: &context, cutout: cutout, metrics: metrics)
                     }
                 }
 
@@ -61,7 +63,7 @@ struct DrawingCanvasView: View {
                     let expanded = expandedDisplayBounds(metrics: metrics)
                     let totalWidth = MeasurementParser.formatInches(Double(expanded.height))
                     let totalLength = MeasurementParser.formatInches(Double(expanded.width))
-                    Text("\(totalWidth) in W x \(totalLength) in L")
+                    Text("\(totalWidth)\" W x \(totalLength)\" L")
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(Theme.secondaryText)
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -147,10 +149,10 @@ struct DrawingCanvasView: View {
         let curvedHeight = MeasurementParser.formatInches(Double(expanded.height))
         let lengthText = curvedWidth
         let depthText = curvedHeight
-        let lengthLabel = Text("\(lengthText) in")
+        let lengthLabel = Text("\(lengthText)\"")
             .font(.system(size: 11, weight: .semibold))
             .foregroundStyle(Theme.secondaryText)
-        let depthLabel = Text("\(depthText) in")
+        let depthLabel = Text("\(depthText)\"")
             .font(.system(size: 11, weight: .semibold))
             .foregroundStyle(Theme.secondaryText)
         let width = metrics.pieceSize.width * metrics.scale
@@ -188,7 +190,7 @@ struct DrawingCanvasView: View {
                 let fullWidth = metrics.pieceSize.width
                 let fullHeight = metrics.pieceSize.height
                 if segmentCounts[.left] == 1, let leftMetric = sideMetrics[.left] {
-                    let widthLabelText = "\(MeasurementParser.formatInches(Double(leftMetric.length))) in"
+                    let widthLabelText = "\(MeasurementParser.formatInches(Double(leftMetric.length)))\""
                     let adjustedWidthLabel = Text(widthLabelText)
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(Theme.secondaryText)
@@ -202,7 +204,7 @@ struct DrawingCanvasView: View {
                 }
 
                 if segmentCounts[.top] == 1, let topMetric = sideMetrics[.top] {
-                    let lengthLabelText = "\(MeasurementParser.formatInches(Double(topMetric.length))) in"
+                    let lengthLabelText = "\(MeasurementParser.formatInches(Double(topMetric.length)))\""
                     let adjustedLengthLabel = Text(lengthLabelText)
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(Theme.secondaryText)
@@ -216,7 +218,7 @@ struct DrawingCanvasView: View {
                 }
 
                 if segmentCounts[.right] == 1, let rightMetric = sideMetrics[.right], abs(rightMetric.length - fullHeight) > 0.01 {
-                    let widthLabelText = "\(MeasurementParser.formatInches(Double(rightMetric.length))) in"
+                    let widthLabelText = "\(MeasurementParser.formatInches(Double(rightMetric.length)))\""
                     let adjustedWidthLabel = Text(widthLabelText)
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(Theme.secondaryText)
@@ -226,7 +228,7 @@ struct DrawingCanvasView: View {
                 }
 
                 if segmentCounts[.bottom] == 1, let bottomMetric = sideMetrics[.bottom], abs(bottomMetric.length - fullWidth) > 0.01 {
-                    let lengthLabelText = "\(MeasurementParser.formatInches(Double(bottomMetric.length))) in"
+                    let lengthLabelText = "\(MeasurementParser.formatInches(Double(bottomMetric.length)))\""
                     let adjustedLengthLabel = Text(lengthLabelText)
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(Theme.secondaryText)
@@ -285,7 +287,7 @@ struct DrawingCanvasView: View {
         guard !pieceCorners.isEmpty else { return }
         let origin = metrics.origin
         let scale = metrics.scale
-        let baseLabelOffset: CGFloat = 12
+        let baseLabelOffset: CGFloat = 10
 
         let pieceBounds = bounds(for: pieceCorners)
         let baseCorners = baseShapeCorners()
@@ -768,8 +770,9 @@ struct DrawingCanvasView: View {
 
     private func cutoutNoteLines(from cutouts: [Cutout]) -> [String] {
         var lines: [String] = []
-        let leftCurveOffset = curveEdgeOffset(edge: .left)
-        let topCurveOffset = curveEdgeOffset(edge: .top)
+        // Curves are stored with display edge positions
+        let displayLeftCurveOffset = curveEdgeOffset(edge: .left)
+        let displayTopCurveOffset = curveEdgeOffset(edge: .top)
 
         for cutout in cutouts {
             let displayCutout = rotatedCutout(cutout)
@@ -782,14 +785,17 @@ struct DrawingCanvasView: View {
                 label = abs(cutout.width - cutout.height) < 0.001 ? "Square Cutout" : "Rectangular Cutout"
             }
             let sizeText = "\(widthText)\" Wide x \(heightText)\" Long"
-            let fromLeftValue = max(displayCutout.centerX + leftCurveOffset, 0)
-            let fromTopValue = max(displayCutout.centerY + topCurveOffset, 0)
+            let fromLeftValue = max(displayCutout.centerX + displayLeftCurveOffset, 0)
+            let fromTopValue = max(displayCutout.centerY + displayTopCurveOffset, 0)
             let fromLeft = MeasurementParser.formatInches(fromLeftValue)
             let fromTop = MeasurementParser.formatInches(fromTopValue)
-            lines.append("\(label): \(sizeText) - \(fromLeft)\" From Left to Center, \(fromTop)\" From Top to Center")
+            // Add "Apex" suffix when curve affects the measurement
+            let leftSuffix = displayLeftCurveOffset != 0 ? " Apex" : ""
+            let topSuffix = displayTopCurveOffset != 0 ? " Apex" : ""
+            lines.append("\(label): \(sizeText) - \(fromLeft)\" From Left\(leftSuffix) to Center, \(fromTop)\" From Top\(topSuffix) to Center")
         }
 
-        return wrapLines(lines, maxLength: 48)
+        return wrapLines(lines, maxLength: 55)
     }
 
     private func curveEdgeOffset(edge: EdgePosition) -> Double {
@@ -807,16 +813,8 @@ struct DrawingCanvasView: View {
         let displayCutout = rotatedCutout(cutout)
         let polygon = ShapePathBuilder.displayPolygonPoints(for: piece, includeAngles: true)
         let metricsInfo = notchInteriorEdgeMetrics(cutout: cutout, metrics: metrics, polygon: polygon)
-        let widthValue = metricsInfo?.width ?? CGFloat(cutout.width)
-        let lengthValue = metricsInfo?.length ?? CGFloat(cutout.height)
-        let widthText = MeasurementParser.formatInches(Double(widthValue))
-        let heightText = MeasurementParser.formatInches(Double(lengthValue))
-        let widthLabel = Text("\(widthText) in")
-            .font(.system(size: 9, weight: .semibold))
-            .foregroundStyle(Theme.secondaryText)
-        let lengthLabel = Text("\(heightText) in")
-            .font(.system(size: 9, weight: .semibold))
-            .foregroundStyle(Theme.secondaryText)
+        var widthValue = metricsInfo?.width ?? CGFloat(cutout.width)
+        var lengthValue = metricsInfo?.length ?? CGFloat(cutout.height)
 
         let center = CGPoint(x: displayCutout.centerX, y: displayCutout.centerY)
         let halfWidth = displayCutout.width / 2
@@ -831,6 +829,55 @@ struct DrawingCanvasView: View {
         let pieceHeight = metrics.pieceSize.height
         let edgeEpsilon: CGFloat = 0.01
 
+        // Determine which edges the notch touches in display coordinates
+        let touchesDisplayLeft = minX <= edgeEpsilon
+        let touchesDisplayRight = maxX >= pieceWidth - edgeEpsilon
+        let touchesDisplayTop = minY <= edgeEpsilon
+        let touchesDisplayBottom = maxY >= pieceHeight - edgeEpsilon
+
+        // Check for curves on touched edges and add "to Apex" suffix
+        // Curves are stored with display edge positions
+        // For left/right edge notches, the horizontal distance (lengthValue) is affected by the curve
+        // For top/bottom edge notches, the vertical distance (widthValue) is affected by the curve
+        var widthFromApex = false
+        var lengthFromApex = false
+
+        if touchesDisplayLeft {
+            // Left edge notch - check for curve on left edge
+            if let curve = piece.curve(for: .left), curve.radius > 0 {
+                let curveDepth = curve.isConcave ? -CGFloat(curve.radius) : CGFloat(curve.radius)
+                lengthValue += curveDepth
+                lengthFromApex = true
+            }
+        } else if touchesDisplayRight {
+            // Right edge notch - check for curve on right edge
+            if let curve = piece.curve(for: .right), curve.radius > 0 {
+                let curveDepth = curve.isConcave ? -CGFloat(curve.radius) : CGFloat(curve.radius)
+                lengthValue += curveDepth
+                lengthFromApex = true
+            }
+        }
+
+        if touchesDisplayTop {
+            // Top edge notch - check for curve on top edge
+            if let curve = piece.curve(for: .top), curve.radius > 0 {
+                let curveDepth = curve.isConcave ? -CGFloat(curve.radius) : CGFloat(curve.radius)
+                widthValue += curveDepth
+                widthFromApex = true
+            }
+        } else if touchesDisplayBottom {
+            // Bottom edge notch - check for curve on bottom edge
+            if let curve = piece.curve(for: .bottom), curve.radius > 0 {
+                let curveDepth = curve.isConcave ? -CGFloat(curve.radius) : CGFloat(curve.radius)
+                widthValue += curveDepth
+                widthFromApex = true
+            }
+        }
+
+        let widthText = MeasurementParser.formatInches(Double(widthValue))
+        let heightText = MeasurementParser.formatInches(Double(lengthValue))
+
+        // Standard positioning for non-apex labels
         let interiorX: CGFloat
         if minX <= edgeEpsilon {
             interiorX = maxX + widthPadding
@@ -852,8 +899,89 @@ struct DrawingCanvasView: View {
         let widthPoint = CGPoint(x: interiorX, y: metricsInfo?.widthCenterY ?? center.y)
         let lengthPoint = CGPoint(x: metricsInfo?.lengthCenterX ?? center.x, y: interiorY)
 
-        context.draw(widthLabel, at: metrics.toCanvas(widthPoint), anchor: .center)
-        context.draw(lengthLabel, at: metrics.toCanvas(lengthPoint), anchor: .center)
+        // Draw width label (for top/bottom edge notches - widthFromApex)
+        // Position: to the right of the notch edge
+        if widthFromApex {
+            // Two-line label: "X\" from" on top, "Apex" below
+            // Position to the right of the notch interior edge
+            let apexPadding = 20 / max(metrics.scale, 0.01)
+            let apexX = maxX + apexPadding
+            let apexPoint = CGPoint(x: apexX, y: metricsInfo?.widthCenterY ?? center.y)
+            let line1 = Text("\(widthText)\" to")
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(Theme.secondaryText)
+            let line2 = Text("Apex")
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(Theme.secondaryText)
+            let canvasPoint = metrics.toCanvas(apexPoint)
+            let lineSpacing: CGFloat = 10
+            context.draw(line1, at: CGPoint(x: canvasPoint.x, y: canvasPoint.y - lineSpacing / 2), anchor: .center)
+            context.draw(line2, at: CGPoint(x: canvasPoint.x, y: canvasPoint.y + lineSpacing / 2), anchor: .center)
+        } else {
+            let widthLabel = Text("\(widthText)\"")
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(Theme.secondaryText)
+            context.draw(widthLabel, at: metrics.toCanvas(widthPoint), anchor: .center)
+        }
+
+        // Draw length label (for left/right edge notches - lengthFromApex)
+        // Position: below the notch
+        if lengthFromApex {
+            // Two-line label: "X\" from" on top, "Apex" below
+            // Position below the notch interior edge
+            let apexPadding = 14 / max(metrics.scale, 0.01)
+            let apexY = maxY + apexPadding
+            let apexPoint = CGPoint(x: metricsInfo?.lengthCenterX ?? center.x, y: apexY)
+            let line1 = Text("\(heightText)\" to")
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(Theme.secondaryText)
+            let line2 = Text("Apex")
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(Theme.secondaryText)
+            let canvasPoint = metrics.toCanvas(apexPoint)
+            let lineSpacing: CGFloat = 10
+            context.draw(line1, at: CGPoint(x: canvasPoint.x, y: canvasPoint.y - lineSpacing / 2), anchor: .center)
+            context.draw(line2, at: CGPoint(x: canvasPoint.x, y: canvasPoint.y + lineSpacing / 2), anchor: .center)
+        } else {
+            let lengthLabel = Text("\(heightText)\"")
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(Theme.secondaryText)
+            context.draw(lengthLabel, at: metrics.toCanvas(lengthPoint), anchor: .center)
+        }
+    }
+
+    private func drawCutoutDimensionLabels(in context: inout GraphicsContext, cutout: Cutout, metrics: DrawingMetrics) {
+        // Skip circles - they only have diameter, not width/length
+        guard cutout.kind != .circle else { return }
+        
+        let displayCutout = rotatedCutout(cutout)
+        let center = CGPoint(x: displayCutout.centerX, y: displayCutout.centerY)
+        let halfWidth = displayCutout.width / 2
+        let halfHeight = displayCutout.height / 2
+        
+        // Use the raw cutout dimensions (width = horizontal in display, height = vertical in display)
+        let widthValue = CGFloat(displayCutout.width)
+        let lengthValue = CGFloat(displayCutout.height)
+        
+        let widthText = MeasurementParser.formatInches(Double(widthValue))
+        let lengthText = MeasurementParser.formatInches(Double(lengthValue))
+        
+        // Padding from cutout edge
+        let padding: CGFloat = 4 / max(metrics.scale, 0.01)
+        
+        // Width label - centered horizontally above the cutout
+        let widthPoint = CGPoint(x: center.x, y: center.y - halfHeight - padding)
+        let widthLabel = Text("\(widthText)\"")
+            .font(.system(size: 9, weight: .semibold))
+            .foregroundStyle(Theme.accent)
+        context.draw(widthLabel, at: metrics.toCanvas(widthPoint), anchor: .bottom)
+        
+        // Length label - centered vertically to the left of the cutout
+        let lengthPoint = CGPoint(x: center.x - halfWidth - padding, y: center.y)
+        let lengthLabel = Text("\(lengthText)\"")
+            .font(.system(size: 9, weight: .semibold))
+            .foregroundStyle(Theme.accent)
+        context.draw(lengthLabel, at: metrics.toCanvas(lengthPoint), anchor: .trailing)
     }
 
     private func notchInteriorEdgeMetrics(cutout: Cutout, metrics: DrawingMetrics, polygon: [CGPoint]) -> (width: CGFloat, length: CGFloat, widthCenterY: CGFloat, lengthCenterX: CGFloat)? {
@@ -1023,7 +1151,7 @@ struct DrawingCanvasView: View {
                     lengthValue = abs(segment.end.y - segment.start.y)
                 }
                 let text = MeasurementParser.formatInches(Double(lengthValue))
-                let label = Text("\(text) in")
+                let label = Text("\(text)\"")
                     .font(.system(size: 9, weight: .semibold))
                     .foregroundStyle(Theme.secondaryText)
                 let position = segmentLabelPosition(segment: segment, metrics: metrics)

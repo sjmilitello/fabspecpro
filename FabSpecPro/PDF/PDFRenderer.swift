@@ -969,6 +969,7 @@ enum PDFRenderer {
         }
 
         drawNotchDimensionLabels(in: context, piece: piece, size: size, scale: scale, offsetX: offsetX, offsetY: offsetY)
+        drawCutoutDimensionLabels(in: context, piece: piece, size: size, scale: scale, offsetX: offsetX, offsetY: offsetY)
         drawEdgeLabels(in: context, piece: piece, rect: rect, size: size, scale: scale, offsetX: offsetX, offsetY: offsetY)
         drawDimensionLabels(in: context, piece: piece, rect: rect, size: size, scale: scale, offsetX: offsetX, offsetY: offsetY, pieceHeaderY: pieceHeaderY, topMeasurementY: topMeasurementY, bottomMeasurementY: bottomMeasurementY)
         drawCutoutNotes(in: context, piece: piece, size: size, scale: scale, offsetX: offsetX, offsetY: offsetY, noteY: notesY)
@@ -983,14 +984,66 @@ enum PDFRenderer {
         for notch in notches {
             let displayCutout = displayCutout(for: notch)
             let metricsInfo = notchInteriorEdgeMetrics(cutout: notch, size: size, polygon: polygon)
-            let widthValue = metricsInfo?.width ?? CGFloat(notch.width)
-            let lengthValue = metricsInfo?.length ?? CGFloat(notch.height)
-            let widthText = MeasurementParser.formatInches(Double(widthValue))
-            let heightText = MeasurementParser.formatInches(Double(lengthValue))
-            let widthLabel = "\(widthText) in"
-            let lengthLabel = "\(heightText) in"
+            var widthValue = metricsInfo?.width ?? CGFloat(notch.width)
+            var lengthValue = metricsInfo?.length ?? CGFloat(notch.height)
 
             let center = CGPoint(x: displayCutout.centerX, y: displayCutout.centerY)
+            let halfWidth = displayCutout.width / 2
+            let halfHeight = displayCutout.height / 2
+            let minX = center.x - halfWidth
+            let maxX = center.x + halfWidth
+            let minY = center.y - halfHeight
+            let maxY = center.y + halfHeight
+            let edgeEpsilon: CGFloat = 0.01
+
+            // Determine which edges the notch touches in display coordinates
+            let touchesDisplayLeft = minX <= edgeEpsilon
+            let touchesDisplayRight = maxX >= size.width - edgeEpsilon
+            let touchesDisplayTop = minY <= edgeEpsilon
+            let touchesDisplayBottom = maxY >= size.height - edgeEpsilon
+
+            // Check for curves on touched edges and add "to Apex" suffix
+            // Curves are stored with display edge positions
+            // For left/right edge notches, the horizontal distance (lengthValue) is affected by the curve
+            // For top/bottom edge notches, the vertical distance (widthValue) is affected by the curve
+            var widthFromApex = false
+            var lengthFromApex = false
+
+            if touchesDisplayLeft {
+                // Left edge notch - check for curve on left edge
+                if let curve = piece.curve(for: .left), curve.radius > 0 {
+                    let curveDepth = curve.isConcave ? -CGFloat(curve.radius) : CGFloat(curve.radius)
+                    lengthValue += curveDepth
+                    lengthFromApex = true
+                }
+            } else if touchesDisplayRight {
+                // Right edge notch - check for curve on right edge
+                if let curve = piece.curve(for: .right), curve.radius > 0 {
+                    let curveDepth = curve.isConcave ? -CGFloat(curve.radius) : CGFloat(curve.radius)
+                    lengthValue += curveDepth
+                    lengthFromApex = true
+                }
+            }
+
+            if touchesDisplayTop {
+                // Top edge notch - check for curve on top edge
+                if let curve = piece.curve(for: .top), curve.radius > 0 {
+                    let curveDepth = curve.isConcave ? -CGFloat(curve.radius) : CGFloat(curve.radius)
+                    widthValue += curveDepth
+                    widthFromApex = true
+                }
+            } else if touchesDisplayBottom {
+                // Bottom edge notch - check for curve on bottom edge
+                if let curve = piece.curve(for: .bottom), curve.radius > 0 {
+                    let curveDepth = curve.isConcave ? -CGFloat(curve.radius) : CGFloat(curve.radius)
+                    widthValue += curveDepth
+                    widthFromApex = true
+                }
+            }
+
+            let widthText = MeasurementParser.formatInches(Double(widthValue))
+            let heightText = MeasurementParser.formatInches(Double(lengthValue))
+
             let widthPx = displayCutout.width * scale
             let heightPx = displayCutout.height * scale
             let centerCanvas = CGPoint(x: offsetX + center.x * scale, y: offsetY + center.y * scale)
@@ -1001,33 +1054,105 @@ enum PDFRenderer {
                 height: heightPx
             )
             let pieceRect = CGRect(x: offsetX, y: offsetY, width: size.width * scale, height: size.height * scale)
-            let padX: CGFloat = 12
-            let padY: CGFloat = 6
-            let edgeEpsilon: CGFloat = 0.5
+            let padX: CGFloat = 8
+            let padY: CGFloat = 4
+            let canvasEdgeEpsilon: CGFloat = 0.5
 
+            let widthCenterY = (metricsInfo?.widthCenterY ?? center.y) * scale + offsetY
+            let lengthCenterX = (metricsInfo?.lengthCenterX ?? center.x) * scale + offsetX
+
+            // Standard positioning for non-apex labels
             let widthX: CGFloat
-            if rectCanvas.minX <= pieceRect.minX + edgeEpsilon {
+            if rectCanvas.minX <= pieceRect.minX + canvasEdgeEpsilon {
                 widthX = min(rectCanvas.maxX + padX, pieceRect.maxX - padX)
-            } else if rectCanvas.maxX >= pieceRect.maxX - edgeEpsilon {
+            } else if rectCanvas.maxX >= pieceRect.maxX - canvasEdgeEpsilon {
                 widthX = max(rectCanvas.minX - padX, pieceRect.minX + padX)
             } else {
                 widthX = min(rectCanvas.maxX + padX, pieceRect.maxX - padX)
             }
 
             let heightY: CGFloat
-            if rectCanvas.minY <= pieceRect.minY + edgeEpsilon {
+            if rectCanvas.minY <= pieceRect.minY + canvasEdgeEpsilon {
                 heightY = min(rectCanvas.maxY + padY, pieceRect.maxY - padY)
-            } else if rectCanvas.maxY >= pieceRect.maxY - edgeEpsilon {
+            } else if rectCanvas.maxY >= pieceRect.maxY - canvasEdgeEpsilon {
                 heightY = max(rectCanvas.minY - padY, pieceRect.minY + padY)
             } else {
                 heightY = min(rectCanvas.maxY + padY, pieceRect.maxY - padY)
             }
 
-            let widthCenterY = (metricsInfo?.widthCenterY ?? center.y) * scale + offsetY
-            let lengthCenterX = (metricsInfo?.lengthCenterX ?? center.x) * scale + offsetX
+            // Draw width label (for top/bottom edge notches - widthFromApex)
+            // Position: to the right of the notch edge
+            if widthFromApex {
+                // Two-line label: "X\" to" on top, "Apex" below
+                // Position to the right of the notch interior edge (left-aligned)
+                let apexPadX: CGFloat = 2
+                let apexX = rectCanvas.maxX + apexPadX
+                let line1 = "\(widthText)\" to"
+                let line2 = "Apex"
+                let labelY = widthCenterY
+                let lineSpacing: CGFloat = 10
+                drawText(line1, in: context, frame: CGRect(x: apexX, y: labelY - lineSpacing / 2 - 6, width: 60, height: 12), font: .systemFont(ofSize: 9, weight: .semibold), alignment: .left)
+                drawText(line2, in: context, frame: CGRect(x: apexX, y: labelY + lineSpacing / 2 - 6, width: 60, height: 12), font: .systemFont(ofSize: 9, weight: .semibold), alignment: .left)
+            } else {
+                let widthLabel = "\(widthText)\""
+                drawText(widthLabel, in: context, frame: CGRect(x: widthX - 20, y: widthCenterY - 6, width: 40, height: 12), font: .systemFont(ofSize: 9, weight: .semibold), alignment: .center)
+            }
 
-            drawText(lengthLabel, in: context, frame: CGRect(x: lengthCenterX - 20, y: heightY - 6, width: 40, height: 12), font: .systemFont(ofSize: 9, weight: .semibold), alignment: .center)
-            drawText(widthLabel, in: context, frame: CGRect(x: widthX - 20, y: widthCenterY - 6, width: 40, height: 12), font: .systemFont(ofSize: 9, weight: .semibold), alignment: .center)
+            // Draw length label (for left/right edge notches - lengthFromApex)
+            // Position: below the notch
+            if lengthFromApex {
+                // Two-line label: "X\" to" on top, "Apex" below
+                // Position below the notch interior edge
+                let apexPadY: CGFloat = 10
+                let apexY = rectCanvas.maxY + apexPadY
+                let line1 = "\(heightText)\" to"
+                let line2 = "Apex"
+                let labelX = lengthCenterX
+                let lineSpacing: CGFloat = 10
+                drawText(line1, in: context, frame: CGRect(x: labelX - 30, y: apexY - lineSpacing / 2 - 6, width: 60, height: 12), font: .systemFont(ofSize: 9, weight: .semibold), alignment: .center)
+                drawText(line2, in: context, frame: CGRect(x: labelX - 30, y: apexY + lineSpacing / 2 - 6, width: 60, height: 12), font: .systemFont(ofSize: 9, weight: .semibold), alignment: .center)
+            } else {
+                let lengthLabel = "\(heightText)\""
+                drawText(lengthLabel, in: context, frame: CGRect(x: lengthCenterX - 20, y: heightY - 6, width: 40, height: 12), font: .systemFont(ofSize: 9, weight: .semibold), alignment: .center)
+            }
+        }
+    }
+
+    private static func drawCutoutDimensionLabels(in context: CGContext, piece: Piece, size: CGSize, scale: CGFloat, offsetX: CGFloat, offsetY: CGFloat) {
+        // Get cutouts that are NOT notches (interior holes)
+        let cutouts = piece.cutouts.filter { !isEffectiveNotch(cutout: $0, size: size) && $0.centerX >= 0 && $0.centerY >= 0 && $0.kind != .circle }
+        guard !cutouts.isEmpty else { return }
+
+        for cutout in cutouts {
+            let displayCutout = displayCutout(for: cutout)
+            let center = CGPoint(x: displayCutout.centerX, y: displayCutout.centerY)
+            let halfWidth = displayCutout.width / 2
+            let halfHeight = displayCutout.height / 2
+
+            // Use the raw cutout dimensions
+            let widthValue = CGFloat(displayCutout.width)
+            let lengthValue = CGFloat(displayCutout.height)
+
+            let widthText = MeasurementParser.formatInches(Double(widthValue))
+            let lengthText = MeasurementParser.formatInches(Double(lengthValue))
+
+            // Convert to canvas coordinates
+            let centerCanvas = CGPoint(x: offsetX + center.x * scale, y: offsetY + center.y * scale)
+            let halfWidthCanvas = halfWidth * scale
+            let halfHeightCanvas = halfHeight * scale
+
+            // Padding from cutout edge
+            let padding: CGFloat = 2
+
+            // Width label - centered horizontally above the cutout
+            let widthLabel = "\(widthText)\""
+            let widthY = centerCanvas.y - halfHeightCanvas - padding - 12
+            drawText(widthLabel, in: context, frame: CGRect(x: centerCanvas.x - 30, y: widthY, width: 60, height: 12), font: .systemFont(ofSize: 9, weight: .semibold), alignment: .center)
+
+            // Length label - centered vertically to the left of the cutout
+            let lengthLabel = "\(lengthText)\""
+            let lengthX = centerCanvas.x - halfWidthCanvas - padding - 40
+            drawText(lengthLabel, in: context, frame: CGRect(x: lengthX, y: centerCanvas.y - 6, width: 40, height: 12), font: .systemFont(ofSize: 9, weight: .semibold), alignment: .right)
         }
     }
 
@@ -1997,8 +2122,8 @@ enum PDFRenderer {
         let curvedSize = curvedDisplaySize(for: piece)
         let curvedWidthText = MeasurementParser.formatInches(Double(curvedSize.width))
         let curvedHeightText = MeasurementParser.formatInches(Double(curvedSize.height))
-        let lengthLabel = "\(curvedWidthText) in"
-        let depthLabel = "\(curvedHeightText) in"
+        let lengthLabel = "\(curvedWidthText)\""
+        let depthLabel = "\(curvedHeightText)\""
         let expanded = expandedDisplayBounds(for: piece)
         let left = offsetX + expanded.minX * scale
         let right = offsetX + expanded.maxX * scale
@@ -2048,7 +2173,7 @@ enum PDFRenderer {
             let leftLabelFrameX = leftLabelCenterX - labelWidth / 2
             if leftSegmentCount == 1 {
                 if let leftMetric = sideMetrics[.left] {
-                    let widthText = "\(MeasurementParser.formatInches(Double(leftMetric.length))) in"
+                    let widthText = "\(MeasurementParser.formatInches(Double(leftMetric.length)))\""
                     let centerY = offsetY + leftMetric.center.y * scale
                     drawText(widthText, in: context, frame: CGRect(x: leftLabelFrameX, y: centerY - 6, width: labelWidth, height: 12), font: .systemFont(ofSize: 9, weight: .semibold), alignment: .center)
                 } else {
@@ -2065,7 +2190,7 @@ enum PDFRenderer {
             let topLabelFrameY = topLabelCenterY - 6  // half of 12pt label height
             if topSegmentCount == 1 {
                 if let topMetric = sideMetrics[.top] {
-                    let lengthText = "\(MeasurementParser.formatInches(Double(topMetric.length))) in"
+                    let lengthText = "\(MeasurementParser.formatInches(Double(topMetric.length)))\""
                     let centerX = offsetX + topMetric.center.x * scale
                     drawText(lengthText, in: context, frame: CGRect(x: centerX - 30, y: topLabelFrameY, width: 60, height: 12), font: .systemFont(ofSize: 9, weight: .semibold), alignment: .center)
                 } else {
@@ -2108,7 +2233,7 @@ enum PDFRenderer {
                 } else {
                     lengthValue = abs(segment.end.y - segment.start.y)
                 }
-                let text = "\(MeasurementParser.formatInches(Double(lengthValue))) in"
+                let text = "\(MeasurementParser.formatInches(Double(lengthValue)))\""
                 let point = segmentLabelPoint(segment: segment, piece: piece, scale: scale, offsetX: offsetX, offsetY: offsetY)
                 drawText(text, in: context, frame: CGRect(x: point.x - 30, y: point.y - 6, width: 60, height: 12), font: .systemFont(ofSize: 8, weight: .semibold), alignment: .center)
             }
@@ -2232,8 +2357,9 @@ enum PDFRenderer {
         let visibleCutouts = piece.cutouts.filter { $0.centerX >= 0 && $0.centerY >= 0 }
         let holes = visibleCutouts.filter { !isEffectiveNotch(cutout: $0, size: ShapePathBuilder.pieceSize(for: piece)) }
         var lines: [String] = []
-        let leftCurveOffset = curveEdgeOffset(piece: piece, edge: .left)
-        let topCurveOffset = curveEdgeOffset(piece: piece, edge: .top)
+        // Curves are stored with display edge positions
+        let displayLeftCurveOffset = curveEdgeOffset(piece: piece, edge: .left)
+        let displayTopCurveOffset = curveEdgeOffset(piece: piece, edge: .top)
 
         for cutout in holes {
             let label: String
@@ -2246,11 +2372,14 @@ enum PDFRenderer {
             let widthText = MeasurementParser.formatInches(cutout.width)
             let heightText = MeasurementParser.formatInches(cutout.height)
             let sizeText = "\(widthText)\" Wide x \(heightText)\" Long"
-            let fromLeftValue = max(displayCutout.centerX + leftCurveOffset, 0)
-            let fromTopValue = max(displayCutout.centerY + topCurveOffset, 0)
+            let fromLeftValue = max(displayCutout.centerX + displayLeftCurveOffset, 0)
+            let fromTopValue = max(displayCutout.centerY + displayTopCurveOffset, 0)
             let fromLeft = MeasurementParser.formatInches(fromLeftValue)
             let fromTop = MeasurementParser.formatInches(fromTopValue)
-            lines.append("\(label): \(sizeText) - \(fromLeft)\" From Left to Center, \(fromTop)\" From Top to Center")
+            // Add "Apex" suffix when curve affects the measurement
+            let leftSuffix = displayLeftCurveOffset != 0 ? " Apex" : ""
+            let topSuffix = displayTopCurveOffset != 0 ? " Apex" : ""
+            lines.append("\(label): \(sizeText) - \(fromLeft)\" From Left\(leftSuffix) to Center, \(fromTop)\" From Top\(topSuffix) to Center")
         }
 
         return lines
