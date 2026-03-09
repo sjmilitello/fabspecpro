@@ -1166,7 +1166,7 @@ enum PDFRenderer {
             guard assignment.cutoutEdge == nil, assignment.angleEdgeId == nil else { continue }
             if let segmentEdge = assignment.segmentEdge {
                 if let segment = boundarySegments.first(where: { $0.edge == segmentEdge.edge && $0.index == segmentEdge.index }) {
-                    let point = segmentLabelPoint(segment: segment, scale: scale, offsetX: offsetX, offsetY: offsetY)
+                    let point = segmentEdgeNotationPoint(segment: segment, piece: piece, scale: scale, offsetX: offsetX, offsetY: offsetY)
                     drawText(code, in: context, frame: CGRect(x: point.x - 16, y: point.y - 8, width: 32, height: 12), font: .systemFont(ofSize: 10, weight: .bold), alignment: .center)
                 }
                 continue
@@ -1246,9 +1246,70 @@ enum PDFRenderer {
         return minX <= eps || minY <= eps || maxX >= size.width - eps || maxY >= size.height - eps
     }
 
-    private static func segmentLabelPoint(segment: BoundarySegment, scale: CGFloat, offsetX: CGFloat, offsetY: CGFloat) -> CGPoint {
+    /// Returns the position for a segment's edge notation label (like "PE"), accounting for curved edges
+    private static func segmentEdgeNotationPoint(segment: BoundarySegment, piece: Piece, scale: CGFloat, offsetX: CGFloat, offsetY: CGFloat) -> CGPoint {
         let mid = CGPoint(x: (segment.start.x + segment.end.x) / 2, y: (segment.start.y + segment.end.y) / 2)
-        let offsetDistance = 8 / max(scale, 0.01)
+        
+        // Handle curved edges - calculate point on curve and offset from there
+        if let curve = piece.curve(for: segment.edge), curve.radius > 0 {
+            let polygon = ShapePathBuilder.displayPolygonPoints(for: piece, includeAngles: true)
+            let baseBounds = piece.shape == .rightTriangle ? CGRect(origin: .zero, size: ShapePathBuilder.displaySize(for: piece)) : nil
+            let size = ShapePathBuilder.displaySize(for: piece)
+            let geometry: (start: CGPoint, end: CGPoint, normal: CGPoint)?
+            if piece.shape == .rectangle {
+                switch segment.edge {
+                case .top:
+                    geometry = (CGPoint(x: 0, y: 0), CGPoint(x: size.width, y: 0), CGPoint(x: 0, y: -1))
+                case .right:
+                    geometry = (CGPoint(x: size.width, y: 0), CGPoint(x: size.width, y: size.height), CGPoint(x: 1, y: 0))
+                case .bottom:
+                    geometry = (CGPoint(x: size.width, y: size.height), CGPoint(x: 0, y: size.height), CGPoint(x: 0, y: 1))
+                case .left:
+                    geometry = (CGPoint(x: 0, y: size.height), CGPoint(x: 0, y: 0), CGPoint(x: -1, y: 0))
+                default:
+                    geometry = edgeGeometryFromPolygon(edge: segment.edge, polygon: polygon, shape: piece.shape, baseBounds: baseBounds)
+                }
+            } else {
+                geometry = edgeGeometryFromPolygon(edge: segment.edge, polygon: polygon, shape: piece.shape, baseBounds: baseBounds)
+            }
+            if let geometry {
+                // Calculate t parameter for where segment midpoint falls on edge
+                let denom: CGFloat
+                let t: CGFloat
+                switch segment.edge {
+                case .top, .bottom, .legA:
+                    denom = geometry.end.x - geometry.start.x
+                    t = denom == 0 ? 0.5 : (mid.x - geometry.start.x) / denom
+                case .left, .right, .legB:
+                    denom = geometry.end.y - geometry.start.y
+                    t = denom == 0 ? 0.5 : (mid.y - geometry.start.y) / denom
+                case .hypotenuse:
+                    let total = distance(geometry.start, geometry.end)
+                    t = total == 0 ? 0.5 : distance(geometry.start, mid) / total
+                }
+                let clampedT = min(max(t, 0), 1)
+                let control = controlPoint(for: geometry, curve: curve)
+                let curvePoint = quadBezierPoint(t: clampedT, start: geometry.start, control: control, end: geometry.end)
+                // Edge notation uses smaller offset (6) compared to dimension labels
+                let offsetDistance = 6 / max(scale, 0.01)
+                let centroid = polygon.reduce(CGPoint.zero) { CGPoint(x: $0.x + $1.x, y: $0.y + $1.y) }
+                let center = CGPoint(x: centroid.x / CGFloat(polygon.count), y: centroid.y / CGFloat(polygon.count))
+                let outward = normalized(CGPoint(x: curvePoint.x - center.x, y: curvePoint.y - center.y))
+                let adjusted = offsetRelativeToPolygon(
+                    point: curvePoint,
+                    segmentStart: geometry.start,
+                    segmentEnd: geometry.end,
+                    polygon: polygon,
+                    distance: offsetDistance,
+                    preferInside: false,
+                    preferredDirection: outward
+                )
+                return CGPoint(x: offsetX + adjusted.x * scale, y: offsetY + adjusted.y * scale)
+            }
+        }
+        
+        // Non-curved edges - use simple direction offset
+        let baseOffset = 6 / max(scale, 0.01)
         let direction: CGPoint
         switch segment.edge {
         case .top:
@@ -1262,10 +1323,108 @@ enum PDFRenderer {
         default:
             direction = CGPoint(x: 0, y: -1)
         }
-        let adjusted = CGPoint(x: mid.x + direction.x * offsetDistance, y: mid.y + direction.y * offsetDistance)
+        let adjusted = CGPoint(x: mid.x + direction.x * baseOffset, y: mid.y + direction.y * baseOffset)
         return CGPoint(x: offsetX + adjusted.x * scale, y: offsetY + adjusted.y * scale)
     }
 
+    /// Returns the position for a segment's dimension label (like "5 in"), accounting for curved edges
+    private static func segmentLabelPoint(segment: BoundarySegment, piece: Piece, scale: CGFloat, offsetX: CGFloat, offsetY: CGFloat) -> CGPoint {
+        let mid = CGPoint(x: (segment.start.x + segment.end.x) / 2, y: (segment.start.y + segment.end.y) / 2)
+        
+        // Handle curved edges - calculate point on curve and offset from there
+        if let curve = piece.curve(for: segment.edge), curve.radius > 0 {
+            let polygon = ShapePathBuilder.displayPolygonPoints(for: piece, includeAngles: true)
+            let baseBounds = piece.shape == .rightTriangle ? CGRect(origin: .zero, size: ShapePathBuilder.displaySize(for: piece)) : nil
+            let size = ShapePathBuilder.displaySize(for: piece)
+            let geometry: (start: CGPoint, end: CGPoint, normal: CGPoint)?
+            if piece.shape == .rectangle {
+                switch segment.edge {
+                case .top:
+                    geometry = (CGPoint(x: 0, y: 0), CGPoint(x: size.width, y: 0), CGPoint(x: 0, y: -1))
+                case .right:
+                    geometry = (CGPoint(x: size.width, y: 0), CGPoint(x: size.width, y: size.height), CGPoint(x: 1, y: 0))
+                case .bottom:
+                    geometry = (CGPoint(x: size.width, y: size.height), CGPoint(x: 0, y: size.height), CGPoint(x: 0, y: 1))
+                case .left:
+                    geometry = (CGPoint(x: 0, y: size.height), CGPoint(x: 0, y: 0), CGPoint(x: -1, y: 0))
+                default:
+                    geometry = edgeGeometryFromPolygon(edge: segment.edge, polygon: polygon, shape: piece.shape, baseBounds: baseBounds)
+                }
+            } else {
+                geometry = edgeGeometryFromPolygon(edge: segment.edge, polygon: polygon, shape: piece.shape, baseBounds: baseBounds)
+            }
+            if let geometry {
+                // Calculate t parameter for where segment midpoint falls on edge
+                let denom: CGFloat
+                let t: CGFloat
+                switch segment.edge {
+                case .top, .bottom, .legA:
+                    denom = geometry.end.x - geometry.start.x
+                    t = denom == 0 ? 0.5 : (mid.x - geometry.start.x) / denom
+                case .left, .right, .legB:
+                    denom = geometry.end.y - geometry.start.y
+                    t = denom == 0 ? 0.5 : (mid.y - geometry.start.y) / denom
+                case .hypotenuse:
+                    let total = distance(geometry.start, geometry.end)
+                    t = total == 0 ? 0.5 : distance(geometry.start, mid) / total
+                }
+                let clampedT = min(max(t, 0), 1)
+                let control = controlPoint(for: geometry, curve: curve)
+                let curvePoint = quadBezierPoint(t: clampedT, start: geometry.start, control: control, end: geometry.end)
+                // Measurement labels need more offset than edge notations (which use 6)
+                // to create clear separation between them
+                let curveBaseOffset = CGFloat(segment.edge == .hypotenuse ? 12 : 8) / max(scale, 0.01)
+                var curveOffsetDistance = curveBaseOffset
+                if segment.edge == .top || segment.edge == .bottom {
+                    // Add extra offset for top/bottom to separate from edge notations
+                    curveOffsetDistance += 10 / max(scale, 0.01)
+                }
+                if segment.edge == .left || segment.edge == .right {
+                    curveOffsetDistance += (20 / max(scale, 0.01))
+                }
+                let outward = normalized(geometry.normal)
+                var adjusted = offsetRelativeToPolygon(
+                    point: curvePoint,
+                    segmentStart: geometry.start,
+                    segmentEnd: geometry.end,
+                    polygon: polygon,
+                    distance: curveOffsetDistance,
+                    preferInside: false,
+                    preferredDirection: outward
+                )
+                if pointIsInsidePolygon(adjusted, polygon: polygon) {
+                    adjusted = CGPoint(
+                        x: curvePoint.x - outward.x * curveOffsetDistance,
+                        y: curvePoint.y - outward.y * curveOffsetDistance
+                    )
+                }
+                return CGPoint(x: offsetX + adjusted.x * scale, y: offsetY + adjusted.y * scale)
+            }
+        }
+        
+        // Non-curved edges - use simple direction offset
+        let baseOffset = 12 / max(scale, 0.01)
+        let sideBoost = 18 / max(scale, 0.01)
+        let extraPadding = 10 / max(scale, 0.01)
+        let direction: CGPoint
+        switch segment.edge {
+        case .top:
+            direction = CGPoint(x: 0, y: -1)
+        case .bottom:
+            direction = CGPoint(x: 0, y: 1)
+        case .left:
+            direction = CGPoint(x: -1, y: 0)
+        case .right:
+            direction = CGPoint(x: 1, y: 0)
+        default:
+            direction = CGPoint(x: 0, y: -1)
+        }
+        let offsetDistance = (segment.edge == .left || segment.edge == .right)
+            ? (baseOffset + sideBoost + extraPadding + (10 / max(scale, 0.01)))
+            : baseOffset
+        let adjusted = CGPoint(x: mid.x + direction.x * offsetDistance, y: mid.y + direction.y * offsetDistance)
+        return CGPoint(x: offsetX + adjusted.x * scale, y: offsetY + adjusted.y * scale)
+    }
 
     private static func edgeLabelPoint(edge: EdgePosition, piece: Piece, shape: ShapeKind, curves: [CurvedEdge], size: CGSize, scale: CGFloat, offsetX: CGFloat, offsetY: CGFloat, cutouts: [Cutout] = []) -> CGPoint {
         let width = size.width * scale
@@ -1614,6 +1773,7 @@ enum PDFRenderer {
             return CGPoint(x: offsetX + adjusted.x * scale, y: offsetY + adjusted.y * scale)
         }
 
+        // For interior cutouts (not notches), position label inside the cutout centered on the edge
         let minX = center.x - halfWidth
         let maxX = center.x + halfWidth
         let minY = center.y - halfHeight
@@ -1633,14 +1793,8 @@ enum PDFRenderer {
             point = CGPoint(x: center.x, y: minY + padding)
         }
 
-        let adjusted = offsetOutsidePolygon(
-            point: point,
-            segmentStart: segmentStartPoint(for: edge, cutout: displayCutout),
-            segmentEnd: segmentEndPoint(for: edge, cutout: displayCutout),
-            polygon: polygon,
-            distance: padding
-        )
-        return CGPoint(x: offsetX + adjusted.x * scale, y: offsetY + adjusted.y * scale)
+        // Interior cutouts should have labels inside, so don't offset outside
+        return CGPoint(x: offsetX + point.x * scale, y: offsetY + point.y * scale)
     }
 
     private static func segmentStartPoint(for edge: EdgePosition, cutout: Cutout) -> CGPoint {
@@ -1848,9 +2002,6 @@ enum PDFRenderer {
         let expanded = expandedDisplayBounds(for: piece)
         let left = offsetX + expanded.minX * scale
         let right = offsetX + expanded.maxX * scale
-        let topLabelY = topMeasurementY
-        let topRightFrame = CGRect(x: offsetX + size.width * scale - 60, y: topLabelY, width: 60, height: 12)
-        let leftBottomFrame = CGRect(x: left - drawingLeftInset + 8, y: offsetY + size.height * scale - 8, width: 64, height: 12)
 
         let widthText = curvedHeightText
         let heightText = curvedWidthText
@@ -1864,15 +2015,18 @@ enum PDFRenderer {
         drawText(headerLine, in: context, frame: CGRect(x: headerX, y: pieceHeaderY, width: headerWidth, height: 12), font: .boldSystemFont(ofSize: 11), alignment: .left)
 
         if piece.shape == .circle {
-            let lengthFrame = CGRect(x: offsetX + (size.width * scale / 2) - 30, y: topLabelY, width: 60, height: 12)
-            // Position width label to the LEFT of the circle with minimum padding
-            // The label frame is 64 wide, so position it so its right edge is at least 8 points left of the circle
+            // Match DrawingCanvasView positioning for circles
+            let lengthLabelPadding: CGFloat = 28
+            let widthLabelPadding: CGFloat = 42
+            let top = offsetY + expanded.minY * scale
+            let topLabelCenterY = top - lengthLabelPadding
+            let lengthFrame = CGRect(x: offsetX + (size.width * scale / 2) - 30, y: topLabelCenterY - 6, width: 60, height: 12)
+            // Position width label centered at (left - widthLabelPadding, centerY)
             let labelWidth: CGFloat = 64
-            let minPadding: CGFloat = 8
-            let widthLabelX = left - labelWidth - minPadding
-            let widthFrame = CGRect(x: widthLabelX, y: offsetY + (size.height * scale / 2) - 6, width: labelWidth, height: 12)
+            let leftLabelCenterX = left - widthLabelPadding
+            let widthFrame = CGRect(x: leftLabelCenterX - labelWidth / 2, y: offsetY + (size.height * scale / 2) - 6, width: labelWidth, height: 12)
             drawText(lengthLabel, in: context, frame: lengthFrame, font: .systemFont(ofSize: 9, weight: .semibold), alignment: .center)
-            drawText(depthLabel, in: context, frame: widthFrame, font: .systemFont(ofSize: 9, weight: .semibold), alignment: .right)
+            drawText(depthLabel, in: context, frame: widthFrame, font: .systemFont(ofSize: 9, weight: .semibold), alignment: .center)
         } else if piece.shape == .rectangle {
             drawSegmentDimensionLabels(in: context, piece: piece, scale: scale, offsetX: offsetX, offsetY: offsetY)
             let sideMetrics = rectangleSideMetrics(for: piece)
@@ -1886,45 +2040,49 @@ enum PDFRenderer {
             let topSegmentCount = segmentCounts[.top] ?? 1
             
             // Only show left edge measurement if it's a single segment (no notches on left edge)
+            // Match DrawingCanvasView: label center at (left - widthLabelPadding, centerY)
+            // widthLabelPadding = 42 in DrawingCanvasView
+            let widthLabelPadding: CGFloat = 42
+            let labelWidth: CGFloat = 64
+            let leftLabelCenterX = left - widthLabelPadding
+            let leftLabelFrameX = leftLabelCenterX - labelWidth / 2
             if leftSegmentCount == 1 {
                 if let leftMetric = sideMetrics[.left] {
                     let widthText = "\(MeasurementParser.formatInches(Double(leftMetric.length))) in"
                     let centerY = offsetY + leftMetric.center.y * scale
-                    drawText(widthText, in: context, frame: CGRect(x: leftBottomFrame.minX - 20, y: centerY - 6, width: leftBottomFrame.width, height: leftBottomFrame.height), font: .systemFont(ofSize: 9, weight: .semibold), alignment: .center)
+                    drawText(widthText, in: context, frame: CGRect(x: leftLabelFrameX, y: centerY - 6, width: labelWidth, height: 12), font: .systemFont(ofSize: 9, weight: .semibold), alignment: .center)
                 } else {
-                    drawText(depthLabel, in: context, frame: CGRect(x: leftBottomFrame.minX - 20, y: offsetY + (size.height * scale / 2) - 6, width: leftBottomFrame.width, height: leftBottomFrame.height), font: .systemFont(ofSize: 9, weight: .semibold), alignment: .center)
+                    drawText(depthLabel, in: context, frame: CGRect(x: leftLabelFrameX, y: offsetY + (size.height * scale / 2) - 6, width: labelWidth, height: 12), font: .systemFont(ofSize: 9, weight: .semibold), alignment: .center)
                 }
             }
 
             // Only show top edge measurement if it's a single segment (no notches on top edge)
+            // Match DrawingCanvasView: label center at (centerX, top - lengthLabelPadding)
+            // lengthLabelPadding = 28 in DrawingCanvasView
+            let lengthLabelPadding: CGFloat = 28
+            let top = offsetY + expanded.minY * scale
+            let topLabelCenterY = top - lengthLabelPadding
+            let topLabelFrameY = topLabelCenterY - 6  // half of 12pt label height
             if topSegmentCount == 1 {
                 if let topMetric = sideMetrics[.top] {
                     let lengthText = "\(MeasurementParser.formatInches(Double(topMetric.length))) in"
                     let centerX = offsetX + topMetric.center.x * scale
-                    drawText(lengthText, in: context, frame: CGRect(x: centerX - 30, y: topRightFrame.minY - 9, width: 60, height: topRightFrame.height), font: .systemFont(ofSize: 9, weight: .semibold), alignment: .center)
+                    drawText(lengthText, in: context, frame: CGRect(x: centerX - 30, y: topLabelFrameY, width: 60, height: 12), font: .systemFont(ofSize: 9, weight: .semibold), alignment: .center)
                 } else {
-                    drawText(lengthLabel, in: context, frame: CGRect(x: offsetX + (size.width * scale / 2) - 30, y: topRightFrame.minY - 9, width: 60, height: topRightFrame.height), font: .systemFont(ofSize: 9, weight: .semibold), alignment: .center)
+                    drawText(lengthLabel, in: context, frame: CGRect(x: offsetX + (size.width * scale / 2) - 30, y: topLabelFrameY, width: 60, height: 12), font: .systemFont(ofSize: 9, weight: .semibold), alignment: .center)
                 }
             }
 
-            // Only show right edge measurement if it has multiple segments (notch on right edge)
-            let rightSegmentCount = segmentCounts[.right] ?? 1
-            if rightSegmentCount > 1, let rightMetric = sideMetrics[.right], abs(rightMetric.length - size.height) > 0.01 {
-                let widthText = "\(MeasurementParser.formatInches(Double(rightMetric.length))) in"
-                let centerY = offsetY + rightMetric.center.y * scale
-                drawText(widthText, in: context, frame: CGRect(x: right + 5, y: centerY - 6, width: 60, height: 12), font: .systemFont(ofSize: 9, weight: .semibold), alignment: .center)
-            }
 
-            // Only show bottom edge measurement if it has multiple segments (notch on bottom edge)
-            let bottomSegmentCount = segmentCounts[.bottom] ?? 1
-            if bottomSegmentCount > 1, let bottomMetric = sideMetrics[.bottom], abs(bottomMetric.length - size.width) > 0.01 {
-                let lengthText = "\(MeasurementParser.formatInches(Double(bottomMetric.length))) in"
-                let centerX = offsetX + bottomMetric.center.x * scale
-                drawText(lengthText, in: context, frame: CGRect(x: centerX - 30, y: bottomMeasurementY, width: 60, height: 12), font: .systemFont(ofSize: 9, weight: .semibold), alignment: .center)
-            }
         } else {
-            drawText(lengthLabel, in: context, frame: CGRect(x: offsetX + (size.width * scale / 2) - 30, y: topRightFrame.minY - 9, width: 60, height: topRightFrame.height), font: .systemFont(ofSize: 9, weight: .semibold), alignment: .center)
-            drawText(depthLabel, in: context, frame: CGRect(x: leftBottomFrame.minX - 24, y: offsetY + (size.height * scale / 2) - 6, width: leftBottomFrame.width, height: leftBottomFrame.height), font: .systemFont(ofSize: 9, weight: .semibold), alignment: .center)
+            // For other shapes (triangles, etc.), match DrawingCanvasView positioning
+            let lengthLabelPadding: CGFloat = 28
+            let widthLabelPadding: CGFloat = 42
+            let top = offsetY + expanded.minY * scale
+            let topLabelCenterY = top - lengthLabelPadding
+            let leftLabelCenterX = left - widthLabelPadding
+            drawText(lengthLabel, in: context, frame: CGRect(x: offsetX + (size.width * scale / 2) - 30, y: topLabelCenterY - 6, width: 60, height: 12), font: .systemFont(ofSize: 9, weight: .semibold), alignment: .center)
+            drawText(depthLabel, in: context, frame: CGRect(x: leftLabelCenterX - 32, y: offsetY + (size.height * scale / 2) - 6, width: 64, height: 12), font: .systemFont(ofSize: 9, weight: .semibold), alignment: .center)
         }
         drawText("Qty \(piece.quantity)", in: context, frame: CGRect(x: right + 72, y: offsetY + (size.height * scale / 2) - 6, width: 44, height: 12), font: .systemFont(ofSize: 9, weight: .semibold), alignment: .left)
     }
@@ -1933,7 +2091,16 @@ enum PDFRenderer {
         let segments = ShapePathBuilder.boundarySegments(for: piece)
         guard !segments.isEmpty else { return }
         let grouped = Dictionary(grouping: segments, by: { $0.edge })
+        
+        // Check which edges have actual notches touching them
+        let size = ShapePathBuilder.displaySize(for: piece)
+        let edgesWithNotches = edgesThatHaveNotches(piece: piece, size: size)
+        
         for (edge, edgeSegments) in grouped where edgeSegments.count > 1 {
+            // Only show segment labels if this edge has an actual notch
+            // Skip edges where segments are only created by curve spans
+            guard edgesWithNotches.contains(edge) else { continue }
+            
             for segment in edgeSegments {
                 let lengthValue: CGFloat
                 if edge == .top || edge == .bottom {
@@ -1942,10 +2109,35 @@ enum PDFRenderer {
                     lengthValue = abs(segment.end.y - segment.start.y)
                 }
                 let text = "\(MeasurementParser.formatInches(Double(lengthValue))) in"
-                let point = segmentLabelPoint(segment: segment, scale: scale, offsetX: offsetX, offsetY: offsetY)
+                let point = segmentLabelPoint(segment: segment, piece: piece, scale: scale, offsetX: offsetX, offsetY: offsetY)
                 drawText(text, in: context, frame: CGRect(x: point.x - 30, y: point.y - 6, width: 60, height: 12), font: .systemFont(ofSize: 8, weight: .semibold), alignment: .center)
             }
         }
+    }
+    
+    /// Returns the set of edges that have notches touching them
+    private static func edgesThatHaveNotches(piece: Piece, size: CGSize) -> Set<EdgePosition> {
+        var edges = Set<EdgePosition>()
+        let eps: CGFloat = 0.01
+        
+        for cutout in piece.cutouts where cutout.centerX >= 0 && cutout.centerY >= 0 {
+            guard isEffectiveNotch(cutout: cutout, size: size) else { continue }
+            let displayCutout = displayCutout(for: cutout)
+            let halfWidth = displayCutout.width / 2
+            let halfHeight = displayCutout.height / 2
+            let minX = displayCutout.centerX - halfWidth
+            let maxX = displayCutout.centerX + halfWidth
+            let minY = displayCutout.centerY - halfHeight
+            let maxY = displayCutout.centerY + halfHeight
+            
+            // Check which edges this notch touches
+            if minY <= eps { edges.insert(.top) }
+            if maxY >= size.height - eps { edges.insert(.bottom) }
+            if minX <= eps { edges.insert(.left) }
+            if maxX >= size.width - eps { edges.insert(.right) }
+        }
+        
+        return edges
     }
 
     private struct SideMetric {

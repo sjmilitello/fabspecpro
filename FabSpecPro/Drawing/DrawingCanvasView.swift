@@ -10,7 +10,7 @@ struct DrawingCanvasView: View {
     private let lengthYOffsetPoints: CGFloat = -17
     private let lengthYOffsetInches: CGFloat = 0.125
     private let noteYOffsetInches: CGFloat = 2.0
-    private let noteYOffsetPoints: CGFloat = 30
+    private let noteYOffsetPoints: CGFloat = 35
     private let lengthLabelPadding: CGFloat = 28
     private let widthLabelPadding: CGFloat = 42
 
@@ -285,9 +285,10 @@ struct DrawingCanvasView: View {
         guard !pieceCorners.isEmpty else { return }
         let origin = metrics.origin
         let scale = metrics.scale
-        let labelOffset: CGFloat = 12
+        let baseLabelOffset: CGFloat = 12
 
         let pieceBounds = bounds(for: pieceCorners)
+        let baseCorners = baseShapeCorners()
         let pieceCenter = CGPoint(x: (pieceBounds.minX + pieceBounds.maxX) / 2, y: (pieceBounds.minY + pieceBounds.maxY) / 2)
         let isPieceClockwise = polygonIsClockwise(pieceCorners)
 
@@ -295,10 +296,26 @@ struct DrawingCanvasView: View {
             let label = Text(cornerLabel(for: index))
                 .font(.system(size: 10, weight: .semibold))
                 .foregroundStyle(Theme.secondaryText)
-            let direction = cornerLabelDirection(points: pieceCorners, index: index, center: pieceCenter, clockwise: isPieceClockwise)
+            let isConcave = isConcaveCorner(points: pieceCorners, index: index, clockwise: isPieceClockwise)
+            let direction = notchCornerDirectionIfApplicable(point: point)
+                ?? concaveCornerDirection(
+                    point: point,
+                    bounds: pieceBounds,
+                    shape: piece.shape,
+                    isConcave: isConcave
+                )
+                ?? cornerLabelDirection(points: pieceCorners, index: index, center: pieceCenter, clockwise: isPieceClockwise)
+            let labelOffset = baseLabelOffset
+            let curveOffset = curveOffsetVector(
+                for: point,
+                points: pieceCorners,
+                baseCorners: baseCorners,
+                bounds: pieceBounds,
+                shape: piece.shape
+            )
             let displayPoint = CGPoint(
-                x: origin.x + point.x * scale + direction.x * labelOffset,
-                y: origin.y + point.y * scale + direction.y * labelOffset
+                x: origin.x + point.x * scale + direction.x * labelOffset + curveOffset.x * scale,
+                y: origin.y + point.y * scale + direction.y * labelOffset + curveOffset.y * scale
             )
             context.draw(label, at: displayPoint, anchor: .center)
         }
@@ -308,13 +325,14 @@ struct DrawingCanvasView: View {
             let corners = cutoutCornerPoints(for: displayCutout)
             let bounds = bounds(for: corners)
             let center = CGPoint(x: (bounds.minX + bounds.maxX) / 2, y: (bounds.minY + bounds.maxY) / 2)
-            let isClockwise = polygonIsClockwise(corners)
+            _ = polygonIsClockwise(corners)
             for (localIndex, point) in corners.enumerated() {
                 let labelIndex = entry.range.lowerBound + localIndex
                 let label = Text(cornerLabel(for: labelIndex))
                     .font(.system(size: 10, weight: .semibold))
                     .foregroundStyle(Theme.secondaryText)
-                let direction = cornerLabelDirection(points: corners, index: localIndex, center: center, clockwise: isClockwise)
+                let direction = unitVector(from: center, to: point)
+                let labelOffset = baseLabelOffset
                 let displayPoint = CGPoint(
                     x: origin.x + point.x * scale + direction.x * labelOffset,
                     y: origin.y + point.y * scale + direction.y * labelOffset
@@ -322,6 +340,194 @@ struct DrawingCanvasView: View {
                 context.draw(label, at: displayPoint, anchor: .center)
             }
         }
+    }
+
+    private func curveOffsetVector(for point: CGPoint, points: [CGPoint], baseCorners: [CGPoint], bounds: CGRect, shape: ShapeKind) -> CGPoint {
+        if isBaseCorner(point: point, baseCorners: baseCorners, tolerance: 0.5) {
+            return .zero
+        }
+        let edges = edgesContaining(point: point, bounds: bounds, shape: shape, tolerance: 0.5)
+        guard !edges.isEmpty else { return .zero }
+        var offset = CGPoint.zero
+        for edge in edges {
+            let radius = maxConvexCurveRadius(for: edge, point: point, points: points, baseCorners: baseCorners, bounds: bounds, shape: shape)
+            if radius <= 0 { continue }
+            let normal = edgeNormal(for: edge, shape: shape)
+            offset.x += normal.x * radius
+            offset.y += normal.y * radius
+        }
+        return offset
+    }
+
+    private func isBaseCorner(point: CGPoint, baseCorners: [CGPoint], tolerance: CGFloat) -> Bool {
+        for corner in baseCorners {
+            if abs(point.x - corner.x) <= tolerance, abs(point.y - corner.y) <= tolerance {
+                return true
+            }
+        }
+        return false
+    }
+
+    private func baseShapeCorners() -> [CGPoint] {
+        let size = ShapePathBuilder.pieceSize(for: piece)
+        switch piece.shape {
+        case .rectangle:
+            let rawPoints = [
+                CGPoint(x: 0, y: 0),
+                CGPoint(x: size.width, y: 0),
+                CGPoint(x: size.width, y: size.height),
+                CGPoint(x: 0, y: size.height)
+            ]
+            return rawPoints.map { ShapePathBuilder.displayPoint(fromRaw: $0) }
+        case .rightTriangle:
+            let rawPoints = [
+                CGPoint(x: 0, y: 0),
+                CGPoint(x: size.width, y: 0),
+                CGPoint(x: 0, y: size.height)
+            ]
+            return rawPoints.map { ShapePathBuilder.displayPoint(fromRaw: $0) }
+        default:
+            return []
+        }
+    }
+
+    private func maxConvexCurveRadius(for edge: EdgePosition, point: CGPoint, points: [CGPoint], baseCorners: [CGPoint], bounds: CGRect, shape: ShapeKind) -> CGFloat {
+        var maxRadius: CGFloat = 0
+        for curve in piece.curvedEdges where curve.edge == edge && curve.radius > 0 && !curve.isConcave {
+            if curve.hasSpan, !curveSpanContains(point: point, curve: curve, points: points, baseCorners: baseCorners, bounds: bounds, shape: shape) {
+                continue
+            }
+            maxRadius = max(maxRadius, CGFloat(curve.radius))
+        }
+        return maxRadius
+    }
+
+    private func curveSpanContains(point: CGPoint, curve: CurvedEdge, points: [CGPoint], baseCorners: [CGPoint], bounds: CGRect, shape: ShapeKind) -> Bool {
+        guard curve.hasSpan else { return true }
+        guard let range = curveSpanProgressRange(curve: curve, baseCorners: baseCorners, bounds: bounds, shape: shape) else { return true }
+        let progress = ShapePathBuilder.edgeProgress(for: point, edge: curve.edge, shape: shape, bounds: bounds)
+        let minProgress = min(range.start, range.end) - 0.001
+        let maxProgress = max(range.start, range.end) + 0.001
+        return progress >= minProgress && progress <= maxProgress
+    }
+
+    private func curveSpanProgressRange(curve: CurvedEdge, baseCorners: [CGPoint], bounds: CGRect, shape: ShapeKind) -> (start: CGFloat, end: CGFloat)? {
+        if curve.usesEdgeProgress {
+            return (CGFloat(curve.startEdgeProgress), CGFloat(curve.endEdgeProgress))
+        }
+        if curve.usesBoundaryEndpoints {
+            let segments = ShapePathBuilder.boundarySegments(for: piece)
+            guard let startSegment = segments.first(where: { $0.edge == curve.edge && $0.index == curve.startBoundarySegmentIndex }),
+                  let endSegment = segments.first(where: { $0.edge == curve.edge && $0.index == curve.endBoundarySegmentIndex }) else {
+                return nil
+            }
+            let startPoint = curve.startBoundaryIsEnd ? startSegment.end : startSegment.start
+            let endPoint = curve.endBoundaryIsEnd ? endSegment.end : endSegment.start
+            let startProgress = ShapePathBuilder.edgeProgress(for: startPoint, edge: curve.edge, shape: shape, bounds: bounds)
+            let endProgress = ShapePathBuilder.edgeProgress(for: endPoint, edge: curve.edge, shape: shape, bounds: bounds)
+            return (startProgress, endProgress)
+        }
+        if curve.usesCornerIndices {
+            guard curve.startCornerIndex >= 0,
+                  curve.startCornerIndex < baseCorners.count,
+                  curve.endCornerIndex >= 0,
+                  curve.endCornerIndex < baseCorners.count else {
+                return nil
+            }
+            let startPoint = baseCorners[curve.startCornerIndex]
+            let endPoint = baseCorners[curve.endCornerIndex]
+            let startProgress = ShapePathBuilder.edgeProgress(for: startPoint, edge: curve.edge, shape: shape, bounds: bounds)
+            let endProgress = ShapePathBuilder.edgeProgress(for: endPoint, edge: curve.edge, shape: shape, bounds: bounds)
+            return (startProgress, endProgress)
+        }
+        return nil
+    }
+
+    private func edgesContaining(point: CGPoint, bounds: CGRect, shape: ShapeKind, tolerance: CGFloat) -> [EdgePosition] {
+        switch shape {
+        case .rectangle:
+            var edges: [EdgePosition] = []
+            if abs(point.y - bounds.minY) <= tolerance { edges.append(.top) }
+            if abs(point.y - bounds.maxY) <= tolerance { edges.append(.bottom) }
+            if abs(point.x - bounds.minX) <= tolerance { edges.append(.left) }
+            if abs(point.x - bounds.maxX) <= tolerance { edges.append(.right) }
+            return edges
+        case .rightTriangle:
+            var edges: [EdgePosition] = []
+            if abs(point.y - bounds.minY) <= tolerance { edges.append(.legA) }
+            if abs(point.x - bounds.minX) <= tolerance { edges.append(.legB) }
+            let a = CGPoint(x: bounds.maxX, y: bounds.minY)
+            let b = CGPoint(x: bounds.minX, y: bounds.maxY)
+            let distanceToHypotenuse = pointLineDistance(point: point, a: a, b: b)
+            if distanceToHypotenuse <= tolerance {
+                let minX = min(a.x, b.x) - tolerance
+                let maxX = max(a.x, b.x) + tolerance
+                let minY = min(a.y, b.y) - tolerance
+                let maxY = max(a.y, b.y) + tolerance
+                if point.x >= minX, point.x <= maxX, point.y >= minY, point.y <= maxY {
+                    edges.append(.hypotenuse)
+                }
+            }
+            return edges
+        default:
+            return []
+        }
+    }
+
+    private func edgeNormal(for edge: EdgePosition, shape: ShapeKind) -> CGPoint {
+        switch edge {
+        case .top: return CGPoint(x: 0, y: -1)
+        case .right: return CGPoint(x: 1, y: 0)
+        case .bottom: return CGPoint(x: 0, y: 1)
+        case .left: return CGPoint(x: -1, y: 0)
+        case .legA: return CGPoint(x: 0, y: -1)
+        case .legB: return CGPoint(x: -1, y: 0)
+        case .hypotenuse: return CGPoint(x: 0.7071, y: 0.7071)
+        }
+    }
+
+    private func notchCornerDirectionIfApplicable(point: CGPoint) -> CGPoint? {
+        let pieceSize = ShapePathBuilder.pieceSize(for: piece)
+        // Use a more lenient tolerance to account for floating-point precision in polygon merging
+        let tolerance: CGFloat = 2.0
+        for cutout in piece.cutouts where cutout.centerX >= 0 && cutout.centerY >= 0 {
+            guard isEffectiveNotch(cutout, piece: piece, pieceSize: pieceSize) else { continue }
+            let displayCutout = rotatedCutout(cutout)
+            let corners = cutoutCornerPoints(for: displayCutout)
+            for corner in corners {
+                if abs(point.x - corner.x) <= tolerance, abs(point.y - corner.y) <= tolerance {
+                    let center = CGPoint(x: displayCutout.centerX, y: displayCutout.centerY)
+                    // Use the actual point from the polygon (not the computed corner) to match cutout corner behavior
+                    return unitVector(from: center, to: point)
+                }
+            }
+        }
+        return nil
+    }
+
+    private func concaveCornerDirection(point: CGPoint, bounds: CGRect, shape: ShapeKind, isConcave: Bool) -> CGPoint? {
+        guard isConcave else { return nil }
+        let edges = edgesContaining(point: point, bounds: bounds, shape: shape, tolerance: 0.5)
+        guard !edges.isEmpty else { return nil }
+        var sum = CGPoint.zero
+        for edge in edges {
+            let normal = edgeNormal(for: edge, shape: shape)
+            sum.x += normal.x
+            sum.y += normal.y
+        }
+        return normalized(sum)
+    }
+
+    private func isConcaveCorner(points: [CGPoint], index: Int, clockwise: Bool) -> Bool {
+        guard points.count > 2 else { return false }
+        let count = points.count
+        let prev = points[(index - 1 + count) % count]
+        let curr = points[index]
+        let next = points[(index + 1) % count]
+        let v1 = CGPoint(x: curr.x - prev.x, y: curr.y - prev.y)
+        let v2 = CGPoint(x: next.x - curr.x, y: next.y - curr.y)
+        let cross = v1.x * v2.y - v1.y * v2.x
+        return clockwise ? cross > 0 : cross < 0
     }
 
     private func cutoutCornerPoints(for cutout: Cutout) -> [CGPoint] {
@@ -970,8 +1176,8 @@ struct DrawingCanvasView: View {
                 let curvePoint = quadBezierPoint(t: clampedT, start: geometry.start, control: control, end: geometry.end)
                 let curveBaseOffset = CGFloat(segment.edge == .hypotenuse ? 12 : 8) / max(metrics.scale, 0.01)
                 var curveOffsetDistance = curveBaseOffset
-                if segment.edge == .bottom {
-                    curveOffsetDistance += 4 / max(metrics.scale, 0.01)
+                if segment.edge == .top || segment.edge == .bottom {
+                    curveOffsetDistance += 10 / max(metrics.scale, 0.01)
                 }
                 if segment.edge == .left || segment.edge == .right {
                     curveOffsetDistance += (20 / max(metrics.scale, 0.01))
@@ -1011,9 +1217,14 @@ struct DrawingCanvasView: View {
         default:
             direction = CGPoint(x: 0, y: -1)
         }
-                let offsetDistance = (segment.edge == .left || segment.edge == .right)
-                    ? (baseOffset + sideBoost + extraPadding + (10 / max(metrics.scale, 0.01)))
-                    : baseOffset
+                let offsetDistance: CGFloat
+                if segment.edge == .left || segment.edge == .right {
+                    offsetDistance = baseOffset + sideBoost + extraPadding + (10 / max(metrics.scale, 0.01))
+                } else if segment.edge == .top || segment.edge == .bottom {
+                    offsetDistance = baseOffset + extraPadding
+                } else {
+                    offsetDistance = baseOffset
+                }
         let adjusted = CGPoint(x: mid.x + direction.x * offsetDistance, y: mid.y + direction.y * offsetDistance)
         return metrics.toCanvas(adjusted)
     }
@@ -1569,6 +1780,10 @@ struct EdgeTapGestureOverlay: View {
                                 cutoutEdgeTapped(hit.cutoutId, hit.edge)
                                 return
                             }
+                            if let hit = hitTestNotchEdge(at: value.location) {
+                                cutoutEdgeTapped(hit.cutoutId, hit.edge)
+                                return
+                            }
                             if usesCurvedHitTest, let target = hitTestEdge(at: value.location) {
                                 edgeTapped(target)
                             }
@@ -1628,6 +1843,45 @@ private extension EdgeTapGestureOverlay {
                 (.bottom, abs(point.y - rect.maxY), point.x >= rect.minX && point.x <= rect.maxX),
                 (.left, abs(point.x - rect.minX), point.y >= rect.minY && point.y <= rect.maxY),
                 (.right, abs(point.x - rect.maxX), point.y >= rect.minY && point.y <= rect.maxY)
+            ]
+
+            for (edge, distance, inRange) in candidates where inRange && distance <= threshold {
+                if !isInteriorNotchEdge(cutout: cutout, edge: edge, pieceSize: metrics.pieceSize) {
+                    continue
+                }
+                if best == nil || distance < best!.2 {
+                    best = (cutout.id, edge, distance)
+                }
+            }
+        }
+
+        if let best {
+            return (best.0, best.1)
+        }
+        return nil
+    }
+
+    func hitTestNotchEdge(at point: CGPoint) -> (cutoutId: UUID, edge: EdgePosition)? {
+        let threshold: CGFloat = 30
+        var best: (UUID, EdgePosition, CGFloat)?
+
+        for cutout in cutouts where cutout.centerX >= 0 && cutout.centerY >= 0 {
+            // Only process notches and boundary-touching cutouts
+            let isNotchOrBoundary = cutout.isNotch || (cutout.kind != .circle && ShapePathBuilder.cutoutTouchesBoundary(cutout: cutout, size: metrics.pieceSize, shape: shape))
+            guard isNotchOrBoundary else { continue }
+            guard cutout.kind != .circle else { continue }
+            
+            let displayCutout = rotatedCutout(cutout)
+            let center = metrics.toCanvas(CGPoint(x: displayCutout.centerX, y: displayCutout.centerY))
+            let width = max(displayCutout.width * metrics.scale, 1)
+            let height = max(displayCutout.height * metrics.scale, 1)
+            let rect = CGRect(x: center.x - width / 2, y: center.y - height / 2, width: width, height: height)
+
+            let candidates: [(EdgePosition, CGFloat, Bool)] = [
+                (.top, abs(point.y - rect.minY), point.x >= rect.minX - threshold && point.x <= rect.maxX + threshold),
+                (.bottom, abs(point.y - rect.maxY), point.x >= rect.minX - threshold && point.x <= rect.maxX + threshold),
+                (.left, abs(point.x - rect.minX), point.y >= rect.minY - threshold && point.y <= rect.maxY + threshold),
+                (.right, abs(point.x - rect.maxX), point.y >= rect.minY - threshold && point.y <= rect.maxY + threshold)
             ]
 
             for (edge, distance, inRange) in candidates where inRange && distance <= threshold {
