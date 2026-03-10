@@ -34,6 +34,7 @@ struct PieceEditorView: View {
     @State private var showDeleteCornerRadiiConfirm = false
     @State private var keyboardHeight: CGFloat = 0
     @State private var isKeyboardVisible = false
+    @FocusState private var isMaterialNameFocused: Bool
 
     private let keyboardOverlapHeight: CGFloat = 200
 
@@ -57,7 +58,7 @@ struct PieceEditorView: View {
                 // Scrollable content below
                 ScrollView {
                     VStack(alignment: .leading, spacing: 18) {
-                        collapsibleSection(title: "Material", isOpen: $isMaterialOpen) {
+                        collapsibleSection(title: "Material", isOpen: $isMaterialOpen, onClose: saveMaterialToLibraryIfNeeded) {
                             VStack(spacing: 12) {
                                 TextField("Piece name", text: $piece.name, prompt: Text("Piece name").foregroundStyle(Theme.secondaryText))
                                     .foregroundStyle(Theme.primaryText)
@@ -66,9 +67,18 @@ struct PieceEditorView: View {
                                     #endif
                                 TextField("Material name", text: $piece.materialName, prompt: Text("Material name").foregroundStyle(Theme.secondaryText))
                                     .foregroundStyle(Theme.primaryText)
+                                    .focused($isMaterialNameFocused)
                                     #if canImport(UIKit)
                                     .textInputAutocapitalization(.words)
                                     #endif
+                                    .onSubmit {
+                                        saveMaterialToLibraryIfNeeded()
+                                    }
+                                    .onChange(of: isMaterialNameFocused) { _, isFocused in
+                                        if !isFocused {
+                                            saveMaterialToLibraryIfNeeded()
+                                        }
+                                    }
                                 HStack {
                                     Picker("Thickness", selection: $piece.thicknessRaw) {
                                         ForEach(MaterialThickness.allCases) { thickness in
@@ -78,7 +88,7 @@ struct PieceEditorView: View {
                                     .pickerStyle(.menu)
                                     Spacer()
                                     Menu("Saved") {
-                                        ForEach(materials) { material in
+                                        ForEach(materials.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }) { material in
                                             Button(material.name) { piece.materialName = material.name }
                                         }
                                     }
@@ -1007,6 +1017,14 @@ struct PieceEditorView: View {
         piece.project?.updatedAt = Date()
     }
 
+    private func saveMaterialToLibraryIfNeeded() {
+        let trimmed = piece.materialName.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty && !materials.contains(where: { $0.name.lowercased() == trimmed.lowercased() }) {
+            let newMaterial = MaterialOption(name: trimmed)
+            modelContext.insert(newMaterial)
+        }
+    }
+
     private var edgeAssignmentsPresent: Bool {
         !piece.edgeAssignments.isEmpty
     }
@@ -1134,11 +1152,13 @@ struct PieceEditorView: View {
     }
 
     @ViewBuilder
-    private func collapsibleSection<Content: View>(title: String, isOpen: Binding<Bool>, @ViewBuilder content: () -> Content) -> some View {
+    private func collapsibleSection<Content: View>(title: String, isOpen: Binding<Bool>, onClose: (() -> Void)? = nil, @ViewBuilder content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             Button {
                 withAnimation(.easeInOut(duration: 0.2)) {
+                    let wasOpen = isOpen.wrappedValue
                     isOpen.wrappedValue.toggle()
+                    if wasOpen { onClose?() }
                 }
             } label: {
                 HStack {
@@ -1573,23 +1593,26 @@ private struct CutoutRow: View {
                 }
 
                 if cutout.kind != .circle {
-                    Text("Snap to Corner")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(Theme.secondaryText)
+                    // Snap to Corner - only for non-triangle shapes
+                    if piece.shape != .rightTriangle {
+                        Text("Snap to Corner")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(Theme.secondaryText)
 
-                    let columns = [GridItem(.adaptive(minimum: 120), spacing: 8)]
-                    LazyVGrid(columns: columns, spacing: 8) {
-                        ForEach(availableCorners, id: \.self) { corner in
-                            sideButton(title: corner.rawValue, isSelected: selectedCorner == corner) {
-                                if selectedCorner == corner {
-                                    selectedCorner = nil
-                                    cutout.isNotch = false
-                                    cutout.cornerIndex = -1
-                                    cutout.cornerAnchorX = -1
-                                    cutout.cornerAnchorY = -1
-                                } else {
-                                    selectedCorner = corner
-                                    updateNotchCorner()
+                        let columns = [GridItem(.adaptive(minimum: 120), spacing: 8)]
+                        LazyVGrid(columns: columns, spacing: 8) {
+                            ForEach(availableCorners, id: \.self) { corner in
+                                sideButton(title: corner.rawValue, isSelected: selectedCorner == corner) {
+                                    if selectedCorner == corner {
+                                        selectedCorner = nil
+                                        cutout.isNotch = false
+                                        cutout.cornerIndex = -1
+                                        cutout.cornerAnchorX = -1
+                                        cutout.cornerAnchorY = -1
+                                    } else {
+                                        selectedCorner = corner
+                                        updateNotchCorner()
+                                    }
                                 }
                             }
                         }

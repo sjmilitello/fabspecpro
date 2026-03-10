@@ -575,12 +575,17 @@ enum ShapePathBuilder {
     private static func cutoutTouchesHypotenuse(minX: CGFloat, maxX: CGFloat, minY: CGFloat, maxY: CGFloat, size: CGSize, eps: CGFloat) -> Bool {
         let width = max(size.width, 0.0001)
         let height = max(size.height, 0.0001)
+        
+        // Hypotenuse line equation: x/width + y/height = 1
+        // value < 0 means inside triangle, value = 0 means on hypotenuse, value > 0 means outside
+        
         let corners = [
             CGPoint(x: minX, y: minY),
             CGPoint(x: maxX, y: minY),
             CGPoint(x: maxX, y: maxY),
             CGPoint(x: minX, y: maxY)
         ]
+        
         var minValue = CGFloat.greatestFiniteMagnitude
         var maxValue = -CGFloat.greatestFiniteMagnitude
         for corner in corners {
@@ -588,12 +593,16 @@ enum ShapePathBuilder {
             minValue = min(minValue, value)
             maxValue = max(maxValue, value)
         }
+        
+        // Touch hypotenuse if:
+        // 1. Any corner is very close to the hypotenuse line (within eps)
+        // 2. OR the rectangle spans across the hypotenuse (one corner inside, one outside)
         if abs(minValue) <= eps || abs(maxValue) <= eps {
             return true
         }
         return minValue < -eps && maxValue > eps
     }
-
+    
     private static func cutoutIsInsideTriangle(cutout: Cutout, size: CGSize) -> Bool {
         let width = max(size.width, 0.0001)
         let height = max(size.height, 0.0001)
@@ -620,7 +629,7 @@ enum ShapePathBuilder {
         return true
     }
 
-    private static func cutoutHypotenuseSpan(minX: CGFloat, maxX: CGFloat, minY: CGFloat, maxY: CGFloat, size: CGSize) -> (start: CGFloat, end: CGFloat, depth: CGFloat)? {
+    private static func cutoutHypotenuseSpan(minX: CGFloat, maxX: CGFloat, minY: CGFloat, maxY: CGFloat, size: CGSize) -> (start: CGFloat, end: CGFloat, depth: CGFloat, minX: CGFloat, maxX: CGFloat, minY: CGFloat, maxY: CGFloat)? {
         let width = max(size.width, 0.0001)
         let height = max(size.height, 0.0001)
         var tValues: [CGFloat] = []
@@ -653,7 +662,8 @@ enum ShapePathBuilder {
         let end = tValues.last ?? 0
         let depth = maxHypotenuseDepth(minX: minX, maxX: maxX, minY: minY, maxY: maxY, size: size)
         if depth <= 0 { return nil }
-        return (start: start, end: end, depth: depth)
+        // Return the rectangle bounds along with the span for axis-aligned rendering
+        return (start: start, end: end, depth: depth, minX: minX, maxX: maxX, minY: minY, maxY: maxY)
     }
 
     private static func maxHypotenuseDepth(minX: CGFloat, maxX: CGFloat, minY: CGFloat, maxY: CGFloat, size: CGSize) -> CGFloat {
@@ -916,7 +926,7 @@ enum ShapePathBuilder {
         let edgeEpsilon: CGFloat = 0.5
         var topSpans: [(start: CGFloat, end: CGFloat, depth: CGFloat)] = []
         var leftSpans: [(start: CGFloat, end: CGFloat, depth: CGFloat)] = []
-        var hypotenuseSpans: [(start: CGFloat, end: CGFloat, depth: CGFloat)] = []
+        var hypotenuseSpans: [(start: CGFloat, end: CGFloat, depth: CGFloat, minX: CGFloat, maxX: CGFloat, minY: CGFloat, maxY: CGFloat)] = []
         var cornerNotches: [Cutout] = []
 
         for notch in notches {
@@ -946,14 +956,18 @@ enum ShapePathBuilder {
                 topSpans.append((start: minX, end: maxX, depth: maxY))
             } else if touchesLeft {
                 leftSpans.append((start: minY, end: maxY, depth: maxX))
-            } else if touchesHypotenuse, let span = cutoutHypotenuseSpan(minX: minX, maxX: maxX, minY: minY, maxY: maxY, size: size) {
-                hypotenuseSpans.append(span)
+            } else if touchesHypotenuse {
+                if let span = cutoutHypotenuseSpan(minX: minX, maxX: maxX, minY: minY, maxY: maxY, size: size) {
+                    // All hypotenuse notches use axis-aligned rectangular rendering
+                    hypotenuseSpans.append(span)
+                }
             }
         }
 
         let mergedTop = mergeEdgeSpans(topSpans)
         let mergedLeft = mergeEdgeSpans(leftSpans)
-        let mergedHypotenuse = mergeHypotenuseSpans(hypotenuseSpans)
+        // Sort hypotenuse spans by start t-value
+        let sortedHypotenuseSpans = hypotenuseSpans.sorted { $0.start < $1.start }
 
         var points: [CGPoint] = []
         points.append(CGPoint(x: 0, y: 0))
@@ -971,24 +985,76 @@ enum ShapePathBuilder {
         }
         points.append(CGPoint(x: width, y: 0))
 
+        // For axis-aligned hypotenuse notches, render rectangular cuts
+        // The hypotenuse goes from (width, 0) to (0, height)
         let hypStart = CGPoint(x: width, y: 0)
         let hypEnd = CGPoint(x: 0, y: height)
-        let inward = hypotenuseInwardNormal(size: size)
         var currentT: CGFloat = 0
-        for span in mergedHypotenuse {
+        
+        for span in sortedHypotenuseSpans {
             let startT = max(0, min(1, span.start))
             let endT = max(0, min(1, span.end))
             if endT <= startT { continue }
+            
+            // Calculate actual intersection points on the hypotenuse
+            let hypPoint1 = pointOnHypotenuse(start: hypStart, end: hypEnd, t: startT)
+            let hypPoint2 = pointOnHypotenuse(start: hypStart, end: hypEnd, t: endT)
+            
+            // Add the entry point on the hypotenuse if we need to advance
             if currentT < startT {
-                points.append(pointOnHypotenuse(start: hypStart, end: hypEnd, t: startT))
+                points.append(hypPoint1)
             }
-            let start = pointOnHypotenuse(start: hypStart, end: hypEnd, t: startT)
-            let end = pointOnHypotenuse(start: hypStart, end: hypEnd, t: endT)
-            let p1 = CGPoint(x: start.x + inward.x * span.depth, y: start.y + inward.y * span.depth)
-            let p2 = CGPoint(x: end.x + inward.x * span.depth, y: end.y + inward.y * span.depth)
-            points.append(p1)
-            points.append(p2)
-            points.append(end)
+            
+            // For an axis-aligned rectangular notch, we need to trace from hypPoint1
+            // around the interior of the rectangle to hypPoint2.
+            //
+            // The rectangle has corners:
+            //   TL = (minX, minY)  - top-left (towards triangle interior)
+            //   TR = (maxX, minY)  - top-right
+            //   BR = (maxX, maxY)  - bottom-right
+            //   BL = (minX, maxY)  - bottom-left
+            //
+            // The hypotenuse passes through the rectangle, and we need to trace
+            // the edges that are INSIDE the triangle (the "notch" part).
+            //
+            // Since the hypotenuse goes from upper-right to lower-left,
+            // and the triangle interior is below-left of the hypotenuse,
+            // the interior corners are TL and BL.
+            //
+            // We trace: hypPoint1 -> (along edges toward interior) -> hypPoint2
+            
+            // Determine which edge hypPoint1 is on
+            let onTopEdge1 = abs(hypPoint1.y - span.minY) < 0.5
+            let onRightEdge1 = abs(hypPoint1.x - span.maxX) < 0.5
+            
+            // Determine which edge hypPoint2 is on
+            let onBottomEdge2 = abs(hypPoint2.y - span.maxY) < 0.5
+            let onLeftEdge2 = abs(hypPoint2.x - span.minX) < 0.5
+            
+            // Build the path by going from hypPoint1 toward interior, then to hypPoint2
+            // The key insight: we need to trace along rectangle edges that face the triangle interior
+            
+            if onTopEdge1 {
+                // Enter from top edge - first go to top-left corner
+                points.append(CGPoint(x: span.minX, y: span.minY))
+                if onBottomEdge2 || onLeftEdge2 {
+                    // Need to go to bottom-left corner
+                    points.append(CGPoint(x: span.minX, y: span.maxY))
+                }
+            } else if onRightEdge1 {
+                // Enter from right edge - first go UP to top-right corner
+                points.append(CGPoint(x: span.maxX, y: span.minY))
+                // Then go LEFT to top-left corner
+                points.append(CGPoint(x: span.minX, y: span.minY))
+                // Then go DOWN to bottom-left corner
+                points.append(CGPoint(x: span.minX, y: span.maxY))
+            } else {
+                // Fallback - use interior path through both corners
+                points.append(CGPoint(x: span.minX, y: span.minY))
+                points.append(CGPoint(x: span.minX, y: span.maxY))
+            }
+            
+            points.append(hypPoint2)
             currentT = endT
         }
         points.append(CGPoint(x: 0, y: height))

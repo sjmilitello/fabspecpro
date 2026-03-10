@@ -835,7 +835,7 @@ enum PDFRenderer {
         let expanded = expandedDisplayBounds(for: piece)
         let headerTextHeight: CGFloat = 12
         let headerGapToPieceHeader: CGFloat = 6
-        let pieceHeaderToTopMeasurementGap: CGFloat = 14
+        let pieceHeaderToTopMeasurementGap: CGFloat = 16
         let topMeasurementToEdgeGap: CGFloat = 4
         let bottomMeasurementToEdgeGap: CGFloat = 6
         let minTopMargin: CGFloat = 10
@@ -1361,12 +1361,14 @@ enum PDFRenderer {
     private static func isEffectiveNotch(cutout: Cutout, size: CGSize) -> Bool {
         if cutout.isNotch { return true }
         guard cutout.kind != .circle else { return false }
-        let halfWidth = cutout.width / 2
-        let halfHeight = cutout.height / 2
-        let minX = cutout.centerX - halfWidth
-        let maxX = cutout.centerX + halfWidth
-        let minY = cutout.centerY - halfHeight
-        let maxY = cutout.centerY + halfHeight
+        // Use display-transformed coordinates (swap x/y to match display size)
+        let displayCutout = displayCutout(for: cutout)
+        let halfWidth = displayCutout.width / 2
+        let halfHeight = displayCutout.height / 2
+        let minX = displayCutout.centerX - halfWidth
+        let maxX = displayCutout.centerX + halfWidth
+        let minY = displayCutout.centerY - halfHeight
+        let maxY = displayCutout.centerY + halfHeight
         let eps: CGFloat = 0.01
         return minX <= eps || minY <= eps || maxX >= size.width - eps || maxY >= size.height - eps
     }

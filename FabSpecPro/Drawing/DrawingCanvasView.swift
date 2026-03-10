@@ -6,13 +6,15 @@ struct DrawingCanvasView: View {
     let selectedTreatment: EdgeTreatment?
     var isReadOnly: Bool = false
     @Environment(\.modelContext) private var modelContext
+    
+    private var labelFontSize: CGFloat { isReadOnly ? 7 : 9 }
     @State private var lastEdgeTapId = UUID()
     private let lengthYOffsetPoints: CGFloat = -17
     private let lengthYOffsetInches: CGFloat = 0.125
     private let noteYOffsetInches: CGFloat = 2.0
     private let noteYOffsetPoints: CGFloat = 35
-    private let lengthLabelPadding: CGFloat = 28
-    private let widthLabelPadding: CGFloat = 42
+    private var lengthLabelPadding: CGFloat { isReadOnly ? 14 : 28 }
+    private var widthLabelPadding: CGFloat { isReadOnly ? 21 : 42 }
 
     var body: some View {
         GeometryReader { proxy in
@@ -150,10 +152,10 @@ struct DrawingCanvasView: View {
         let lengthText = curvedWidth
         let depthText = curvedHeight
         let lengthLabel = Text("\(lengthText)\"")
-            .font(.system(size: 11, weight: .semibold))
+            .font(.system(size: labelFontSize, weight: .semibold))
             .foregroundStyle(Theme.secondaryText)
         let depthLabel = Text("\(depthText)\"")
-            .font(.system(size: 11, weight: .semibold))
+            .font(.system(size: labelFontSize, weight: .semibold))
             .foregroundStyle(Theme.secondaryText)
         let width = metrics.pieceSize.width * metrics.scale
         let height = metrics.pieceSize.height * metrics.scale
@@ -192,7 +194,7 @@ struct DrawingCanvasView: View {
                 if segmentCounts[.left] == 1, let leftMetric = sideMetrics[.left] {
                     let widthLabelText = "\(MeasurementParser.formatInches(Double(leftMetric.length)))\""
                     let adjustedWidthLabel = Text(widthLabelText)
-                        .font(.system(size: 11, weight: .semibold))
+                        .font(.system(size: labelFontSize, weight: .semibold))
                         .foregroundStyle(Theme.secondaryText)
                     let centerY = origin.y + leftMetric.center.y * metrics.scale
                     context.draw(adjustedWidthLabel, at: CGPoint(x: leftBottom.x, y: centerY), anchor: .center)
@@ -206,7 +208,7 @@ struct DrawingCanvasView: View {
                 if segmentCounts[.top] == 1, let topMetric = sideMetrics[.top] {
                     let lengthLabelText = "\(MeasurementParser.formatInches(Double(topMetric.length)))\""
                     let adjustedLengthLabel = Text(lengthLabelText)
-                        .font(.system(size: 11, weight: .semibold))
+                        .font(.system(size: labelFontSize, weight: .semibold))
                         .foregroundStyle(Theme.secondaryText)
                     let centerX = origin.x + topMetric.center.x * metrics.scale
                     context.draw(adjustedLengthLabel, at: CGPoint(x: centerX, y: topRight.y), anchor: .center)
@@ -220,7 +222,7 @@ struct DrawingCanvasView: View {
                 if segmentCounts[.right] == 1, let rightMetric = sideMetrics[.right], abs(rightMetric.length - fullHeight) > 0.01 {
                     let widthLabelText = "\(MeasurementParser.formatInches(Double(rightMetric.length)))\""
                     let adjustedWidthLabel = Text(widthLabelText)
-                        .font(.system(size: 11, weight: .semibold))
+                        .font(.system(size: labelFontSize, weight: .semibold))
                         .foregroundStyle(Theme.secondaryText)
                     let centerY = origin.y + rightMetric.center.y * metrics.scale
                     let rightPoint = CGPoint(x: right + widthLabelPadding, y: centerY)
@@ -230,7 +232,7 @@ struct DrawingCanvasView: View {
                 if segmentCounts[.bottom] == 1, let bottomMetric = sideMetrics[.bottom], abs(bottomMetric.length - fullWidth) > 0.01 {
                     let lengthLabelText = "\(MeasurementParser.formatInches(Double(bottomMetric.length)))\""
                     let adjustedLengthLabel = Text(lengthLabelText)
-                        .font(.system(size: 11, weight: .semibold))
+                        .font(.system(size: labelFontSize, weight: .semibold))
                         .foregroundStyle(Theme.secondaryText)
                     let centerX = origin.x + bottomMetric.center.x * metrics.scale
                     let bottomPoint = CGPoint(x: centerX, y: bottom + lengthLabelPadding)
@@ -296,7 +298,7 @@ struct DrawingCanvasView: View {
 
         for (index, point) in pieceCorners.enumerated() {
             let label = Text(cornerLabel(for: index))
-                .font(.system(size: 10, weight: .semibold))
+                .font(.system(size: labelFontSize, weight: .semibold))
                 .foregroundStyle(Theme.secondaryText)
             let isConcave = isConcaveCorner(points: pieceCorners, index: index, clockwise: isPieceClockwise)
             let direction = notchCornerDirectionIfApplicable(point: point)
@@ -331,7 +333,7 @@ struct DrawingCanvasView: View {
             for (localIndex, point) in corners.enumerated() {
                 let labelIndex = entry.range.lowerBound + localIndex
                 let label = Text(cornerLabel(for: labelIndex))
-                    .font(.system(size: 10, weight: .semibold))
+                    .font(.system(size: labelFontSize, weight: .semibold))
                     .foregroundStyle(Theme.secondaryText)
                 let direction = unitVector(from: center, to: point)
                 let labelOffset = baseLabelOffset
@@ -688,7 +690,7 @@ struct DrawingCanvasView: View {
             if let segmentEdge = assignment.segmentEdge {
                 if let segment = boundarySegments.first(where: { $0.edge == segmentEdge.edge && $0.index == segmentEdge.index }) {
                     let label = Text(code)
-                        .font(.system(size: 11, weight: .bold))
+                        .font(.system(size: labelFontSize, weight: .bold))
                         .foregroundStyle(Theme.accent)
                     let position = segmentEdgeLabelPosition(segment: segment, metrics: metrics)
                     context.draw(label, at: position, anchor: .center)
@@ -705,7 +707,7 @@ struct DrawingCanvasView: View {
                 }
             }
             let label = Text(code)
-                .font(.system(size: 11, weight: .bold))
+                .font(.system(size: labelFontSize, weight: .bold))
                 .foregroundStyle(Theme.accent)
             let position = edgeLabelPosition(for: assignment.edge, metrics: metrics, shape: piece.shape, curves: piece.curvedEdges)
             context.draw(label, at: position, anchor: .center)
@@ -728,7 +730,7 @@ struct DrawingCanvasView: View {
             )
             let position = metrics.toCanvas(positionPoint)
             let label = Text(code)
-                .font(.system(size: 11, weight: .bold))
+                .font(.system(size: labelFontSize, weight: .bold))
                 .foregroundStyle(Theme.accent)
             context.draw(label, at: position, anchor: .center)
         }
@@ -741,7 +743,7 @@ struct DrawingCanvasView: View {
             guard cutout.centerX >= 0 && cutout.centerY >= 0 else { continue }
             guard isInteriorNotchEdge(cutout: cutout, edge: cutoutEdge.edge, pieceSize: metrics.pieceSize) else { continue }
             let label = Text(code)
-                .font(.system(size: 10, weight: .bold))
+                .font(.system(size: labelFontSize, weight: .bold))
                 .foregroundStyle(Theme.accent)
             let position = cutoutEdgeLabelPosition(cutout: cutout, edge: cutoutEdge.edge, metrics: metrics)
             context.draw(label, at: position, anchor: .center)
@@ -761,7 +763,7 @@ struct DrawingCanvasView: View {
         let lines = cutoutNoteLines(from: visibleCutouts)
         for (index, line) in lines.enumerated() {
             let text = Text(line)
-                .font(.system(size: 10, weight: .semibold))
+                .font(.system(size: labelFontSize, weight: .semibold))
                 .foregroundStyle(Theme.secondaryText)
             let y = noteStart.y + CGFloat(index) * 12
             context.draw(text, at: CGPoint(x: noteStart.x, y: y), anchor: .center)
@@ -819,8 +821,8 @@ struct DrawingCanvasView: View {
         let center = CGPoint(x: displayCutout.centerX, y: displayCutout.centerY)
         let halfWidth = displayCutout.width / 2
         let halfHeight = displayCutout.height / 2
-        let widthPadding = 12 / max(metrics.scale, 0.01)
-        let heightPadding = 6 / max(metrics.scale, 0.01)
+        let widthPadding = (isReadOnly ? 9 : 12) / max(metrics.scale, 0.01)
+        let heightPadding = (isReadOnly ? 5 : 6) / max(metrics.scale, 0.01)
         let minX = center.x - halfWidth
         let maxX = center.x + halfWidth
         let minY = center.y - halfHeight
@@ -904,14 +906,14 @@ struct DrawingCanvasView: View {
         if widthFromApex {
             // Two-line label: "X\" from" on top, "Apex" below
             // Position to the right of the notch interior edge
-            let apexPadding = 20 / max(metrics.scale, 0.01)
+            let apexPadding = (isReadOnly ? 15 : 20) / max(metrics.scale, 0.01)
             let apexX = maxX + apexPadding
             let apexPoint = CGPoint(x: apexX, y: metricsInfo?.widthCenterY ?? center.y)
             let line1 = Text("\(widthText)\" to")
-                .font(.system(size: 9, weight: .semibold))
+                .font(.system(size: labelFontSize, weight: .semibold))
                 .foregroundStyle(Theme.secondaryText)
             let line2 = Text("Apex")
-                .font(.system(size: 9, weight: .semibold))
+                .font(.system(size: labelFontSize, weight: .semibold))
                 .foregroundStyle(Theme.secondaryText)
             let canvasPoint = metrics.toCanvas(apexPoint)
             let lineSpacing: CGFloat = 10
@@ -919,7 +921,7 @@ struct DrawingCanvasView: View {
             context.draw(line2, at: CGPoint(x: canvasPoint.x, y: canvasPoint.y + lineSpacing / 2), anchor: .center)
         } else {
             let widthLabel = Text("\(widthText)\"")
-                .font(.system(size: 9, weight: .semibold))
+                .font(.system(size: labelFontSize, weight: .semibold))
                 .foregroundStyle(Theme.secondaryText)
             context.draw(widthLabel, at: metrics.toCanvas(widthPoint), anchor: .center)
         }
@@ -929,14 +931,14 @@ struct DrawingCanvasView: View {
         if lengthFromApex {
             // Two-line label: "X\" from" on top, "Apex" below
             // Position below the notch interior edge
-            let apexPadding = 14 / max(metrics.scale, 0.01)
+            let apexPadding = (isReadOnly ? 10 : 14) / max(metrics.scale, 0.01)
             let apexY = maxY + apexPadding
             let apexPoint = CGPoint(x: metricsInfo?.lengthCenterX ?? center.x, y: apexY)
             let line1 = Text("\(heightText)\" to")
-                .font(.system(size: 9, weight: .semibold))
+                .font(.system(size: labelFontSize, weight: .semibold))
                 .foregroundStyle(Theme.secondaryText)
             let line2 = Text("Apex")
-                .font(.system(size: 9, weight: .semibold))
+                .font(.system(size: labelFontSize, weight: .semibold))
                 .foregroundStyle(Theme.secondaryText)
             let canvasPoint = metrics.toCanvas(apexPoint)
             let lineSpacing: CGFloat = 10
@@ -944,7 +946,7 @@ struct DrawingCanvasView: View {
             context.draw(line2, at: CGPoint(x: canvasPoint.x, y: canvasPoint.y + lineSpacing / 2), anchor: .center)
         } else {
             let lengthLabel = Text("\(heightText)\"")
-                .font(.system(size: 9, weight: .semibold))
+                .font(.system(size: labelFontSize, weight: .semibold))
                 .foregroundStyle(Theme.secondaryText)
             context.draw(lengthLabel, at: metrics.toCanvas(lengthPoint), anchor: .center)
         }
@@ -972,14 +974,14 @@ struct DrawingCanvasView: View {
         // Width label - centered horizontally above the cutout
         let widthPoint = CGPoint(x: center.x, y: center.y - halfHeight - padding)
         let widthLabel = Text("\(widthText)\"")
-            .font(.system(size: 9, weight: .semibold))
+            .font(.system(size: labelFontSize, weight: .semibold))
             .foregroundStyle(Theme.accent)
         context.draw(widthLabel, at: metrics.toCanvas(widthPoint), anchor: .bottom)
         
         // Length label - centered vertically to the left of the cutout
         let lengthPoint = CGPoint(x: center.x - halfWidth - padding, y: center.y)
         let lengthLabel = Text("\(lengthText)\"")
-            .font(.system(size: 9, weight: .semibold))
+            .font(.system(size: labelFontSize, weight: .semibold))
             .foregroundStyle(Theme.accent)
         context.draw(lengthLabel, at: metrics.toCanvas(lengthPoint), anchor: .trailing)
     }
@@ -1152,7 +1154,7 @@ struct DrawingCanvasView: View {
                 }
                 let text = MeasurementParser.formatInches(Double(lengthValue))
                 let label = Text("\(text)\"")
-                    .font(.system(size: 9, weight: .semibold))
+                    .font(.system(size: labelFontSize, weight: .semibold))
                     .foregroundStyle(Theme.secondaryText)
                 let position = segmentLabelPosition(segment: segment, metrics: metrics)
                 context.draw(label, at: position, anchor: .center)

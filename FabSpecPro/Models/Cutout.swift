@@ -1,6 +1,11 @@
 import Foundation
 import SwiftData
 
+enum CutoutOrientation: String, CaseIterable {
+    case legs = "legs"           // Aligned with legA/legB (default for triangles)
+    case hypotenuse = "hypotenuse"  // Rotated to align with hypotenuse
+}
+
 @Model
 final class Cutout {
     var id: UUID
@@ -16,8 +21,9 @@ final class Cutout {
     var isApplied: Bool = true
     var createdAt: Date
     var piece: Piece?
+    var orientationRaw: String = "legs"
 
-    init(kind: CutoutKind, width: Double, height: Double, centerX: Double, centerY: Double, isNotch: Bool = false, isApplied: Bool = true, cornerIndex: Int = -1, cornerAnchorX: Double = -1, cornerAnchorY: Double = -1, createdAt: Date = Date()) {
+    init(kind: CutoutKind, width: Double, height: Double, centerX: Double, centerY: Double, isNotch: Bool = false, isApplied: Bool = true, cornerIndex: Int = -1, cornerAnchorX: Double = -1, cornerAnchorY: Double = -1, createdAt: Date = Date(), orientation: CutoutOrientation = .legs) {
         self.id = UUID()
         self.kindRaw = kind.rawValue
         self.width = width
@@ -30,6 +36,12 @@ final class Cutout {
         self.isNotch = isNotch
         self.isApplied = isApplied
         self.createdAt = createdAt
+        self.orientationRaw = orientation.rawValue
+    }
+
+    var orientation: CutoutOrientation {
+        get { CutoutOrientation(rawValue: orientationRaw) ?? .legs }
+        set { orientationRaw = newValue.rawValue }
     }
 
     var kind: CutoutKind {
