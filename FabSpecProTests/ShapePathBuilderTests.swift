@@ -452,6 +452,82 @@ struct ShapePathBuilderPolygonTests {
     }
 }
 
+// MARK: - Hypotenuse Notch Tests
+
+struct ShapePathBuilderHypotenuseNotchTests {
+    
+    @Test @MainActor func triangleWithHypotenuseNotchHasMorePoints() throws {
+        let container = try createTestContainer()
+        let piece = createTestPiece(container: container, shape: .rightTriangle, width: "24", height: "24")
+        
+        // Get base point count (no notches)
+        let basePoints = ShapePathBuilder.displayPolygonPoints(for: piece)
+        #expect(basePoints.count == 3) // Basic triangle has 3 corners
+        
+        // Add a notch on the hypotenuse
+        // For a 24x24 triangle, hypotenuse goes from (24,0) to (0,24)
+        // Place notch center at approximately the middle of the hypotenuse
+        let notch = Cutout(kind: .rectangle, width: 2, height: 2, centerX: 12, centerY: 12, isNotch: true)
+        piece.cutouts.append(notch)
+        
+        let notchedPoints = ShapePathBuilder.displayPolygonPoints(for: piece)
+        // Should have more than 3 points due to hypotenuse notch
+        #expect(notchedPoints.count > 3)
+    }
+    
+    @Test @MainActor func triangleWithTopEdgeNotch() throws {
+        let container = try createTestContainer()
+        let piece = createTestPiece(container: container, shape: .rightTriangle, width: "24", height: "24")
+        
+        // Add a notch on the top edge (legA)
+        let notch = Cutout(kind: .rectangle, width: 2, height: 2, centerX: 12, centerY: 1, isNotch: true)
+        piece.cutouts.append(notch)
+        
+        let points = ShapePathBuilder.displayPolygonPoints(for: piece)
+        // Should have more than 3 points due to top edge notch
+        #expect(points.count > 3)
+    }
+    
+    @Test @MainActor func triangleWithLeftEdgeNotch() throws {
+        let container = try createTestContainer()
+        let piece = createTestPiece(container: container, shape: .rightTriangle, width: "24", height: "24")
+        
+        // Add a notch on the left edge (legB)
+        let notch = Cutout(kind: .rectangle, width: 2, height: 2, centerX: 1, centerY: 12, isNotch: true)
+        piece.cutouts.append(notch)
+        
+        let points = ShapePathBuilder.displayPolygonPoints(for: piece)
+        // Should have more than 3 points due to left edge notch
+        #expect(points.count > 3)
+    }
+    
+    @Test @MainActor func hypotenuseNotchNearTopRight() throws {
+        let container = try createTestContainer()
+        let piece = createTestPiece(container: container, shape: .rightTriangle, width: "24", height: "24")
+        
+        // Add a notch near the top-right of the hypotenuse
+        let notch = Cutout(kind: .rectangle, width: 2, height: 2, centerX: 20, centerY: 4, isNotch: true)
+        piece.cutouts.append(notch)
+        
+        let points = ShapePathBuilder.displayPolygonPoints(for: piece)
+        // Should have more than 3 points
+        #expect(points.count > 3)
+    }
+    
+    @Test @MainActor func hypotenuseNotchNearBottomLeft() throws {
+        let container = try createTestContainer()
+        let piece = createTestPiece(container: container, shape: .rightTriangle, width: "24", height: "24")
+        
+        // Add a notch near the bottom-left of the hypotenuse
+        let notch = Cutout(kind: .rectangle, width: 2, height: 2, centerX: 4, centerY: 20, isNotch: true)
+        piece.cutouts.append(notch)
+        
+        let points = ShapePathBuilder.displayPolygonPoints(for: piece)
+        // Should have more than 3 points
+        #expect(points.count > 3)
+    }
+}
+
 // MARK: - Cutout Corner Range Tests
 
 struct ShapePathBuilderCutoutCornerTests {

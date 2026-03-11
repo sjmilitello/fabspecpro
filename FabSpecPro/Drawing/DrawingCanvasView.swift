@@ -20,6 +20,7 @@ struct DrawingCanvasView: View {
         GeometryReader { proxy in
             let metrics = DrawingMetrics(piece: piece, in: proxy.size)
             let rawPieceSize = ShapePathBuilder.pieceSize(for: piece)
+            let displayPieceSize = ShapePathBuilder.displaySize(for: piece)
 
             ZStack {
                 Canvas { context, _ in
@@ -36,7 +37,13 @@ struct DrawingCanvasView: View {
                         let displayCutout = rotatedCutout(cutout)
                         let angleCuts = localAngleCuts(for: cutout)
                         let cornerRadii = localCornerRadii(for: cutout)
-                        let cutoutPath = ShapePathBuilder.cutoutPath(displayCutout, angleCuts: angleCuts, cornerRadii: cornerRadii)
+                        let cutoutPath = ShapePathBuilder.cutoutPath(
+                            displayCutout,
+                            angleCuts: angleCuts,
+                            cornerRadii: cornerRadii,
+                            size: displayPieceSize,
+                            shape: piece.shape
+                        )
                         layerContext.stroke(cutoutPath, with: .color(Theme.accent), lineWidth: strokeWidth)
                     }
                 }
@@ -290,6 +297,7 @@ struct DrawingCanvasView: View {
         let origin = metrics.origin
         let scale = metrics.scale
         let baseLabelOffset: CGFloat = 10
+        let hypotenuseLabelOffset: CGFloat = 16  // Extra offset for points on the hypotenuse
 
         let pieceBounds = bounds(for: pieceCorners)
         let baseCorners = baseShapeCorners()
@@ -309,7 +317,19 @@ struct DrawingCanvasView: View {
                     isConcave: isConcave
                 )
                 ?? cornerLabelDirection(points: pieceCorners, index: index, center: pieceCenter, clockwise: isPieceClockwise)
-            let labelOffset = baseLabelOffset
+            
+            // For points on the hypotenuse, use the hypotenuse outward normal direction
+            // to push the label perpendicular to the line, not along it
+            var finalDirection = direction
+            let labelOffset: CGFloat
+            if piece.shape == .rightTriangle && isPointOnHypotenuse(point: point, pieceSize: metrics.pieceSize) {
+                // Hypotenuse normal points outward (toward bottom-right)
+                finalDirection = hypotenuseOutwardNormal(pieceSize: metrics.pieceSize)
+                labelOffset = hypotenuseLabelOffset
+            } else {
+                labelOffset = baseLabelOffset
+            }
+            
             let curveOffset = curveOffsetVector(
                 for: point,
                 points: pieceCorners,
@@ -318,8 +338,8 @@ struct DrawingCanvasView: View {
                 shape: piece.shape
             )
             let displayPoint = CGPoint(
-                x: origin.x + point.x * scale + direction.x * labelOffset + curveOffset.x * scale,
-                y: origin.y + point.y * scale + direction.y * labelOffset + curveOffset.y * scale
+                x: origin.x + point.x * scale + finalDirection.x * labelOffset + curveOffset.x * scale,
+                y: origin.y + point.y * scale + finalDirection.y * labelOffset + curveOffset.y * scale
             )
             context.draw(label, at: displayPoint, anchor: .center)
         }
@@ -498,15 +518,86 @@ struct DrawingCanvasView: View {
             guard isEffectiveNotch(cutout, piece: piece, pieceSize: pieceSize) else { continue }
             let displayCutout = rotatedCutout(cutout)
             let corners = cutoutCornerPoints(for: displayCutout)
+            
+            // Check if point matches any of the cutout's corners (works for rectangles and leg notches)
             for corner in corners {
                 if abs(point.x - corner.x) <= tolerance, abs(point.y - corner.y) <= tolerance {
                     let center = CGPoint(x: displayCutout.centerX, y: displayCutout.centerY)
-                    // Use the actual point from the polygon (not the computed corner) to match cutout corner behavior
+                    return unitVector(from: center, to: point)
+                }
+            }
+            
+            // For hypotenuse notches on triangles, the actual polygon corners may not match
+            // the cutout corners (they're clipped by the hypotenuse). Check if point is
+            // within the cutout's bounding box with some tolerance.
+            if piece.shape == .rightTriangle && isNotchOnHypotenuse(cutout: cutout, pieceSize: pieceSize) {
+                let halfWidth = displayCutout.width / 2
+                let halfHeight = displayCutout.height / 2
+                let minX = displayCutout.centerX - halfWidth - tolerance
+                let maxX = displayCutout.centerX + halfWidth + tolerance
+                let minY = displayCutout.centerY - halfHeight - tolerance
+                let maxY = displayCutout.centerY + halfHeight + tolerance
+                
+                if point.x >= minX && point.x <= maxX && point.y >= minY && point.y <= maxY {
+                    let center = CGPoint(x: displayCutout.centerX, y: displayCutout.centerY)
                     return unitVector(from: center, to: point)
                 }
             }
         }
         return nil
+    }
+    
+    private func isNotchOnHypotenuse(cutout: Cutout, pieceSize: CGSize) -> Bool {
+        let corners = GeometryHelpers.cutoutCornerPoints(cutout: cutout, size: pieceSize, shape: .rightTriangle)
+        let width = pieceSize.width
+        let height = pieceSize.height
+        let edgeEpsilon: CGFloat = 0.5
+        
+        // Check if cutout touches hypotenuse but not top or left edges
+        let bounds = GeometryHelpers.bounds(for: corners)
+        let touchesTop = bounds.minY <= edgeEpsilon
+        let touchesLeft = bounds.minX <= edgeEpsilon
+        
+        // Check if any corner is near the hypotenuse or spans across it
+        var minValue = CGFloat.greatestFiniteMagnitude
+        var maxValue = -CGFloat.greatestFiniteMagnitude
+        for corner in corners {
+            let value = (corner.x / width) + (corner.y / height) - 1
+            minValue = min(minValue, value)
+            maxValue = max(maxValue, value)
+        }
+        
+        // Touches hypotenuse if rectangle spans across hypotenuse line
+        let touchesHypotenuse = minValue < -0.001 && maxValue > 0.001
+        
+        return touchesHypotenuse && !touchesTop && !touchesLeft
+    }
+    
+    /// Check if a point lies on or very near the hypotenuse line of a right triangle
+    private func isPointOnHypotenuse(point: CGPoint, pieceSize: CGSize) -> Bool {
+        let width = pieceSize.width
+        let height = pieceSize.height
+        guard width > 0 && height > 0 else { return false }
+        
+        // Hypotenuse line equation: x/width + y/height = 1
+        // A point is on the hypotenuse if this value is close to 1
+        let value = (point.x / width) + (point.y / height)
+        let tolerance: CGFloat = 0.05  // Allow some tolerance for floating point
+        return abs(value - 1.0) < tolerance
+    }
+    
+    /// Returns the outward normal direction for the hypotenuse (perpendicular, pointing away from triangle interior)
+    private func hypotenuseOutwardNormal(pieceSize: CGSize) -> CGPoint {
+        let width = pieceSize.width
+        let height = pieceSize.height
+        // Hypotenuse goes from (width, 0) to (0, height)
+        // Direction vector: (-width, height)
+        // Outward normal (90° clockwise): (height, width) - points toward bottom-right, away from triangle
+        let nx = height
+        let ny = width
+        let length = sqrt(nx * nx + ny * ny)
+        guard length > 0 else { return CGPoint(x: 1, y: 0) }
+        return CGPoint(x: nx / length, y: ny / length)
     }
 
     private func concaveCornerDirection(point: CGPoint, bounds: CGRect, shape: ShapeKind, isConcave: Bool) -> CGPoint? {
@@ -534,16 +625,13 @@ struct DrawingCanvasView: View {
         return clockwise ? cross > 0 : cross < 0
     }
 
+    private func cutoutCornerPoints(for cutout: Cutout, displaySize: CGSize) -> [CGPoint] {
+        GeometryHelpers.cutoutCornerPoints(cutout: cutout, size: displaySize, shape: piece.shape)
+    }
+    
     private func cutoutCornerPoints(for cutout: Cutout) -> [CGPoint] {
-        let halfWidth = cutout.width / 2
-        let halfHeight = cutout.height / 2
-        let center = CGPoint(x: cutout.centerX, y: cutout.centerY)
-        return [
-            CGPoint(x: center.x - halfWidth, y: center.y - halfHeight),
-            CGPoint(x: center.x + halfWidth, y: center.y - halfHeight),
-            CGPoint(x: center.x + halfWidth, y: center.y + halfHeight),
-            CGPoint(x: center.x - halfWidth, y: center.y + halfHeight)
-        ]
+        let displaySize = ShapePathBuilder.pieceSize(for: piece)
+        return GeometryHelpers.cutoutCornerPoints(cutout: cutout, size: displaySize, shape: piece.shape)
     }
 
     private func cornerLabel(for index: Int) -> String {
@@ -741,7 +829,7 @@ struct DrawingCanvasView: View {
             guard let cutoutEdge = assignment.cutoutEdge else { continue }
             guard let cutout = piece.cutouts.first(where: { $0.id == cutoutEdge.id }) else { continue }
             guard cutout.centerX >= 0 && cutout.centerY >= 0 else { continue }
-            guard isInteriorNotchEdge(cutout: cutout, edge: cutoutEdge.edge, pieceSize: metrics.pieceSize) else { continue }
+            guard isInteriorNotchEdge(cutout: cutout, edge: cutoutEdge.edge, pieceSize: metrics.pieceSize, shape: piece.shape) else { continue }
             let label = Text(code)
                 .font(.system(size: labelFontSize, weight: .bold))
                 .foregroundStyle(Theme.accent)
@@ -830,6 +918,31 @@ struct DrawingCanvasView: View {
         let pieceWidth = metrics.pieceSize.width
         let pieceHeight = metrics.pieceSize.height
         let edgeEpsilon: CGFloat = 0.01
+
+        // Check if this is a hypotenuse notch for right triangles
+        let pieceSize = ShapePathBuilder.pieceSize(for: piece)
+        let isHypotenuseNotch = piece.shape == .rightTriangle && isNotchOnHypotenuse(cutout: cutout, pieceSize: pieceSize)
+        
+        if isHypotenuseNotch {
+            // For hypotenuse notches, position labels inside the piece (toward top-left / triangle interior)
+            let widthText = MeasurementParser.formatInches(Double(widthValue))
+            let heightText = MeasurementParser.formatInches(Double(lengthValue))
+            
+            // Width label - to the left of the notch (inside the triangle)
+            let widthPoint = CGPoint(x: minX - widthPadding, y: center.y)
+            let widthLabel = Text("\(widthText)\"")
+                .font(.system(size: labelFontSize, weight: .semibold))
+                .foregroundStyle(Theme.secondaryText)
+            context.draw(widthLabel, at: metrics.toCanvas(widthPoint), anchor: .center)
+            
+            // Length label - above the notch (inside the triangle)
+            let lengthPoint = CGPoint(x: center.x, y: minY - heightPadding)
+            let lengthLabel = Text("\(heightText)\"")
+                .font(.system(size: labelFontSize, weight: .semibold))
+                .foregroundStyle(Theme.secondaryText)
+            context.draw(lengthLabel, at: metrics.toCanvas(lengthPoint), anchor: .center)
+            return
+        }
 
         // Determine which edges the notch touches in display coordinates
         let touchesDisplayLeft = minX <= edgeEpsilon
@@ -1235,12 +1348,15 @@ struct DrawingCanvasView: View {
             if let geometry = edgeGeometryFromPolygon(edge: edge, polygon: polygon, shape: shape, baseBounds: baseBounds) {
                 let mid = CGPoint(x: (geometry.start.x + geometry.end.x) / 2, y: (geometry.start.y + geometry.end.y) / 2)
                 let offsetDistance = 10 / max(metrics.scale, 0.01)
-                let adjusted = offsetOutsidePolygon(
+                let outward = normalized(geometry.normal)
+                let adjusted = offsetRelativeToPolygon(
                     point: mid,
                     segmentStart: geometry.start,
                     segmentEnd: geometry.end,
                     polygon: polygon,
-                    distance: offsetDistance
+                    distance: offsetDistance,
+                    preferInside: false,
+                    preferredDirection: outward
                 )
                 return metrics.toCanvas(adjusted)
             }
@@ -1435,8 +1551,11 @@ struct DrawingCanvasView: View {
 
     private func cutoutEdgeLabelPosition(cutout: Cutout, edge: EdgePosition, metrics: DrawingMetrics) -> CGPoint {
         let displayCutout = rotatedCutout(cutout)
-        let halfWidth = displayCutout.width / 2
-        let halfHeight = displayCutout.height / 2
+        let displaySize = ShapePathBuilder.displaySize(for: piece)
+        let corners = cutoutCornerPoints(for: displayCutout, displaySize: displaySize)
+        let bounds = bounds(for: corners)
+        let halfWidth = bounds.width / 2
+        let halfHeight = bounds.height / 2
         let center = CGPoint(x: displayCutout.centerX, y: displayCutout.centerY)
         let point: CGPoint
 
@@ -1462,43 +1581,38 @@ struct DrawingCanvasView: View {
             let offsetDistance = 6 / max(metrics.scale, 0.01)
             let adjusted = offsetOutsidePolygon(
                 point: point,
-                segmentStart: segmentStartPoint(for: edge, cutout: displayCutout),
-                segmentEnd: segmentEndPoint(for: edge, cutout: displayCutout),
+                segmentStart: segmentStartPoint(for: edge, cutout: displayCutout, displaySize: displaySize),
+                segmentEnd: segmentEndPoint(for: edge, cutout: displayCutout, displaySize: displaySize),
                 polygon: polygon,
                 distance: offsetDistance
             )
             return metrics.toCanvas(adjusted)
         }
 
-        let minX = center.x - halfWidth
-        let maxX = center.x + halfWidth
-        let minY = center.y - halfHeight
-        let maxY = center.y + halfHeight
-        let cutoutPolygon = [
-            CGPoint(x: minX, y: minY),
-            CGPoint(x: maxX, y: minY),
-            CGPoint(x: maxX, y: maxY),
-            CGPoint(x: minX, y: maxY)
-        ]
+        let cutoutPolygon = corners
+        let topMid = CGPoint(x: (corners[0].x + corners[1].x) / 2, y: (corners[0].y + corners[1].y) / 2)
+        let rightMid = CGPoint(x: (corners[1].x + corners[2].x) / 2, y: (corners[1].y + corners[2].y) / 2)
+        let bottomMid = CGPoint(x: (corners[2].x + corners[3].x) / 2, y: (corners[2].y + corners[3].y) / 2)
+        let leftMid = CGPoint(x: (corners[3].x + corners[0].x) / 2, y: (corners[3].y + corners[0].y) / 2)
 
         switch edge {
         case .top:
-            point = CGPoint(x: center.x, y: minY)
+            point = topMid
         case .bottom:
-            point = CGPoint(x: center.x, y: maxY)
+            point = bottomMid
         case .left:
-            point = CGPoint(x: minX, y: center.y)
+            point = leftMid
         case .right:
-            point = CGPoint(x: maxX, y: center.y)
+            point = rightMid
         default:
-            point = CGPoint(x: center.x, y: minY)
+            point = topMid
         }
 
         let offsetDistance = 6 / max(metrics.scale, 0.01)
         let adjusted = offsetRelativeToPolygon(
             point: point,
-            segmentStart: segmentStartPoint(for: edge, cutout: displayCutout),
-            segmentEnd: segmentEndPoint(for: edge, cutout: displayCutout),
+            segmentStart: segmentStartPoint(for: edge, cutout: displayCutout, displaySize: displaySize),
+            segmentEnd: segmentEndPoint(for: edge, cutout: displayCutout, displaySize: displaySize),
             polygon: cutoutPolygon,
             distance: offsetDistance,
             preferInside: true,
@@ -1669,39 +1783,37 @@ struct DrawingCanvasView: View {
         return abs(dy * point.x - dx * point.y + b.x * a.y - b.y * a.x) / denom
     }
 
-    private func segmentStartPoint(for edge: EdgePosition, cutout: Cutout) -> CGPoint {
-        let halfWidth = cutout.width / 2
-        let halfHeight = cutout.height / 2
-        let center = CGPoint(x: cutout.centerX, y: cutout.centerY)
+    private func segmentStartPoint(for edge: EdgePosition, cutout: Cutout, displaySize: CGSize) -> CGPoint {
+        let corners = cutoutCornerPoints(for: cutout, displaySize: displaySize)
+        guard corners.count == 4 else { return CGPoint(x: cutout.centerX, y: cutout.centerY) }
         switch edge {
-        case .left:
-            return CGPoint(x: center.x - halfWidth, y: center.y - halfHeight)
-        case .right:
-            return CGPoint(x: center.x + halfWidth, y: center.y - halfHeight)
         case .top:
-            return CGPoint(x: center.x - halfWidth, y: center.y - halfHeight)
+            return corners[0]
+        case .right:
+            return corners[1]
         case .bottom:
-            return CGPoint(x: center.x - halfWidth, y: center.y + halfHeight)
+            return corners[2]
+        case .left:
+            return corners[3]
         default:
-            return center
+            return CGPoint(x: cutout.centerX, y: cutout.centerY)
         }
     }
 
-    private func segmentEndPoint(for edge: EdgePosition, cutout: Cutout) -> CGPoint {
-        let halfWidth = cutout.width / 2
-        let halfHeight = cutout.height / 2
-        let center = CGPoint(x: cutout.centerX, y: cutout.centerY)
+    private func segmentEndPoint(for edge: EdgePosition, cutout: Cutout, displaySize: CGSize) -> CGPoint {
+        let corners = cutoutCornerPoints(for: cutout, displaySize: displaySize)
+        guard corners.count == 4 else { return CGPoint(x: cutout.centerX, y: cutout.centerY) }
         switch edge {
-        case .left:
-            return CGPoint(x: center.x - halfWidth, y: center.y + halfHeight)
-        case .right:
-            return CGPoint(x: center.x + halfWidth, y: center.y + halfHeight)
         case .top:
-            return CGPoint(x: center.x + halfWidth, y: center.y - halfHeight)
+            return corners[1]
+        case .right:
+            return corners[2]
         case .bottom:
-            return CGPoint(x: center.x + halfWidth, y: center.y + halfHeight)
+            return corners[3]
+        case .left:
+            return corners[0]
         default:
-            return center
+            return CGPoint(x: cutout.centerX, y: cutout.centerY)
         }
     }
 
@@ -1952,8 +2064,6 @@ private extension EdgeTapGestureOverlay {
             let displayCutout = rotatedCutout(cutout)
             let center = metrics.toCanvas(CGPoint(x: displayCutout.centerX, y: displayCutout.centerY))
             let width = max(displayCutout.width * metrics.scale, 1)
-            let height = max(displayCutout.height * metrics.scale, 1)
-            let rect = CGRect(x: center.x - width / 2, y: center.y - height / 2, width: width, height: height)
 
             if cutout.kind == .circle {
                 let radius = width / 2
@@ -1968,17 +2078,22 @@ private extension EdgeTapGestureOverlay {
                 continue
             }
 
-            let candidates: [(EdgePosition, CGFloat, Bool)] = [
-                (.top, abs(point.y - rect.minY), point.x >= rect.minX && point.x <= rect.maxX),
-                (.bottom, abs(point.y - rect.maxY), point.x >= rect.minX && point.x <= rect.maxX),
-                (.left, abs(point.x - rect.minX), point.y >= rect.minY && point.y <= rect.maxY),
-                (.right, abs(point.x - rect.maxX), point.y >= rect.minY && point.y <= rect.maxY)
+            let corners = GeometryHelpers.cutoutCornerPoints(cutout: displayCutout, size: metrics.pieceSize, shape: shape)
+            let edges: [(EdgePosition, CGPoint, CGPoint)] = [
+                (.top, corners[0], corners[1]),
+                (.right, corners[1], corners[2]),
+                (.bottom, corners[2], corners[3]),
+                (.left, corners[3], corners[0])
             ]
 
-            for (edge, distance, inRange) in candidates where inRange && distance <= threshold {
-                if !isInteriorNotchEdge(cutout: cutout, edge: edge, pieceSize: metrics.pieceSize) {
+            for (edge, start, end) in edges {
+                if !isInteriorNotchEdge(cutout: cutout, edge: edge, pieceSize: metrics.pieceSize, shape: shape) {
                     continue
                 }
+                let startCanvas = metrics.toCanvas(start)
+                let endCanvas = metrics.toCanvas(end)
+                let distance = distanceToSegment(point: point, a: startCanvas, b: endCanvas)
+                if distance > threshold { continue }
                 if best == nil || distance < best!.2 {
                     best = (cutout.id, edge, distance)
                 }
@@ -2002,22 +2117,22 @@ private extension EdgeTapGestureOverlay {
             guard cutout.kind != .circle else { continue }
             
             let displayCutout = rotatedCutout(cutout)
-            let center = metrics.toCanvas(CGPoint(x: displayCutout.centerX, y: displayCutout.centerY))
-            let width = max(displayCutout.width * metrics.scale, 1)
-            let height = max(displayCutout.height * metrics.scale, 1)
-            let rect = CGRect(x: center.x - width / 2, y: center.y - height / 2, width: width, height: height)
-
-            let candidates: [(EdgePosition, CGFloat, Bool)] = [
-                (.top, abs(point.y - rect.minY), point.x >= rect.minX - threshold && point.x <= rect.maxX + threshold),
-                (.bottom, abs(point.y - rect.maxY), point.x >= rect.minX - threshold && point.x <= rect.maxX + threshold),
-                (.left, abs(point.x - rect.minX), point.y >= rect.minY - threshold && point.y <= rect.maxY + threshold),
-                (.right, abs(point.x - rect.maxX), point.y >= rect.minY - threshold && point.y <= rect.maxY + threshold)
+            let corners = GeometryHelpers.cutoutCornerPoints(cutout: displayCutout, size: metrics.pieceSize, shape: shape)
+            let edges: [(EdgePosition, CGPoint, CGPoint)] = [
+                (.top, corners[0], corners[1]),
+                (.right, corners[1], corners[2]),
+                (.bottom, corners[2], corners[3]),
+                (.left, corners[3], corners[0])
             ]
 
-            for (edge, distance, inRange) in candidates where inRange && distance <= threshold {
-                if !isInteriorNotchEdge(cutout: cutout, edge: edge, pieceSize: metrics.pieceSize) {
+            for (edge, start, end) in edges {
+                if !isInteriorNotchEdge(cutout: cutout, edge: edge, pieceSize: metrics.pieceSize, shape: shape) {
                     continue
                 }
+                let startCanvas = metrics.toCanvas(start)
+                let endCanvas = metrics.toCanvas(end)
+                let distance = distanceToSegment(point: point, a: startCanvas, b: endCanvas)
+                if distance > threshold { continue }
                 if best == nil || distance < best!.2 {
                     best = (cutout.id, edge, distance)
                 }
@@ -2317,12 +2432,12 @@ private extension EdgeTapGestureOverlay {
 
         for cutout in cutouts where (cutout.isNotch || ShapePathBuilder.cutoutTouchesBoundary(cutout: cutout, size: metrics.pieceSize, shape: shape)) && cutout.centerX >= 0 && cutout.centerY >= 0 {
             let displayCutout = rotatedCutout(cutout)
-            let halfWidth = displayCutout.width / 2
-            let halfHeight = displayCutout.height / 2
-            let minX = displayCutout.centerX - halfWidth
-            let maxX = displayCutout.centerX + halfWidth
-            let minY = displayCutout.centerY - halfHeight
-            let maxY = displayCutout.centerY + halfHeight
+            let corners = GeometryHelpers.cutoutCornerPoints(cutout: displayCutout, size: metrics.pieceSize, shape: shape)
+            let bounds = GeometryHelpers.bounds(for: corners)
+            let minX = bounds.minX
+            let maxX = bounds.maxX
+            let minY = bounds.minY
+            let maxY = bounds.maxY
 
             switch edge {
             case .top where minY <= edgeEpsilon:
@@ -2358,7 +2473,15 @@ private extension EdgeTapGestureOverlay {
 }
 
 private func rotatedCutout(_ cutout: Cutout) -> Cutout {
-    return Cutout(kind: cutout.kind, width: cutout.height, height: cutout.width, centerX: cutout.centerY, centerY: cutout.centerX, isNotch: cutout.isNotch)
+    return Cutout(
+        kind: cutout.kind,
+        width: cutout.height,
+        height: cutout.width,
+        centerX: cutout.centerY,
+        centerY: cutout.centerX,
+        isNotch: cutout.isNotch,
+        orientation: cutout.orientation
+    )
 }
 
 private func rotatedPointToRaw(_ point: CGPoint) -> CGPoint {
@@ -2371,14 +2494,15 @@ private func isEffectiveNotch(_ cutout: Cutout, piece: Piece, pieceSize: CGSize)
     return ShapePathBuilder.cutoutTouchesBoundary(cutout: cutout, size: pieceSize, shape: piece.shape)
 }
 
-private func isInteriorNotchEdge(cutout: Cutout, edge: EdgePosition, pieceSize: CGSize) -> Bool {
+private func isInteriorNotchEdge(cutout: Cutout, edge: EdgePosition, pieceSize: CGSize, shape: ShapeKind) -> Bool {
     let displayCutout = rotatedCutout(cutout)
-    let halfWidth = displayCutout.width / 2
-    let halfHeight = displayCutout.height / 2
-    let minX = displayCutout.centerX - halfWidth
-    let maxX = displayCutout.centerX + halfWidth
-    let minY = displayCutout.centerY - halfHeight
-    let maxY = displayCutout.centerY + halfHeight
+    let displaySize = CGSize(width: pieceSize.height, height: pieceSize.width)
+    let corners = GeometryHelpers.cutoutCornerPoints(cutout: displayCutout, size: displaySize, shape: shape)
+    let bounds = GeometryHelpers.bounds(for: corners)
+    let minX = bounds.minX
+    let maxX = bounds.maxX
+    let minY = bounds.minY
+    let maxY = bounds.maxY
     let edgeEpsilon: CGFloat = 0.01
 
     switch edge {

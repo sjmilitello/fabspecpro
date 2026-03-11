@@ -36,6 +36,38 @@ enum GeometryHelpers {
     static func lerp(_ a: CGPoint, _ b: CGPoint, _ t: CGFloat) -> CGPoint {
         CGPoint(x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t)
     }
+
+    // MARK: - Cutout Helpers
+
+    static func cutoutRotationAngle(cutout: Cutout, size: CGSize, shape: ShapeKind) -> CGFloat {
+        guard shape == .rightTriangle, cutout.orientation == .hypotenuse else { return 0 }
+        let width = max(size.width, 0.0001)
+        let height = max(size.height, 0.0001)
+        return -atan2(height, width)
+    }
+
+    static func cutoutCornerPoints(cutout: Cutout, size: CGSize, shape: ShapeKind) -> [CGPoint] {
+        let halfWidth = cutout.width / 2
+        let halfHeight = cutout.height / 2
+        let center = CGPoint(x: cutout.centerX, y: cutout.centerY)
+        let base = [
+            CGPoint(x: center.x - halfWidth, y: center.y - halfHeight),
+            CGPoint(x: center.x + halfWidth, y: center.y - halfHeight),
+            CGPoint(x: center.x + halfWidth, y: center.y + halfHeight),
+            CGPoint(x: center.x - halfWidth, y: center.y + halfHeight)
+        ]
+
+        let angle = cutoutRotationAngle(cutout: cutout, size: size, shape: shape)
+        if abs(angle) < 0.0001 {
+            return base
+        }
+
+        return base.map { point in
+            let translated = CGPoint(x: point.x - center.x, y: point.y - center.y)
+            let rotated = rotate(translated, by: angle)
+            return CGPoint(x: center.x + rotated.x, y: center.y + rotated.y)
+        }
+    }
     
     // MARK: - Index Operations
     
@@ -230,6 +262,240 @@ enum GeometryHelpers {
             j = i
         }
         return inside
+    }
+
+    /// Determine if a point lies on a polygon edge within a tolerance.
+    static func pointIsOnPolygonEdge(_ point: CGPoint, polygon: [CGPoint], tolerance: CGFloat = 0.001) -> Bool {
+        guard polygon.count >= 2 else { return false }
+        for i in 0..<polygon.count {
+            let a = polygon[i]
+            let b = polygon[(i + 1) % polygon.count]
+            if pointSegmentDistance(point: point, a: a, b: b) <= tolerance {
+                return true
+            }
+        }
+        return false
+    }
+
+    // MARK: - Polygon Clipping (Axis-Aligned Rectangle Subtraction)
+
+    private enum RectEdge: Int, CaseIterable {
+        case top = 0
+        case right = 1
+        case bottom = 2
+        case left = 3
+    }
+
+    static func subtractAxisAlignedRect(from polygon: [CGPoint], rect: CGRect) -> [CGPoint] {
+        guard polygon.count >= 3 else { return polygon }
+        guard rect.width > 0.0001, rect.height > 0.0001 else { return polygon }
+
+        let minX = rect.minX
+        let maxX = rect.maxX
+        let minY = rect.minY
+        let maxY = rect.maxY
+        let eps: CGFloat = 0.0001
+
+        func isInsideRect(_ point: CGPoint) -> Bool {
+            point.x >= minX - eps && point.x <= maxX + eps && point.y >= minY - eps && point.y <= maxY + eps
+        }
+
+        func rectEdge(for point: CGPoint) -> RectEdge? {
+            if abs(point.y - minY) < 0.001 { return .top }
+            if abs(point.x - maxX) < 0.001 { return .right }
+            if abs(point.y - maxY) < 0.001 { return .bottom }
+            if abs(point.x - minX) < 0.001 { return .left }
+            return nil
+        }
+
+        var output: [CGPoint] = []
+        var entryPoint: CGPoint?
+        var entryEdge: RectEdge?
+
+        for i in 0..<polygon.count {
+            let start = polygon[i]
+            let end = polygon[(i + 1) % polygon.count]
+            let intersections = segmentRectIntersections(a: start, b: end, rect: rect)
+                .sorted { $0.t < $1.t }
+
+            var points: [(point: CGPoint, edge: RectEdge?)] = [(start, rectEdge(for: start))]
+            for inter in intersections {
+                points.append((inter.point, inter.edge))
+            }
+            points.append((end, rectEdge(for: end)))
+
+            var deduped: [(point: CGPoint, edge: RectEdge?)] = []
+            for item in points {
+                if let last = deduped.last, distance(item.point, last.point) < eps { continue }
+                deduped.append(item)
+            }
+            if deduped.count < 2 { continue }
+
+            for index in 0..<(deduped.count - 1) {
+                let p0 = deduped[index].point
+                let p1 = deduped[index + 1].point
+                let mid = CGPoint(x: (p0.x + p1.x) / 2, y: (p0.y + p1.y) / 2)
+                let inside = isInsideRect(mid)
+
+                if !inside {
+                    if output.isEmpty || distance(output.last ?? p0, p0) > eps {
+                        output.append(p0)
+                    }
+                    output.append(p1)
+                } else {
+                    if entryPoint == nil {
+                        entryPoint = p0
+                        entryEdge = deduped[index].edge ?? rectEdge(for: p0)
+                    }
+                    if let entry = entryPoint, let entryEdgeValue = entryEdge,
+                       let exitEdge = deduped[index + 1].edge ?? rectEdge(for: p1) {
+                        let path = rectBoundaryPath(
+                            from: entry,
+                            entryEdge: entryEdgeValue,
+                            to: p1,
+                            exitEdge: exitEdge,
+                            rect: rect,
+                            polygon: polygon
+                        )
+                        output.append(contentsOf: path)
+                        output.append(p1)
+                        entryPoint = nil
+                        entryEdge = nil
+                    }
+                }
+            }
+        }
+
+        return dedupePoints(output)
+    }
+
+    private static func rectEdges(_ rect: CGRect) -> [(edge: RectEdge, start: CGPoint, end: CGPoint)] {
+        let tl = CGPoint(x: rect.minX, y: rect.minY)
+        let tr = CGPoint(x: rect.maxX, y: rect.minY)
+        let br = CGPoint(x: rect.maxX, y: rect.maxY)
+        let bl = CGPoint(x: rect.minX, y: rect.maxY)
+        return [
+            (edge: .top, start: tl, end: tr),
+            (edge: .right, start: tr, end: br),
+            (edge: .bottom, start: br, end: bl),
+            (edge: .left, start: bl, end: tl)
+        ]
+    }
+
+    private static func segmentRectIntersections(
+        a: CGPoint,
+        b: CGPoint,
+        rect: CGRect
+    ) -> [(t: CGFloat, point: CGPoint, edge: RectEdge)] {
+        let edges = rectEdges(rect)
+        var intersections: [(t: CGFloat, point: CGPoint, edge: RectEdge)] = []
+        let ab = CGPoint(x: b.x - a.x, y: b.y - a.y)
+        let denom = ab.x * ab.x + ab.y * ab.y
+        guard denom > 0.000001 else { return intersections }
+        for edge in edges {
+            if let overlapPoints = colinearOverlapPoints(a: a, b: b, edgeStart: edge.start, edgeEnd: edge.end) {
+                for point in overlapPoints {
+                    let t = ((point.x - a.x) * ab.x + (point.y - a.y) * ab.y) / denom
+                    intersections.append((t: t, point: point, edge: edge.edge))
+                }
+                continue
+            }
+            if let point = segmentSegmentIntersection(a1: a, a2: b, b1: edge.start, b2: edge.end) {
+                let t = ((point.x - a.x) * ab.x + (point.y - a.y) * ab.y) / denom
+                intersections.append((t: t, point: point, edge: edge.edge))
+            }
+        }
+        return intersections
+    }
+    private static func colinearOverlapPoints(
+        a: CGPoint,
+        b: CGPoint,
+        edgeStart: CGPoint,
+        edgeEnd: CGPoint
+    ) -> [CGPoint]? {
+        let eps: CGFloat = 0.0001
+        let isHorizontal = abs(a.y - b.y) < eps && abs(edgeStart.y - edgeEnd.y) < eps
+        let isVertical = abs(a.x - b.x) < eps && abs(edgeStart.x - edgeEnd.x) < eps
+        if isHorizontal, abs(a.y - edgeStart.y) < eps {
+            let minX = max(min(a.x, b.x), min(edgeStart.x, edgeEnd.x))
+            let maxX = min(max(a.x, b.x), max(edgeStart.x, edgeEnd.x))
+            if maxX >= minX {
+                return [CGPoint(x: minX, y: a.y), CGPoint(x: maxX, y: a.y)]
+            }
+        }
+        if isVertical, abs(a.x - edgeStart.x) < eps {
+            let minY = max(min(a.y, b.y), min(edgeStart.y, edgeEnd.y))
+            let maxY = min(max(a.y, b.y), max(edgeStart.y, edgeEnd.y))
+            if maxY >= minY {
+                return [CGPoint(x: a.x, y: minY), CGPoint(x: a.x, y: maxY)]
+            }
+        }
+        return nil
+    }
+
+    private static func rectBoundaryPath(
+        from entry: CGPoint,
+        entryEdge: RectEdge,
+        to exit: CGPoint,
+        exitEdge: RectEdge,
+        rect: CGRect,
+        polygon: [CGPoint]
+    ) -> [CGPoint] {
+        let corners = [
+            CGPoint(x: rect.minX, y: rect.minY), // TL
+            CGPoint(x: rect.maxX, y: rect.minY), // TR
+            CGPoint(x: rect.maxX, y: rect.maxY), // BR
+            CGPoint(x: rect.minX, y: rect.maxY)  // BL
+        ]
+
+        func edgeEndCorner(for edge: RectEdge, clockwise: Bool) -> CGPoint {
+            switch (edge, clockwise) {
+            case (.top, true): return corners[1]
+            case (.top, false): return corners[0]
+            case (.right, true): return corners[2]
+            case (.right, false): return corners[1]
+            case (.bottom, true): return corners[3]
+            case (.bottom, false): return corners[2]
+            case (.left, true): return corners[0]
+            case (.left, false): return corners[3]
+            }
+        }
+
+        func nextEdge(_ edge: RectEdge, clockwise: Bool) -> RectEdge {
+            let delta = clockwise ? 1 : 3
+            return RectEdge(rawValue: (edge.rawValue + delta) % 4) ?? edge
+        }
+
+        func buildPath(clockwise: Bool) -> [CGPoint] {
+            var path: [CGPoint] = []
+            var edge = entryEdge
+            path.append(edgeEndCorner(for: edge, clockwise: clockwise))
+            while edge != exitEdge {
+                edge = nextEdge(edge, clockwise: clockwise)
+                path.append(edgeEndCorner(for: edge, clockwise: clockwise))
+            }
+            return path
+        }
+
+        let cwPath = buildPath(clockwise: true)
+        let ccwPath = buildPath(clockwise: false)
+
+        func score(_ path: [CGPoint]) -> Int {
+            guard !path.isEmpty else { return 0 }
+            var count = 0
+            var last = entry
+            for point in path {
+                let mid = CGPoint(x: (last.x + point.x) / 2, y: (last.y + point.y) / 2)
+                if pointIsInsidePolygon(mid, polygon: polygon) || pointIsOnPolygonEdge(mid, polygon: polygon) { count += 1 }
+                last = point
+            }
+            let mid = CGPoint(x: (last.x + exit.x) / 2, y: (last.y + exit.y) / 2)
+            if pointIsInsidePolygon(mid, polygon: polygon) || pointIsOnPolygonEdge(mid, polygon: polygon) { count += 1 }
+            return count
+        }
+
+        let useCw = score(cwPath) >= score(ccwPath)
+        return useCw ? cwPath : ccwPath
     }
     
     // MARK: - Segment Length Calculations (for notch measurements)

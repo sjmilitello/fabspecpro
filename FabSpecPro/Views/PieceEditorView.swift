@@ -1108,15 +1108,16 @@ struct PieceEditorView: View {
             height: cutout.width,
             centerX: cutout.centerY,
             centerY: cutout.centerX,
-            isNotch: cutout.isNotch
+            isNotch: cutout.isNotch,
+            orientation: cutout.orientation
         )
         let displaySize = CGSize(width: pieceSize.height, height: pieceSize.width)
-        let halfWidth = displayCutout.width / 2
-        let halfHeight = displayCutout.height / 2
-        let minX = displayCutout.centerX - halfWidth
-        let maxX = displayCutout.centerX + halfWidth
-        let minY = displayCutout.centerY - halfHeight
-        let maxY = displayCutout.centerY + halfHeight
+        let corners = GeometryHelpers.cutoutCornerPoints(cutout: displayCutout, size: displaySize, shape: piece.shape)
+        let bounds = GeometryHelpers.bounds(for: corners)
+        let minX = bounds.minX
+        let maxX = bounds.maxX
+        let minY = bounds.minY
+        let maxY = bounds.maxY
         let eps: CGFloat = 0.01
 
         switch edge {
@@ -1592,6 +1593,23 @@ private struct CutoutRow: View {
                     .frame(maxWidth: .infinity)
                 }
 
+                if piece.shape == .rightTriangle, cutout.kind != .circle {
+                    Text("Orientation")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(Theme.secondaryText)
+                    HStack(spacing: 8) {
+                        Button("Square to Legs") {
+                            cutout.orientation = .legs
+                        }
+                        .buttonStyle(PillButtonStyle(isProminent: cutout.orientation == .legs))
+
+                        Button("Square to Hypotenuse") {
+                            cutout.orientation = .hypotenuse
+                        }
+                        .buttonStyle(PillButtonStyle(isProminent: cutout.orientation == .hypotenuse))
+                    }
+                }
+
                 if cutout.kind != .circle {
                     // Snap to Corner - only for non-triangle shapes
                     if piece.shape != .rightTriangle {
@@ -1683,7 +1701,8 @@ private struct CutoutRow: View {
             height: cutout.width,
             centerX: cutout.centerY,
             centerY: cutout.centerX,
-            isNotch: cutout.isNotch
+            isNotch: cutout.isNotch,
+            orientation: cutout.orientation
         )
         let halfWidth = displayCutout.width / 2
         let halfHeight = displayCutout.height / 2

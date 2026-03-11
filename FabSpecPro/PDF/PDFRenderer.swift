@@ -955,11 +955,17 @@ enum PDFRenderer {
         context.addPath(cgPath)
         context.strokePath()
 
-        for cutout in piece.cutouts where cutout.centerX >= 0 && cutout.centerY >= 0 && !isEffectiveNotch(cutout: cutout, size: size) {
+        for cutout in piece.cutouts where cutout.centerX >= 0 && cutout.centerY >= 0 && !isEffectiveNotch(cutout: cutout, size: size, shape: piece.shape) {
             let displayCutout = displayCutout(for: cutout)
             let angleCuts = localAngleCuts(for: cutout, piece: piece)
             let cornerRadii = localCornerRadii(for: cutout, piece: piece)
-            let cutoutPath = ShapePathBuilder.cutoutPath(displayCutout, angleCuts: angleCuts, cornerRadii: cornerRadii)
+            let cutoutPath = ShapePathBuilder.cutoutPath(
+                displayCutout,
+                angleCuts: angleCuts,
+                cornerRadii: cornerRadii,
+                size: size,
+                shape: piece.shape
+            )
             var cutoutTransform = CGAffineTransform(translationX: offsetX, y: offsetY)
             cutoutTransform = cutoutTransform.scaledBy(x: scale, y: scale)
             if let scaled = cutoutPath.cgPath.copy(using: &cutoutTransform) {
@@ -977,7 +983,7 @@ enum PDFRenderer {
     }
 
     private static func drawNotchDimensionLabels(in context: CGContext, piece: Piece, size: CGSize, scale: CGFloat, offsetX: CGFloat, offsetY: CGFloat) {
-        let notches = piece.cutouts.filter { isEffectiveNotch(cutout: $0, size: size) && $0.centerX >= 0 && $0.centerY >= 0 }
+        let notches = piece.cutouts.filter { isEffectiveNotch(cutout: $0, size: size, shape: piece.shape) && $0.centerX >= 0 && $0.centerY >= 0 }
         guard !notches.isEmpty else { return }
         let polygon = ShapePathBuilder.displayPolygonPoints(for: piece, includeAngles: true)
 
@@ -1120,7 +1126,7 @@ enum PDFRenderer {
 
     private static func drawCutoutDimensionLabels(in context: CGContext, piece: Piece, size: CGSize, scale: CGFloat, offsetX: CGFloat, offsetY: CGFloat) {
         // Get cutouts that are NOT notches (interior holes)
-        let cutouts = piece.cutouts.filter { !isEffectiveNotch(cutout: $0, size: size) && $0.centerX >= 0 && $0.centerY >= 0 && $0.kind != .circle }
+        let cutouts = piece.cutouts.filter { !isEffectiveNotch(cutout: $0, size: size, shape: piece.shape) && $0.centerX >= 0 && $0.centerY >= 0 && $0.kind != .circle }
         guard !cutouts.isEmpty else { return }
 
         for cutout in cutouts {
@@ -1328,20 +1334,29 @@ enum PDFRenderer {
             guard let cutoutEdge = assignment.cutoutEdge else { continue }
             guard let cutout = piece.cutouts.first(where: { $0.id == cutoutEdge.id }) else { continue }
             guard cutout.centerX >= 0 && cutout.centerY >= 0 else { continue }
-            guard isInteriorNotchEdge(cutout: cutout, edge: cutoutEdge.edge, pieceSize: size) else { continue }
-            let point = cutoutEdgeLabelPoint(cutout: cutout, edge: cutoutEdge.edge, size: size, scale: scale, offsetX: offsetX, offsetY: offsetY, polygon: polygon)
+            guard isInteriorNotchEdge(cutout: cutout, edge: cutoutEdge.edge, pieceSize: size, shape: piece.shape) else { continue }
+            let point = cutoutEdgeLabelPoint(
+                cutout: cutout,
+                edge: cutoutEdge.edge,
+                size: size,
+                shape: piece.shape,
+                scale: scale,
+                offsetX: offsetX,
+                offsetY: offsetY,
+                polygon: polygon
+            )
             drawText(code, in: context, frame: CGRect(x: point.x - 12, y: point.y - 7, width: 24, height: 12), font: .systemFont(ofSize: 9, weight: .bold), alignment: .center)
         }
     }
 
-    private static func isInteriorNotchEdge(cutout: Cutout, edge: EdgePosition, pieceSize: CGSize) -> Bool {
+    private static func isInteriorNotchEdge(cutout: Cutout, edge: EdgePosition, pieceSize: CGSize, shape: ShapeKind) -> Bool {
         let displayCutout = displayCutout(for: cutout)
-        let halfWidth = displayCutout.width / 2
-        let halfHeight = displayCutout.height / 2
-        let minX = displayCutout.centerX - halfWidth
-        let maxX = displayCutout.centerX + halfWidth
-        let minY = displayCutout.centerY - halfHeight
-        let maxY = displayCutout.centerY + halfHeight
+        let corners = GeometryHelpers.cutoutCornerPoints(cutout: displayCutout, size: pieceSize, shape: shape)
+        let bounds = GeometryHelpers.bounds(for: corners)
+        let minX = bounds.minX
+        let maxX = bounds.maxX
+        let minY = bounds.minY
+        let maxY = bounds.maxY
         let edgeEpsilon: CGFloat = 0.01
 
         switch edge {
@@ -1358,17 +1373,17 @@ enum PDFRenderer {
         }
     }
 
-    private static func isEffectiveNotch(cutout: Cutout, size: CGSize) -> Bool {
+    private static func isEffectiveNotch(cutout: Cutout, size: CGSize, shape: ShapeKind) -> Bool {
         if cutout.isNotch { return true }
         guard cutout.kind != .circle else { return false }
         // Use display-transformed coordinates (swap x/y to match display size)
         let displayCutout = displayCutout(for: cutout)
-        let halfWidth = displayCutout.width / 2
-        let halfHeight = displayCutout.height / 2
-        let minX = displayCutout.centerX - halfWidth
-        let maxX = displayCutout.centerX + halfWidth
-        let minY = displayCutout.centerY - halfHeight
-        let maxY = displayCutout.centerY + halfHeight
+        let corners = GeometryHelpers.cutoutCornerPoints(cutout: displayCutout, size: size, shape: shape)
+        let bounds = GeometryHelpers.bounds(for: corners)
+        let minX = bounds.minX
+        let maxX = bounds.maxX
+        let minY = bounds.minY
+        let maxY = bounds.maxY
         let eps: CGFloat = 0.01
         return minX <= eps || minY <= eps || maxX >= size.width - eps || maxY >= size.height - eps
     }
@@ -1864,11 +1879,13 @@ enum PDFRenderer {
         return abs(dy * point.x - dx * point.y + b.x * a.y - b.y * a.x) / denom
     }
 
-    private static func cutoutEdgeLabelPoint(cutout: Cutout, edge: EdgePosition, size: CGSize, scale: CGFloat, offsetX: CGFloat, offsetY: CGFloat, polygon: [CGPoint]) -> CGPoint {
+    private static func cutoutEdgeLabelPoint(cutout: Cutout, edge: EdgePosition, size: CGSize, shape: ShapeKind, scale: CGFloat, offsetX: CGFloat, offsetY: CGFloat, polygon: [CGPoint]) -> CGPoint {
         let displayCutout = displayCutout(for: cutout)
         let center = CGPoint(x: displayCutout.centerX, y: displayCutout.centerY)
-        let halfWidth = displayCutout.width / 2
-        let halfHeight = displayCutout.height / 2
+        let corners = GeometryHelpers.cutoutCornerPoints(cutout: displayCutout, size: size, shape: shape)
+        let bounds = GeometryHelpers.bounds(for: corners)
+        let halfWidth = bounds.width / 2
+        let halfHeight = bounds.height / 2
         let padding = 6 / max(scale, 0.01)
 
         if cutout.kind == .circle {
@@ -1892,8 +1909,8 @@ enum PDFRenderer {
             }
             let adjusted = offsetOutsidePolygon(
                 point: point,
-                segmentStart: segmentStartPoint(for: edge, cutout: displayCutout),
-                segmentEnd: segmentEndPoint(for: edge, cutout: displayCutout),
+                segmentStart: segmentStartPoint(for: edge, cutout: displayCutout, displaySize: size, shape: shape),
+                segmentEnd: segmentEndPoint(for: edge, cutout: displayCutout, displaySize: size, shape: shape),
                 polygon: polygon,
                 distance: padding
             )
@@ -1901,62 +1918,60 @@ enum PDFRenderer {
         }
 
         // For interior cutouts (not notches), position label inside the cutout centered on the edge
-        let minX = center.x - halfWidth
-        let maxX = center.x + halfWidth
-        let minY = center.y - halfHeight
-        let maxY = center.y + halfHeight
+        let topMid = CGPoint(x: (corners[0].x + corners[1].x) / 2, y: (corners[0].y + corners[1].y) / 2)
+        let rightMid = CGPoint(x: (corners[1].x + corners[2].x) / 2, y: (corners[1].y + corners[2].y) / 2)
+        let bottomMid = CGPoint(x: (corners[2].x + corners[3].x) / 2, y: (corners[2].y + corners[3].y) / 2)
+        let leftMid = CGPoint(x: (corners[3].x + corners[0].x) / 2, y: (corners[3].y + corners[0].y) / 2)
         let point: CGPoint
 
         switch edge {
         case .top:
-            point = CGPoint(x: center.x, y: minY + padding)
+            point = CGPoint(x: topMid.x, y: topMid.y + padding)
         case .bottom:
-            point = CGPoint(x: center.x, y: maxY - padding)
+            point = CGPoint(x: bottomMid.x, y: bottomMid.y - padding)
         case .left:
-            point = CGPoint(x: minX + padding, y: center.y)
+            point = CGPoint(x: leftMid.x + padding, y: leftMid.y)
         case .right:
-            point = CGPoint(x: maxX - padding, y: center.y)
+            point = CGPoint(x: rightMid.x - padding, y: rightMid.y)
         default:
-            point = CGPoint(x: center.x, y: minY + padding)
+            point = CGPoint(x: topMid.x, y: topMid.y + padding)
         }
 
         // Interior cutouts should have labels inside, so don't offset outside
         return CGPoint(x: offsetX + point.x * scale, y: offsetY + point.y * scale)
     }
 
-    private static func segmentStartPoint(for edge: EdgePosition, cutout: Cutout) -> CGPoint {
-        let halfWidth = cutout.width / 2
-        let halfHeight = cutout.height / 2
-        let center = CGPoint(x: cutout.centerX, y: cutout.centerY)
+    private static func segmentStartPoint(for edge: EdgePosition, cutout: Cutout, displaySize: CGSize, shape: ShapeKind) -> CGPoint {
+        let corners = GeometryHelpers.cutoutCornerPoints(cutout: cutout, size: displaySize, shape: shape)
+        guard corners.count == 4 else { return CGPoint(x: cutout.centerX, y: cutout.centerY) }
         switch edge {
-        case .left:
-            return CGPoint(x: center.x - halfWidth, y: center.y - halfHeight)
-        case .right:
-            return CGPoint(x: center.x + halfWidth, y: center.y - halfHeight)
         case .top:
-            return CGPoint(x: center.x - halfWidth, y: center.y - halfHeight)
+            return corners[0]
+        case .right:
+            return corners[1]
         case .bottom:
-            return CGPoint(x: center.x - halfWidth, y: center.y + halfHeight)
+            return corners[2]
+        case .left:
+            return corners[3]
         default:
-            return center
+            return CGPoint(x: cutout.centerX, y: cutout.centerY)
         }
     }
 
-    private static func segmentEndPoint(for edge: EdgePosition, cutout: Cutout) -> CGPoint {
-        let halfWidth = cutout.width / 2
-        let halfHeight = cutout.height / 2
-        let center = CGPoint(x: cutout.centerX, y: cutout.centerY)
+    private static func segmentEndPoint(for edge: EdgePosition, cutout: Cutout, displaySize: CGSize, shape: ShapeKind) -> CGPoint {
+        let corners = GeometryHelpers.cutoutCornerPoints(cutout: cutout, size: displaySize, shape: shape)
+        guard corners.count == 4 else { return CGPoint(x: cutout.centerX, y: cutout.centerY) }
         switch edge {
-        case .left:
-            return CGPoint(x: center.x - halfWidth, y: center.y + halfHeight)
-        case .right:
-            return CGPoint(x: center.x + halfWidth, y: center.y + halfHeight)
         case .top:
-            return CGPoint(x: center.x + halfWidth, y: center.y - halfHeight)
+            return corners[1]
+        case .right:
+            return corners[2]
         case .bottom:
-            return CGPoint(x: center.x + halfWidth, y: center.y + halfHeight)
+            return corners[3]
+        case .left:
+            return corners[0]
         default:
-            return center
+            return CGPoint(x: cutout.centerX, y: cutout.centerY)
         }
     }
 
@@ -2248,7 +2263,7 @@ enum PDFRenderer {
         let eps: CGFloat = 0.01
         
         for cutout in piece.cutouts where cutout.centerX >= 0 && cutout.centerY >= 0 {
-            guard isEffectiveNotch(cutout: cutout, size: size) else { continue }
+            guard isEffectiveNotch(cutout: cutout, size: size, shape: piece.shape) else { continue }
             let displayCutout = displayCutout(for: cutout)
             let halfWidth = displayCutout.width / 2
             let halfHeight = displayCutout.height / 2
@@ -2357,7 +2372,7 @@ enum PDFRenderer {
 
     private static func cutoutNoteLines(for piece: Piece) -> [String] {
         let visibleCutouts = piece.cutouts.filter { $0.centerX >= 0 && $0.centerY >= 0 }
-        let holes = visibleCutouts.filter { !isEffectiveNotch(cutout: $0, size: ShapePathBuilder.pieceSize(for: piece)) }
+        let holes = visibleCutouts.filter { !isEffectiveNotch(cutout: $0, size: ShapePathBuilder.pieceSize(for: piece), shape: piece.shape) }
         var lines: [String] = []
         // Curves are stored with display edge positions
         let displayLeftCurveOffset = curveEdgeOffset(piece: piece, edge: .left)
@@ -2556,7 +2571,15 @@ enum PDFRenderer {
     }
 
     private static func displayCutout(for cutout: Cutout) -> Cutout {
-        Cutout(kind: cutout.kind, width: cutout.height, height: cutout.width, centerX: cutout.centerY, centerY: cutout.centerX, isNotch: cutout.isNotch)
+        Cutout(
+            kind: cutout.kind,
+            width: cutout.height,
+            height: cutout.width,
+            centerX: cutout.centerY,
+            centerY: cutout.centerX,
+            isNotch: cutout.isNotch,
+            orientation: cutout.orientation
+        )
     }
 
     private static func cutoutCornerRange(for cutout: Cutout, piece: Piece) -> Range<Int>? {

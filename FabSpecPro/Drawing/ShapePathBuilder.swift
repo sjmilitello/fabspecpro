@@ -554,70 +554,64 @@ enum ShapePathBuilder {
     }
 
     static func cutoutTouchesBoundary(cutout: Cutout, size: CGSize, shape: ShapeKind) -> Bool {
-        let halfWidth = cutout.width / 2
-        let halfHeight = cutout.height / 2
-        let minX = cutout.centerX - halfWidth
-        let maxX = cutout.centerX + halfWidth
-        let minY = cutout.centerY - halfHeight
-        let maxY = cutout.centerY + halfHeight
+        let corners = GeometryHelpers.cutoutCornerPoints(cutout: cutout, size: size, shape: shape)
+        let bounds = GeometryHelpers.bounds(for: corners)
+        let minX = bounds.minX
+        let maxX = bounds.maxX
+        let minY = bounds.minY
+        let maxY = bounds.maxY
         let eps: CGFloat = 0.01
+        // Use the same epsilon for hypotenuse detection as notchRightTrianglePoints
+        // to ensure consistent behavior between notch rendering and cutout display
+        let hypotenuseEps: CGFloat = 0.5
         switch shape {
         case .rightTriangle:
             let touchesTop = minY <= eps
             let touchesLeft = minX <= eps
-            let touchesHypotenuse = cutoutTouchesHypotenuse(minX: minX, maxX: maxX, minY: minY, maxY: maxY, size: size, eps: eps)
+            let touchesHypotenuse = cutoutTouchesHypotenuse(corners: corners, size: size, eps: hypotenuseEps)
             return touchesTop || touchesLeft || touchesHypotenuse
         default:
             return minX <= eps || minY <= eps || maxX >= size.width - eps || maxY >= size.height - eps
         }
     }
 
-    private static func cutoutTouchesHypotenuse(minX: CGFloat, maxX: CGFloat, minY: CGFloat, maxY: CGFloat, size: CGSize, eps: CGFloat) -> Bool {
+    private static func cutoutTouchesHypotenuse(corners: [CGPoint], size: CGSize, eps: CGFloat) -> Bool {
         let width = max(size.width, 0.0001)
         let height = max(size.height, 0.0001)
         
         // Hypotenuse line equation: x/width + y/height = 1
         // value < 0 means inside triangle, value = 0 means on hypotenuse, value > 0 means outside
         
-        let corners = [
-            CGPoint(x: minX, y: minY),
-            CGPoint(x: maxX, y: minY),
-            CGPoint(x: maxX, y: maxY),
-            CGPoint(x: minX, y: maxY)
-        ]
-        
         var minValue = CGFloat.greatestFiniteMagnitude
         var maxValue = -CGFloat.greatestFiniteMagnitude
+        let a = CGPoint(x: width, y: 0)
+        let b = CGPoint(x: 0, y: height)
+        var minDistance = CGFloat.greatestFiniteMagnitude
         for corner in corners {
             let value = (corner.x / width) + (corner.y / height) - 1
             minValue = min(minValue, value)
             maxValue = max(maxValue, value)
+            let distance = pointLineDistance(point: corner, a: a, b: b)
+            minDistance = min(minDistance, distance)
         }
         
         // Touch hypotenuse if:
-        // 1. Any corner is very close to the hypotenuse line (within eps)
-        // 2. OR the rectangle spans across the hypotenuse (one corner inside, one outside)
-        if abs(minValue) <= eps || abs(maxValue) <= eps {
+        // 1. Any corner is very close to the hypotenuse line (within eps in inches)
+        // 2. OR the rectangle spans across the hypotenuse (one corner strictly inside, one strictly outside)
+        //    Use a small tolerance for the spanning check to detect actual intersections
+        if minDistance <= eps {
             return true
         }
-        return minValue < -eps && maxValue > eps
+        // For spanning check, use a small tolerance (not eps) to detect when the rectangle
+        // actually crosses the hypotenuse line
+        let spanTolerance: CGFloat = 0.001
+        return minValue < -spanTolerance && maxValue > spanTolerance
     }
     
     private static func cutoutIsInsideTriangle(cutout: Cutout, size: CGSize) -> Bool {
         let width = max(size.width, 0.0001)
         let height = max(size.height, 0.0001)
-        let halfWidth = cutout.width / 2
-        let halfHeight = cutout.height / 2
-        let minX = cutout.centerX - halfWidth
-        let maxX = cutout.centerX + halfWidth
-        let minY = cutout.centerY - halfHeight
-        let maxY = cutout.centerY + halfHeight
-        let corners = [
-            CGPoint(x: minX, y: minY),
-            CGPoint(x: maxX, y: minY),
-            CGPoint(x: maxX, y: maxY),
-            CGPoint(x: minX, y: maxY)
-        ]
+        let corners = GeometryHelpers.cutoutCornerPoints(cutout: cutout, size: size, shape: .rightTriangle)
         for corner in corners {
             if corner.x < -0.01 || corner.y < -0.01 {
                 return false
@@ -729,22 +723,32 @@ enum ShapePathBuilder {
         }
     }
 
-    static func cutoutPath(_ cutout: Cutout, angleCuts: [AngleCut], cornerRadii: [CornerRadius]) -> Path {
+    static func cutoutPath(_ cutout: Cutout, angleCuts: [AngleCut], cornerRadii: [CornerRadius], size: CGSize, shape: ShapeKind) -> Path {
         switch cutout.kind {
         case .circle:
             return cutoutPath(cutout)
         case .square, .rectangle:
-            var points = reorderCornersClockwise(cutoutCornerPoints(for: cutout))
+            var points = reorderCornersClockwise(GeometryHelpers.cutoutCornerPoints(cutout: cutout, size: size, shape: shape))
             if !angleCuts.isEmpty {
                 points = applyAngleCutsDisplay(to: points, angleCuts: angleCuts)
             }
             let localRadii = cornerRadii.filter { $0.cornerIndex >= 0 }
             if !localRadii.isEmpty {
-                let baseCorners = reorderCornersClockwise(cutoutCornerPoints(for: cutout))
+                let baseCorners = reorderCornersClockwise(GeometryHelpers.cutoutCornerPoints(cutout: cutout, size: size, shape: shape))
                 return roundedPolygonPath(points: points, cornerRadii: localRadii, baseCorners: baseCorners)
             }
             return polygonPath(points)
         }
+    }
+
+    static func cutoutPath(_ cutout: Cutout, angleCuts: [AngleCut], cornerRadii: [CornerRadius]) -> Path {
+        cutoutPath(
+            cutout,
+            angleCuts: angleCuts,
+            cornerRadii: cornerRadii,
+            size: CGSize(width: cutout.width, height: cutout.height),
+            shape: .rectangle
+        )
     }
 
     static func cornerLabelCount(for piece: Piece) -> Int {
@@ -924,10 +928,13 @@ enum ShapePathBuilder {
         let width = size.width
         let height = size.height
         let edgeEpsilon: CGFloat = 0.5
+
+        var topLeftMaxX: CGFloat = 0
+        var topLeftMaxY: CGFloat = 0
         var topSpans: [(start: CGFloat, end: CGFloat, depth: CGFloat)] = []
         var leftSpans: [(start: CGFloat, end: CGFloat, depth: CGFloat)] = []
-        var hypotenuseSpans: [(start: CGFloat, end: CGFloat, depth: CGFloat, minX: CGFloat, maxX: CGFloat, minY: CGFloat, maxY: CGFloat)] = []
-        var cornerNotches: [Cutout] = []
+        // Store hypotenuse notches with their t-values and axis-aligned rect bounds
+        var hypotenuseSpans: [(tStart: CGFloat, tEnd: CGFloat, minX: CGFloat, maxX: CGFloat, minY: CGFloat, maxY: CGFloat)] = []
 
         for notch in notches {
             let halfWidth = notch.width / 2
@@ -938,42 +945,62 @@ enum ShapePathBuilder {
             var maxY = min(height, notch.centerY + halfHeight)
 
             if minX <= edgeEpsilon { minX = 0 }
-            if maxX >= width - edgeEpsilon { maxX = width }
             if minY <= edgeEpsilon { minY = 0 }
+            if maxX >= width - edgeEpsilon { maxX = width }
             if maxY >= height - edgeEpsilon { maxY = height }
 
             let touchesTop = minY <= edgeEpsilon
             let touchesLeft = minX <= edgeEpsilon
-            let touchesHypotenuse = cutoutTouchesHypotenuse(minX: minX, maxX: maxX, minY: minY, maxY: maxY, size: size, eps: edgeEpsilon)
-            let touchesCount = [touchesTop, touchesLeft, touchesHypotenuse].filter { $0 }.count
+            let touchesHypotenuse = cutoutTouchesHypotenuse(
+                corners: GeometryHelpers.cutoutCornerPoints(cutout: notch, size: size, shape: .rightTriangle),
+                size: size,
+                eps: edgeEpsilon
+            )
 
-            if touchesCount >= 2 {
-                cornerNotches.append(notch)
-                continue
+            if touchesTop && touchesLeft {
+                topLeftMaxX = max(topLeftMaxX, maxX)
+                topLeftMaxY = max(topLeftMaxY, maxY)
             }
 
-            if touchesTop {
-                topSpans.append((start: minX, end: maxX, depth: maxY))
-            } else if touchesLeft {
-                leftSpans.append((start: minY, end: maxY, depth: maxX))
+            let touchesCount = [touchesTop, touchesLeft, touchesHypotenuse].filter { $0 }.count
+            if touchesCount == 1 {
+                if touchesTop {
+                    topSpans.append((start: minX, end: maxX, depth: maxY))
+                } else if touchesLeft {
+                    leftSpans.append((start: minY, end: maxY, depth: maxX))
+                } else if touchesHypotenuse {
+                    if let span = cutoutHypotenuseSpan(minX: minX, maxX: maxX, minY: minY, maxY: maxY, size: size) {
+                        hypotenuseSpans.append((tStart: span.start, tEnd: span.end, minX: span.minX, maxX: span.maxX, minY: span.minY, maxY: span.maxY))
+                    }
+                }
             } else if touchesHypotenuse {
                 if let span = cutoutHypotenuseSpan(minX: minX, maxX: maxX, minY: minY, maxY: maxY, size: size) {
-                    // All hypotenuse notches use axis-aligned rectangular rendering
-                    hypotenuseSpans.append(span)
+                    hypotenuseSpans.append((tStart: span.start, tEnd: span.end, minX: span.minX, maxX: span.maxX, minY: span.minY, maxY: span.maxY))
+                }
+                if touchesTop && !touchesLeft {
+                    topSpans.append((start: minX, end: maxX, depth: maxY))
+                }
+                if touchesLeft && !touchesTop {
+                    leftSpans.append((start: minY, end: maxY, depth: maxX))
                 }
             }
         }
 
+        let hasTopLeft = topLeftMaxX > 0 && topLeftMaxY > 0
         let mergedTop = mergeEdgeSpans(topSpans)
         let mergedLeft = mergeEdgeSpans(leftSpans)
-        // Sort hypotenuse spans by start t-value
-        let sortedHypotenuseSpans = hypotenuseSpans.sorted { $0.start < $1.start }
+        // Sort hypotenuse spans by t-value (0 = top-right corner, 1 = bottom-left corner)
+        let orderedHypotenuseSpans = hypotenuseSpans.sorted { $0.tStart < $1.tStart }
+
+        let hypotenuseStart = CGPoint(x: width, y: 0)
+        let hypotenuseEnd = CGPoint(x: 0, y: height)
 
         var points: [CGPoint] = []
-        points.append(CGPoint(x: 0, y: 0))
+        let startX = hasTopLeft ? topLeftMaxX : 0
+        points.append(CGPoint(x: startX, y: 0))
 
         for span in mergedTop {
-            let clampedStart = max(span.start, 0)
+            let clampedStart = max(span.start, startX)
             let clampedEnd = min(span.end, width)
             if clampedEnd <= clampedStart { continue }
             if points.last?.x ?? 0 < clampedStart {
@@ -985,82 +1012,45 @@ enum ShapePathBuilder {
         }
         points.append(CGPoint(x: width, y: 0))
 
-        // For axis-aligned hypotenuse notches, render rectangular cuts
-        // The hypotenuse goes from (width, 0) to (0, height)
-        let hypStart = CGPoint(x: width, y: 0)
-        let hypEnd = CGPoint(x: 0, y: height)
+        // Walk along the hypotenuse, inserting notch paths at the right positions
         var currentT: CGFloat = 0
-        
-        for span in sortedHypotenuseSpans {
-            let startT = max(0, min(1, span.start))
-            let endT = max(0, min(1, span.end))
-            if endT <= startT { continue }
-            
-            // Calculate actual intersection points on the hypotenuse
-            let hypPoint1 = pointOnHypotenuse(start: hypStart, end: hypEnd, t: startT)
-            let hypPoint2 = pointOnHypotenuse(start: hypStart, end: hypEnd, t: endT)
-            
-            // Add the entry point on the hypotenuse if we need to advance
-            if currentT < startT {
-                points.append(hypPoint1)
-            }
-            
-            // For an axis-aligned rectangular notch, we need to trace from hypPoint1
-            // around the interior of the rectangle to hypPoint2.
-            //
-            // The rectangle has corners:
-            //   TL = (minX, minY)  - top-left (towards triangle interior)
-            //   TR = (maxX, minY)  - top-right
-            //   BR = (maxX, maxY)  - bottom-right
-            //   BL = (minX, maxY)  - bottom-left
-            //
-            // The hypotenuse passes through the rectangle, and we need to trace
-            // the edges that are INSIDE the triangle (the "notch" part).
-            //
-            // Since the hypotenuse goes from upper-right to lower-left,
-            // and the triangle interior is below-left of the hypotenuse,
-            // the interior corners are TL and BL.
-            //
-            // We trace: hypPoint1 -> (along edges toward interior) -> hypPoint2
-            
-            // Determine which edge hypPoint1 is on
-            let onTopEdge1 = abs(hypPoint1.y - span.minY) < 0.5
-            let onRightEdge1 = abs(hypPoint1.x - span.maxX) < 0.5
-            
-            // Determine which edge hypPoint2 is on
-            let onBottomEdge2 = abs(hypPoint2.y - span.maxY) < 0.5
-            let onLeftEdge2 = abs(hypPoint2.x - span.minX) < 0.5
-            
-            // Build the path by going from hypPoint1 toward interior, then to hypPoint2
-            // The key insight: we need to trace along rectangle edges that face the triangle interior
-            
-            if onTopEdge1 {
-                // Enter from top edge - first go to top-left corner
-                points.append(CGPoint(x: span.minX, y: span.minY))
-                if onBottomEdge2 || onLeftEdge2 {
-                    // Need to go to bottom-left corner
-                    points.append(CGPoint(x: span.minX, y: span.maxY))
+        for span in orderedHypotenuseSpans {
+            // If there's a gap before this notch, add the hypotenuse point at the notch entry
+            if span.tStart > currentT + 0.0001 {
+                let entryPoint = pointOnHypotenuse(start: hypotenuseStart, end: hypotenuseEnd, t: span.tStart)
+                if let last = points.last, GeometryHelpers.distance(last, entryPoint) > 0.001 {
+                    points.append(entryPoint)
                 }
-            } else if onRightEdge1 {
-                // Enter from right edge - first go UP to top-right corner
-                points.append(CGPoint(x: span.maxX, y: span.minY))
-                // Then go LEFT to top-left corner
-                points.append(CGPoint(x: span.minX, y: span.minY))
-                // Then go DOWN to bottom-left corner
-                points.append(CGPoint(x: span.minX, y: span.maxY))
-            } else {
-                // Fallback - use interior path through both corners
-                points.append(CGPoint(x: span.minX, y: span.minY))
-                points.append(CGPoint(x: span.minX, y: span.maxY))
             }
             
-            points.append(hypPoint2)
-            currentT = endT
+            // Add the axis-aligned notch path (going into the triangle)
+            let notchPath = axisAlignedHypotenuseNotchPath(
+                tStart: span.tStart,
+                tEnd: span.tEnd,
+                minX: span.minX,
+                maxX: span.maxX,
+                minY: span.minY,
+                maxY: span.maxY,
+                size: size
+            )
+            for point in notchPath {
+                if let last = points.last, GeometryHelpers.distance(last, point) > 0.001 {
+                    points.append(point)
+                }
+            }
+            
+            currentT = span.tEnd
         }
-        points.append(CGPoint(x: 0, y: height))
+        
+        // Add the final hypotenuse endpoint if we haven't reached it
+        let finalPoint = CGPoint(x: 0, y: height)
+        if let last = points.last, GeometryHelpers.distance(last, finalPoint) > 0.001 {
+            points.append(finalPoint)
+        }
 
+        let leftUpY = hasTopLeft ? topLeftMaxY : 0
         for span in mergedLeft.reversed() {
-            let clampedStart = max(span.start, 0)
+            let clampedStart = max(span.start, leftUpY)
             let clampedEnd = min(span.end, height)
             if clampedEnd <= clampedStart { continue }
             if points.last?.y ?? height > clampedEnd {
@@ -1070,13 +1060,344 @@ enum ShapePathBuilder {
             points.append(CGPoint(x: span.depth, y: clampedStart))
             points.append(CGPoint(x: 0, y: clampedStart))
         }
-        points.append(CGPoint(x: 0, y: 0))
-
-        var rawPoints = dedupePoints(points)
-        if !cornerNotches.isEmpty {
-            rawPoints = applyCornerNotches(to: rawPoints, notches: cornerNotches)
+        points.append(CGPoint(x: 0, y: leftUpY))
+        if hasTopLeft {
+            points.append(CGPoint(x: topLeftMaxX, y: topLeftMaxY))
+            points.append(CGPoint(x: topLeftMaxX, y: 0))
+        } else {
+            points.append(CGPoint(x: 0, y: 0))
         }
-        return rawPoints
+
+        return dedupePoints(points)
+    }
+    
+    /// Creates an axis-aligned rectangular notch path for a hypotenuse notch.
+    /// The path goes from the entry point on the hypotenuse, into the triangle along the notch rectangle,
+    /// and back out to the exit point on the hypotenuse.
+    ///
+    /// The hypotenuse runs from (width, 0) to (0, height). A notch rectangle intersects this line,
+    /// and we need to carve along the rectangle edges to create an axis-aligned rectangular bite.
+    private static func axisAlignedHypotenuseNotchPath(
+        tStart: CGFloat,
+        tEnd: CGFloat,
+        minX: CGFloat,
+        maxX: CGFloat,
+        minY: CGFloat,
+        maxY: CGFloat,
+        size: CGSize
+    ) -> [CGPoint] {
+        let width = max(size.width, 0.0001)
+        let height = max(size.height, 0.0001)
+        let hypotenuseStart = CGPoint(x: width, y: 0)
+        let hypotenuseEnd = CGPoint(x: 0, y: height)
+        
+        // Calculate entry and exit points on the hypotenuse
+        let hypPoint1 = pointOnHypotenuse(start: hypotenuseStart, end: hypotenuseEnd, t: tStart)
+        let hypPoint2 = pointOnHypotenuse(start: hypotenuseStart, end: hypotenuseEnd, t: tEnd)
+        
+        // Check if a point is inside or on the triangle boundary
+        func isInsideOrOnTriangle(_ p: CGPoint) -> Bool {
+            (p.x / width) + (p.y / height) <= 1.0 + 0.001
+        }
+        
+        // Rectangle corners
+        let topLeft = CGPoint(x: minX, y: minY)
+        let topRight = CGPoint(x: maxX, y: minY)
+        let bottomLeft = CGPoint(x: minX, y: maxY)
+        
+        // Check which corners are inside the triangle
+        let topLeftInside = isInsideOrOnTriangle(topLeft)
+        let topRightInside = isInsideOrOnTriangle(topRight)
+        let bottomLeftInside = isInsideOrOnTriangle(bottomLeft)
+        
+        var path: [CGPoint] = [hypPoint1]
+        
+        // For an axis-aligned rectangular notch, we need to trace from hypPoint1
+        // around the interior of the rectangle to hypPoint2.
+        // Only include corners that are inside the triangle.
+        //
+        // The hypotenuse passes through the rectangle, and we need to trace
+        // the edges that are INSIDE the triangle (the "notch" part).
+        
+        // Determine which edge hypPoint1 is on
+        let onTopEdge1 = abs(hypPoint1.y - minY) < 0.5
+        let onRightEdge1 = abs(hypPoint1.x - maxX) < 0.5
+        
+        // Determine which edge hypPoint2 is on
+        let onBottomEdge2 = abs(hypPoint2.y - maxY) < 0.5
+        let onLeftEdge2 = abs(hypPoint2.x - minX) < 0.5
+        
+        // Build the path by going from hypPoint1 toward interior, then to hypPoint2
+        // Only add corners that are inside the triangle
+        
+        if onTopEdge1 {
+            // Enter from top edge - go to top-left corner (if inside)
+            if topLeftInside {
+                path.append(topLeft)
+            }
+            if (onBottomEdge2 || onLeftEdge2) && bottomLeftInside {
+                // Need to go to bottom-left corner
+                path.append(bottomLeft)
+            }
+        } else if onRightEdge1 {
+            // Enter from right edge
+            // Only go to top-right corner if it's inside the triangle
+            if topRightInside {
+                path.append(topRight)
+            }
+            // Go to top-left corner (if inside)
+            if topLeftInside {
+                path.append(topLeft)
+            }
+            // Go to bottom-left corner (if inside)
+            if bottomLeftInside {
+                path.append(bottomLeft)
+            }
+        } else {
+            // Fallback - use interior path through corners that are inside
+            if topLeftInside {
+                path.append(topLeft)
+            }
+            if bottomLeftInside {
+                path.append(bottomLeft)
+            }
+        }
+        
+        path.append(hypPoint2)
+        
+        return path
+    }
+
+    private static func hypotenuseNotchPath(rect: CGRect, size: CGSize) -> (tStart: CGFloat, tEnd: CGFloat, entry: CGPoint, exit: CGPoint, path: [CGPoint])? {
+        let width = max(size.width, 0.0001)
+        let height = max(size.height, 0.0001)
+
+        func isInsideTriangle(_ point: CGPoint) -> Bool {
+            if point.x < -0.01 || point.y < -0.01 { return false }
+            return (point.x / width) + (point.y / height) <= 1.0 + 0.01
+        }
+
+        func clipPolygon(_ polygon: [CGPoint], inside: (CGPoint) -> Bool, intersect: (CGPoint, CGPoint) -> CGPoint) -> [CGPoint] {
+            guard !polygon.isEmpty else { return [] }
+            var output: [CGPoint] = []
+            var prev = polygon.last!
+            var prevInside = inside(prev)
+            for point in polygon {
+                let currInside = inside(point)
+                if currInside {
+                    if !prevInside {
+                        output.append(intersect(prev, point))
+                    }
+                    output.append(point)
+                } else if prevInside {
+                    output.append(intersect(prev, point))
+                }
+                prev = point
+                prevInside = currInside
+            }
+            return dedupePoints(output)
+        }
+
+        func intersectLine(_ a: CGPoint, _ b: CGPoint, _ valueA: CGFloat, _ valueB: CGFloat) -> CGPoint {
+            let t = valueA / (valueA - valueB)
+            return CGPoint(x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t)
+        }
+
+        let rectPoly = [
+            CGPoint(x: rect.minX, y: rect.minY),
+            CGPoint(x: rect.maxX, y: rect.minY),
+            CGPoint(x: rect.maxX, y: rect.maxY),
+            CGPoint(x: rect.minX, y: rect.maxY)
+        ]
+
+        var clipped = rectPoly
+        clipped = clipPolygon(clipped, inside: { $0.x >= 0 }, intersect: { a, b in
+            let t = (0 - a.x) / (b.x - a.x)
+            return CGPoint(x: 0, y: a.y + (b.y - a.y) * t)
+        })
+        clipped = clipPolygon(clipped, inside: { $0.y >= 0 }, intersect: { a, b in
+            let t = (0 - a.y) / (b.y - a.y)
+            return CGPoint(x: a.x + (b.x - a.x) * t, y: 0)
+        })
+        clipped = clipPolygon(clipped, inside: { point in (point.x / width) + (point.y / height) <= 1.0 + 0.0001 }, intersect: { a, b in
+            let va = (a.x / width) + (a.y / height) - 1.0
+            let vb = (b.x / width) + (b.y / height) - 1.0
+            return intersectLine(a, b, va, vb)
+        })
+
+        guard clipped.count >= 3 else { return nil }
+
+        func isOnHypotenuse(_ point: CGPoint) -> Bool {
+            abs((point.x / width) + (point.y / height) - 1.0) <= 0.001
+        }
+
+        let hypotenusePoints = clipped.filter { isOnHypotenuse($0) }
+        guard hypotenusePoints.count >= 2 else { return nil }
+
+        func tValue(for point: CGPoint) -> CGFloat {
+            (width - point.x) / width
+        }
+
+        let sorted = hypotenusePoints.sorted { tValue(for: $0) < tValue(for: $1) }
+        let entry = sorted.first!
+        let exit = sorted.last!
+        let tStart = tValue(for: entry)
+        let tEnd = tValue(for: exit)
+
+        let entryIndex = GeometryHelpers.nearestPointIndex(to: entry, in: clipped)
+        let exitIndex = GeometryHelpers.nearestPointIndex(to: exit, in: clipped)
+
+        func pathBetween(_ points: [CGPoint], from start: Int, to end: Int, forward: Bool) -> [CGPoint] {
+            var path: [CGPoint] = []
+            let count = points.count
+            var index = start
+            while index != end {
+                index = forward ? (index + 1) % count : (index - 1 + count) % count
+                path.append(points[index])
+            }
+            return path
+        }
+
+        func pathIncludesHypotenuseEdge(_ path: [CGPoint]) -> Bool {
+            guard path.count >= 2 else { return false }
+            for i in 0..<(path.count - 1) {
+                if isOnHypotenuse(path[i]) && isOnHypotenuse(path[i + 1]) {
+                    return true
+                }
+            }
+            return false
+        }
+
+        let forwardPath = pathBetween(clipped, from: entryIndex, to: exitIndex, forward: true)
+        let backwardPath = pathBetween(clipped, from: entryIndex, to: exitIndex, forward: false)
+
+        let forwardHasHyp = pathIncludesHypotenuseEdge(forwardPath)
+        let backwardHasHyp = pathIncludesHypotenuseEdge(backwardPath)
+
+        let chosen: [CGPoint]
+        if forwardHasHyp && !backwardHasHyp {
+            chosen = backwardPath
+        } else if backwardHasHyp && !forwardHasHyp {
+            chosen = forwardPath
+        } else {
+            chosen = forwardPath.count <= backwardPath.count ? forwardPath : backwardPath
+        }
+
+        var interiorPath = chosen.filter { GeometryHelpers.distance($0, entry) > 0.0001 && GeometryHelpers.distance($0, exit) > 0.0001 }
+        interiorPath = dedupePoints(interiorPath)
+        guard !interiorPath.isEmpty else { return nil }
+        return (tStart: tStart, tEnd: tEnd, entry: entry, exit: exit, path: interiorPath)
+    }
+
+    private enum RectEdge: Int, CaseIterable {
+        case top = 0
+        case right = 1
+        case bottom = 2
+        case left = 3
+    }
+
+    private static func rectEdge(for point: CGPoint, rect: CGRect) -> RectEdge? {
+        if abs(point.y - rect.minY) < 0.001 { return .top }
+        if abs(point.x - rect.maxX) < 0.001 { return .right }
+        if abs(point.y - rect.maxY) < 0.001 { return .bottom }
+        if abs(point.x - rect.minX) < 0.001 { return .left }
+        return nil
+    }
+
+    private static func rectBoundaryPath(
+        from entry: CGPoint,
+        entryEdge: RectEdge,
+        to exit: CGPoint,
+        exitEdge: RectEdge,
+        rect: CGRect,
+        polygon: [CGPoint]
+    ) -> [CGPoint] {
+        let corners = [
+            CGPoint(x: rect.minX, y: rect.minY),
+            CGPoint(x: rect.maxX, y: rect.minY),
+            CGPoint(x: rect.maxX, y: rect.maxY),
+            CGPoint(x: rect.minX, y: rect.maxY)
+        ]
+
+        func edgeEndCorner(for edge: RectEdge, clockwise: Bool) -> CGPoint {
+            switch (edge, clockwise) {
+            case (.top, true): return corners[1]
+            case (.top, false): return corners[0]
+            case (.right, true): return corners[2]
+            case (.right, false): return corners[1]
+            case (.bottom, true): return corners[3]
+            case (.bottom, false): return corners[2]
+            case (.left, true): return corners[0]
+            case (.left, false): return corners[3]
+            }
+        }
+
+        func nextEdge(_ edge: RectEdge, clockwise: Bool) -> RectEdge {
+            let delta = clockwise ? 1 : 3
+            return RectEdge(rawValue: (edge.rawValue + delta) % 4) ?? edge
+        }
+
+        func buildPath(clockwise: Bool) -> [CGPoint] {
+            var path: [CGPoint] = []
+            var edge = entryEdge
+            path.append(edgeEndCorner(for: edge, clockwise: clockwise))
+            while edge != exitEdge {
+                edge = nextEdge(edge, clockwise: clockwise)
+                path.append(edgeEndCorner(for: edge, clockwise: clockwise))
+            }
+            return path
+        }
+
+        let cwPath = buildPath(clockwise: true)
+        let ccwPath = buildPath(clockwise: false)
+
+        func score(_ path: [CGPoint]) -> Int {
+            guard !path.isEmpty else { return 0 }
+            var count = 0
+            var last = entry
+            let bounds = GeometryHelpers.bounds(for: polygon)
+            let width = max(bounds.width, 0.0001)
+            let height = max(bounds.height, 0.0001)
+            let cornerEps: CGFloat = 0.0001
+
+            func isInsideTriangle(_ point: CGPoint) -> Bool {
+                let localX = point.x - bounds.minX
+                let localY = point.y - bounds.minY
+                if localX < -0.01 || localY < -0.01 { return false }
+                let value = (localX / width) + (localY / height)
+                return value <= 1.0 + 0.01
+            }
+
+            func isInsidePolygon(_ point: CGPoint) -> Bool {
+                if polygon.count == 3 {
+                    return isInsideTriangle(point)
+                }
+                return GeometryHelpers.pointIsInsidePolygon(point, polygon: polygon)
+                    || GeometryHelpers.pointIsOnPolygonEdge(point, polygon: polygon)
+            }
+
+            if polygon.count == 3 {
+                for corner in path {
+                    if corners.contains(where: { abs($0.x - corner.x) < cornerEps && abs($0.y - corner.y) < cornerEps }) {
+                        if isInsideTriangle(corner) { count += 10 }
+                    }
+                }
+            }
+            for point in path {
+                let mid = CGPoint(x: (last.x + point.x) / 2, y: (last.y + point.y) / 2)
+                if isInsidePolygon(mid) {
+                    count += 1
+                }
+                last = point
+            }
+            let mid = CGPoint(x: (last.x + exit.x) / 2, y: (last.y + exit.y) / 2)
+            if isInsidePolygon(mid) {
+                count += 1
+            }
+            return count
+        }
+
+        return score(cwPath) >= score(ccwPath) ? cwPath : ccwPath
     }
 
     private static func notchRectanglePoints(size: CGSize, notches: [Cutout]) -> [CGPoint] {
@@ -1282,20 +1603,21 @@ enum ShapePathBuilder {
         return merged
     }
 
-    private static func applyCornerNotches(to rawPoints: [CGPoint], notches: [Cutout]) -> [CGPoint] {
+    private static func applyCornerNotches(to rawPoints: [CGPoint], notches: [Cutout], shape: ShapeKind, size: CGSize) -> [CGPoint] {
         guard !notches.isEmpty, rawPoints.count >= 3 else { return rawPoints }
         var displayPoints = rawPoints.map { displayPoint(fromRaw: $0) }
         displayPoints = reorderCornersClockwise(displayPoints)
 
+        let displaySize = CGSize(width: size.height, height: size.width)
         let orderedNotches = sortNotchesByCorner(notches, points: displayPoints)
         for notch in orderedNotches {
-            displayPoints = applyCornerNotchToDisplay(points: displayPoints, notch: notch)
+            displayPoints = applyCornerNotchToDisplay(points: displayPoints, notch: notch, shape: shape, displaySize: displaySize)
         }
 
         return displayPoints.map { rawPoint(fromDisplay: $0) }
     }
 
-    private static func applyCornerNotchToDisplay(points: [CGPoint], notch: Cutout) -> [CGPoint] {
+    private static func applyCornerNotchToDisplay(points: [CGPoint], notch: Cutout, shape: ShapeKind, displaySize: CGSize) -> [CGPoint] {
         guard points.count >= 3 else { return points }
 
         var displayWidth = max(notch.height, 0)
@@ -1314,8 +1636,25 @@ enum ShapePathBuilder {
         let prev = points[prevIndex]
         let next = points[nextIndex]
 
-        let toPrev = unitVector(from: corner, to: prev)
-        let toNext = unitVector(from: corner, to: next)
+        var toPrev = unitVector(from: corner, to: prev)
+        var toNext = unitVector(from: corner, to: next)
+
+        if shape == .rightTriangle {
+            let eps: CGFloat = 0.01
+            let cornerA = CGPoint(x: 0, y: 0)
+            let cornerB = CGPoint(x: 0, y: displaySize.height)
+            let cornerC = CGPoint(x: displaySize.width, y: 0)
+            if distance(corner, cornerB) < eps {
+                toPrev = CGPoint(x: 1, y: 0)
+                toNext = CGPoint(x: 0, y: -1)
+            } else if distance(corner, cornerC) < eps {
+                toPrev = CGPoint(x: -1, y: 0)
+                toNext = CGPoint(x: 0, y: 1)
+            } else if distance(corner, cornerA) < eps {
+                toPrev = CGPoint(x: 1, y: 0)
+                toNext = CGPoint(x: 0, y: 1)
+            }
+        }
 
         let maxWidth = max(distance(corner, prev) * 0.98, 0)
         let maxHeight = max(distance(corner, next) * 0.98, 0)
