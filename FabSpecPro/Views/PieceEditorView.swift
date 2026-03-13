@@ -587,7 +587,6 @@ struct PieceEditorView: View {
     private func addCornerRadius() {
         let cornerCount = ShapePathBuilder.cornerLabelCount(for: piece)
         guard cornerCount > 0 else { return }
-        let usedAngles = Set(piece.angleCuts.map { $0.anchorCornerIndex })
         let usedRadii = Set(piece.cornerRadii.map { $0.cornerIndex })
         var curveBlocked: Set<Int> = []
         let baseCount = ShapePathBuilder.pieceCornerCount(for: piece)
@@ -596,7 +595,7 @@ struct PieceEditorView: View {
                 curveBlocked.insert(index)
             }
         }
-        let avoid = usedAngles.union(usedRadii).union(curveBlocked)
+        let avoid = usedRadii.union(curveBlocked)
         
         // Use default corner if set, otherwise find next available
         var index: Int = -1
@@ -646,25 +645,16 @@ struct PieceEditorView: View {
         let cornerCount = ShapePathBuilder.cornerLabelCount(for: piece)
         guard cornerCount > 0 else { return }
         let usedAngles = Set(piece.angleCuts.map { $0.anchorCornerIndex })
-        let usedRadii = Set(piece.cornerRadii.map { $0.cornerIndex })
-        let avoid = usedAngles.union(usedRadii)
+        let avoid = usedAngles
         
         // Use default corner if set, otherwise find next available
         var defaultCorner: Int = -1
-        if let defaults = pieceDefaults.first, defaults.defaultAngleCorner >= 0 {
-            // Use the default corner if it's not already used
-            if !avoid.contains(defaults.defaultAngleCorner) && defaults.defaultAngleCorner < cornerCount {
-                defaultCorner = defaults.defaultAngleCorner
-            } else {
-                defaultCorner = nextAvailableCornerIndex(count: cornerCount, avoiding: avoid) ?? -1
-            }
+        if piece.angleCuts.isEmpty, !avoid.contains(0) {
+            defaultCorner = 0
         } else {
             defaultCorner = nextAvailableCornerIndex(count: cornerCount, avoiding: avoid) ?? -1
         }
         
-        if defaultCorner >= 0 {
-            removeCornerRadius(at: defaultCorner)
-        }
         let angle = AngleCut(anchorCornerIndex: defaultCorner)
         
         // Apply default sizes and degrees
@@ -697,6 +687,7 @@ struct PieceEditorView: View {
         }
         return nil
     }
+
 
     private func removeCornerRadius(at cornerIndex: Int) {
         let matching = piece.cornerRadii.filter { $0.cornerIndex == cornerIndex }
@@ -1031,30 +1022,35 @@ struct PieceEditorView: View {
 
     private func applySelectedTreatmentToAllEdges() {
         guard let selectedTreatment else { return }
-        if piece.shape == .rightTriangle {
-            for edge in edgesForShape(piece.shape) {
-                piece.setTreatment(selectedTreatment, for: edge, context: modelContext)
-            }
-        } else {
         let segments = ShapePathBuilder.boundarySegments(for: piece)
         let segmentGroups = Dictionary(grouping: segments, by: { $0.edge })
         let hasSplitSegments = segmentGroups.contains { $0.value.count > 1 }
-        if piece.shape == .rectangle, hasSplitSegments {
+        
+        if hasSplitSegments {
+            // When edges are split by notches, apply to each segment individually
             for segment in segments {
                 piece.setSegmentTreatment(selectedTreatment, for: segment.edge, index: segment.index, context: modelContext)
             }
         } else {
+            // No split segments, apply to whole edges
             let edgesPresent = Set(segmentGroups.keys)
             for edge in edgesForShape(piece.shape) where edgesPresent.isEmpty || edgesPresent.contains(edge) {
                 piece.setTreatment(selectedTreatment, for: edge, context: modelContext)
             }
         }
-        }
 
         let pieceSize = ShapePathBuilder.pieceSize(for: piece)
         for cutout in piece.cutouts where cutout.centerX >= 0 && cutout.centerY >= 0 {
+            let isNotchOrBoundary = cutout.isNotch || ShapePathBuilder.cutoutTouchesBoundary(cutout: cutout, size: pieceSize, shape: piece.shape)
             for edge in edgesForCutout(cutout) {
-                guard isInteriorCutoutEdge(cutout: cutout, edge: edge, pieceSize: pieceSize) else { continue }
+                // Use different logic for notches vs interior cutouts
+                let shouldApply: Bool
+                if isNotchOrBoundary {
+                    shouldApply = isInteriorNotchEdge(cutout: cutout, edge: edge, pieceSize: pieceSize)
+                } else {
+                    shouldApply = isInteriorCutoutEdge(cutout: cutout, edge: edge, pieceSize: pieceSize)
+                }
+                guard shouldApply else { continue }
                 piece.setCutoutTreatment(selectedTreatment, for: cutout.id, edge: edge, context: modelContext)
             }
         }
@@ -1113,24 +1109,77 @@ struct PieceEditorView: View {
         )
         let displaySize = CGSize(width: pieceSize.height, height: pieceSize.width)
         let corners = GeometryHelpers.cutoutCornerPoints(cutout: displayCutout, size: displaySize, shape: piece.shape)
+        guard corners.count == 4 else { return false }
+        let start: CGPoint
+        let end: CGPoint
+        switch edge {
+        case .top:
+            start = corners[0]
+            end = corners[1]
+        case .right:
+            start = corners[1]
+            end = corners[2]
+        case .bottom:
+            start = corners[2]
+            end = corners[3]
+        case .left:
+            start = corners[3]
+            end = corners[0]
+        default:
+            return true
+        }
+        let eps: CGFloat = 0.001
+        return pointInsidePiece(start, pieceSize: displaySize, shape: piece.shape, epsilon: eps)
+            && pointInsidePiece(end, pieceSize: displaySize, shape: piece.shape, epsilon: eps)
+    }
+
+    /// Check if a notch edge is interior (not flush with piece boundary)
+    private func isInteriorNotchEdge(cutout: Cutout, edge: EdgePosition, pieceSize: CGSize) -> Bool {
+        let displayCutout = Cutout(
+            kind: cutout.kind,
+            width: cutout.height,
+            height: cutout.width,
+            centerX: cutout.centerY,
+            centerY: cutout.centerX,
+            isNotch: cutout.isNotch,
+            orientation: cutout.orientation
+        )
+        let displaySize = CGSize(width: pieceSize.height, height: pieceSize.width)
+        let corners = GeometryHelpers.cutoutCornerPoints(cutout: displayCutout, size: displaySize, shape: piece.shape)
         let bounds = GeometryHelpers.bounds(for: corners)
-        let minX = bounds.minX
-        let maxX = bounds.maxX
-        let minY = bounds.minY
-        let maxY = bounds.maxY
-        let eps: CGFloat = 0.01
+        let edgeEpsilon: CGFloat = 0.01
 
         switch edge {
         case .left:
-            return minX > eps
+            return bounds.minX > edgeEpsilon
         case .right:
-            return maxX < displaySize.width - eps
+            return bounds.maxX < displaySize.width - edgeEpsilon
         case .top:
-            return minY > eps
+            return bounds.minY > edgeEpsilon
         case .bottom:
-            return maxY < displaySize.height - eps
+            return bounds.maxY < displaySize.height - edgeEpsilon
         default:
             return true
+        }
+    }
+
+    private func pointInsidePiece(_ point: CGPoint, pieceSize: CGSize, shape: ShapeKind, epsilon: CGFloat) -> Bool {
+        switch shape {
+        case .rightTriangle:
+            if point.x < -epsilon || point.y < -epsilon { return false }
+            return point.x + point.y <= pieceSize.width + epsilon
+        case .rectangle:
+            return point.x >= -epsilon
+                && point.y >= -epsilon
+                && point.x <= pieceSize.width + epsilon
+                && point.y <= pieceSize.height + epsilon
+        case .quarterCircle:
+            if point.x < -epsilon || point.y < -epsilon { return false }
+            return hypot(point.x, point.y) <= pieceSize.width + epsilon
+        case .circle:
+            let center = CGPoint(x: pieceSize.width / 2, y: pieceSize.height / 2)
+            let radius = pieceSize.width / 2
+            return hypot(point.x - center.x, point.y - center.y) <= radius + epsilon
         }
     }
 
@@ -2252,10 +2301,6 @@ private struct AngleCutRow: View {
             angleDegreesRow
         }
         .onAppear { normalizeCornerSelection(count: labels.count) }
-        .onChange(of: angleCut.anchorCornerIndex) { _, newValue in
-            if newValue < 0 { return }
-            removeCornerRadius(at: newValue)
-        }
         .onChange(of: labels.count) { _, newValue in
             normalizeCornerSelection(count: newValue)
         }
@@ -2285,118 +2330,12 @@ private struct AngleCutRow: View {
     }
 
     private func cornerRow(labels: [String]) -> some View {
-        let radiusOccupied = Set(piece.cornerRadii.map { $0.cornerIndex })
-        let curveOccupied = curveOccupiedBaseCorners()
-        let disabledCorners = radiusOccupied.union(curveOccupied)
+        let disabledCorners = Set(piece.angleCuts.map { $0.anchorCornerIndex })
         return HStack(spacing: 12) {
             cornerPickerField(title: "Corner", selection: $angleCut.anchorCornerIndex, labels: labels, dimmedIndices: disabledCorners)
         }
     }
     
-    private func curveOccupiedBaseCorners() -> Set<Int> {
-        let baseCount = ShapePathBuilder.pieceCornerCount(for: piece)
-        guard baseCount > 0 else { return [] }
-        let points = ShapePathBuilder.cornerPoints(for: piece, includeAngles: false)
-        guard baseCount <= points.count else { return [] }
-        let bounds = bounds(for: points)
-        let clockwise = polygonIsClockwise(points)
-        var occupied: Set<Int> = []
-        for index in 0..<baseCount {
-            if isConcaveCorner(points: points, index: index, clockwise: clockwise) {
-                continue
-            }
-            let point = points[index]
-            for curve in piece.curvedEdges where curve.radius > 0 {
-                if pointIsOnEdge(point, edge: curve.edge, bounds: bounds, tolerance: 0.5) {
-                    occupied.insert(index)
-                    break
-                }
-            }
-        }
-        return occupied
-    }
-
-    private func bounds(for points: [CGPoint]) -> CGRect {
-        guard let first = points.first else { return .zero }
-        var minX = first.x
-        var maxX = first.x
-        var minY = first.y
-        var maxY = first.y
-        for point in points.dropFirst() {
-            minX = min(minX, point.x)
-            maxX = max(maxX, point.x)
-            minY = min(minY, point.y)
-            maxY = max(maxY, point.y)
-        }
-        return CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
-    }
-
-    private func polygonIsClockwise(_ points: [CGPoint]) -> Bool {
-        guard points.count >= 3 else { return false }
-        var sum: CGFloat = 0
-        for index in points.indices {
-            let nextIndex = (index + 1) % points.count
-            let p1 = points[index]
-            let p2 = points[nextIndex]
-            sum += (p2.x - p1.x) * (p2.y + p1.y)
-        }
-        return sum > 0
-    }
-
-    private func isConcaveCorner(points: [CGPoint], index: Int, clockwise: Bool) -> Bool {
-        guard points.count > 2 else { return false }
-        let count = points.count
-        let prev = points[(index - 1 + count) % count]
-        let curr = points[index]
-        let next = points[(index + 1) % count]
-        let v1 = CGPoint(x: curr.x - prev.x, y: curr.y - prev.y)
-        let v2 = CGPoint(x: next.x - curr.x, y: next.y - curr.y)
-        let cross = v1.x * v2.y - v1.y * v2.x
-        return clockwise ? cross > 0 : cross < 0
-    }
-
-    private func pointIsOnEdge(_ point: CGPoint, edge: EdgePosition, bounds: CGRect, tolerance: CGFloat) -> Bool {
-        switch edge {
-        case .top:
-            return abs(point.y - bounds.minY) <= tolerance
-        case .bottom:
-            return abs(point.y - bounds.maxY) <= tolerance
-        case .left:
-            return abs(point.x - bounds.minX) <= tolerance
-        case .right:
-            return abs(point.x - bounds.maxX) <= tolerance
-        case .legA:
-            return abs(point.x - bounds.minX) <= tolerance
-        case .legB:
-            return abs(point.y - bounds.minY) <= tolerance
-        case .hypotenuse:
-            let start = CGPoint(x: bounds.minX, y: bounds.maxY)
-            let end = CGPoint(x: bounds.maxX, y: bounds.minY)
-            let distance = pointLineDistance(point: point, a: start, b: end)
-            if distance > tolerance { return false }
-            let minX = min(start.x, end.x) - tolerance
-            let maxX = max(start.x, end.x) + tolerance
-            let minY = min(start.y, end.y) - tolerance
-            let maxY = max(start.y, end.y) + tolerance
-            return point.x >= minX && point.x <= maxX && point.y >= minY && point.y <= maxY
-        }
-    }
-
-    private func pointLineDistance(point: CGPoint, a: CGPoint, b: CGPoint) -> CGFloat {
-        let dx = b.x - a.x
-        let dy = b.y - a.y
-        if dx == 0 && dy == 0 {
-            let px = point.x - a.x
-            let py = point.y - a.y
-            return sqrt(px * px + py * py)
-        }
-        let t = max(0, min(1, ((point.x - a.x) * dx + (point.y - a.y) * dy) / (dx * dx + dy * dy)))
-        let proj = CGPoint(x: a.x + t * dx, y: a.y + t * dy)
-        let rx = point.x - proj.x
-        let ry = point.y - proj.y
-        return sqrt(rx * rx + ry * ry)
-    }
-
     private var edgeDistancesRow: some View {
         HStack(spacing: 12) {
             labeledField("Along Edge 1 (in)", value: $angleCut.anchorOffset)
@@ -2531,14 +2470,6 @@ private struct AngleCutRow: View {
         }
     }
 
-    private func removeCornerRadius(at cornerIndex: Int) {
-        let matching = piece.cornerRadii.filter { $0.cornerIndex == cornerIndex }
-        guard !matching.isEmpty else { return }
-        piece.cornerRadii.removeAll { $0.cornerIndex == cornerIndex }
-        for radius in matching {
-            modelContext.delete(radius)
-        }
-    }
 }
 
 private struct CornerRadiusRow: View {
@@ -2552,10 +2483,6 @@ private struct CornerRadiusRow: View {
             deleteRow
             cornerRow(labels: labels)
             radiusRow
-        }
-        .onChange(of: cornerRadius.cornerIndex) { _, newValue in
-            if newValue < 0 { return }
-            removeAngle(at: newValue)
         }
         .padding(10)
         .background(Theme.surface)
@@ -2577,9 +2504,8 @@ private struct CornerRadiusRow: View {
     }
 
     private func cornerRow(labels: [String]) -> some View {
-        let angleOccupied = Set(piece.angleCuts.map { $0.anchorCornerIndex })
         let curveOccupied = curveOccupiedBaseCorners()
-        let disabledCorners = angleOccupied.union(curveOccupied)
+        let disabledCorners = curveOccupied
         return HStack(spacing: 12) {
             cornerPickerField(title: "Corner", selection: $cornerRadius.cornerIndex, labels: labels, dimmedIndices: disabledCorners)
         }

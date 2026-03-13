@@ -568,3 +568,45 @@ struct ShapePathBuilderCutoutCornerTests {
         #expect(newLabelCount == 8) // 4 piece corners + 4 cutout corners
     }
 }
+
+// MARK: - Triangle Top-Right Corner Cut Tests
+
+struct TriangleTopRightCornerCutTests {
+    
+    @Test @MainActor func topRightCornerCutProducesCorrectShape() throws {
+        // 24x24 right triangle with a 4x4 cutout at (22, 2)
+        // This should cut off the top-right corner, leaving a 20" top edge
+        let container = try createTestContainer()
+        let piece = createTestPiece(container: container, shape: .rightTriangle, width: "24", height: "24")
+        
+        // Add cutout: center (22, 2), size 4x4
+        // This spans x: 20-24, y: 0-4
+        let cutout = Cutout(kind: .rectangle, width: 4, height: 4, centerX: 22, centerY: 2)
+        piece.cutouts.append(cutout)
+        
+        let points = ShapePathBuilder.cornerPoints(for: piece, includeAngles: false)
+        
+        // Print points for debugging
+        print("Corner points for top-right corner cut test:")
+        for (i, p) in points.enumerated() {
+            print("  \(i): (\(p.x), \(p.y))")
+        }
+        
+        // The shape should have these key characteristics:
+        // - Top edge should end at x=20 (display coords: y=20 after rotation)
+        // - There should be a corner at (20, 4) in raw coords (display: (4, 20))
+        // - No point should be at (24, 0) in raw coords (display: (0, 24))
+        
+        // Check that the top-right corner (24, 0) raw / (0, 24) display is NOT in the points
+        let hasTopRightCorner = points.contains { p in
+            abs(p.x) < 0.5 && abs(p.y - 24) < 0.5
+        }
+        #expect(!hasTopRightCorner, "Top-right corner should be cut off")
+        
+        // Check that there's a point near (4, 20) in display coords (the corner cut point)
+        let hasCornerCutPoint = points.contains { p in
+            abs(p.x - 4) < 0.5 && abs(p.y - 20) < 0.5
+        }
+        #expect(hasCornerCutPoint, "Should have corner cut point at approximately (4, 20) display coords")
+    }
+}

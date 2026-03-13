@@ -1,4 +1,5 @@
 import SwiftUI
+import iOverlay
 
 struct AngleSegment {
     let id: UUID
@@ -365,7 +366,8 @@ enum ShapePathBuilder {
             if !activeCurves.isEmpty {
                 // Always use the proven edge-based curvedPolygonPath
                 // Corner indices are used to set the edge property, but rendering uses edge-based approach
-                let curvedPath = curvedPolygonPath(points: displayPoints, shape: .rectangle, curves: activeCurves, baseBounds: nil)
+                let mappedCurves = mapCurvesToRawDisplayPoints(curves: activeCurves, displayPoints: displayPoints)
+                let curvedPath = curvedPolygonPath(points: displayPoints, shape: .rectangle, curves: mappedCurves, baseBounds: nil)
                 if !cornerRadii.isEmpty {
                     return applyCornerRadiiToPath(curvedPath, cornerRadii: cornerRadii, piece: piece, displayPoints: displayPoints)
                 }
@@ -388,7 +390,8 @@ enum ShapePathBuilder {
             if !activeCurves.isEmpty {
                 // Always use the proven edge-based curvedPolygonPath
                 // Corner indices are used to set the edge property, but rendering uses edge-based approach
-                let curvedPath = curvedPolygonPath(points: displayPoints, shape: .rightTriangle, curves: activeCurves, baseBounds: baseBounds)
+                let mappedCurves = mapCurvesToRawDisplayPoints(curves: activeCurves, displayPoints: displayPoints)
+                let curvedPath = curvedPolygonPath(points: displayPoints, shape: .rightTriangle, curves: mappedCurves, baseBounds: baseBounds)
                 if !cornerRadii.isEmpty {
                     return applyCornerRadiiToPath(curvedPath, cornerRadii: cornerRadii, piece: piece, displayPoints: displayPoints)
                 }
@@ -493,8 +496,9 @@ enum ShapePathBuilder {
 
         let curveIndexMap = indexMap(from: displayPoints, to: ordered)
         let displayBounds = polygonBounds(displayPoints)
-        let boundarySegments = boundarySegments(for: piece)
-        let mappedCurves: [CurvedEdge] = piece.curvedEdges.filter { $0.radius > 0 }.map { curve in
+        let boundarySegments = boundarySegments(for: displayPoints, shape: piece.shape, bounds: displayBounds)
+        let rawCurves = mapCurvesToRawDisplayPoints(curves: piece.curvedEdges.filter { $0.radius > 0 }, displayPoints: displayPoints)
+        let mappedCurves: [CurvedEdge] = rawCurves.map { curve in
             guard curve.hasSpan else { return curve }
             guard let span = spanIndices(for: curve, boundarySegments: boundarySegments, pointCount: displayPoints.count, bounds: displayBounds, shape: piece.shape),
                   let mappedStart = curveIndexMap[span.start],
@@ -527,6 +531,45 @@ enum ShapePathBuilder {
             shape: piece.shape,
             piece: piece
         )
+    }
+
+    private static func mapCurvesToRawDisplayPoints(curves: [CurvedEdge], displayPoints: [CGPoint]) -> [CurvedEdge] {
+        guard !curves.isEmpty else { return curves }
+        let ordered = reorderCornersClockwise(displayPoints)
+
+        func indexMap(from source: [CGPoint], to target: [CGPoint]) -> [Int: Int] {
+            var map: [Int: Int] = [:]
+            for (sourceIndex, sourcePoint) in source.enumerated() {
+                var bestIndex = 0
+                var bestDistance = CGFloat.greatestFiniteMagnitude
+                for (targetIndex, targetPoint) in target.enumerated() {
+                    let dx = sourcePoint.x - targetPoint.x
+                    let dy = sourcePoint.y - targetPoint.y
+                    let distance = dx * dx + dy * dy
+                    if distance < bestDistance {
+                        bestDistance = distance
+                        bestIndex = targetIndex
+                    }
+                }
+                map[sourceIndex] = bestIndex
+            }
+            return map
+        }
+
+        let labelToRaw = indexMap(from: ordered, to: displayPoints)
+        return curves.map { curve in
+            guard curve.usesCornerIndices else { return curve }
+            let rawStart = labelToRaw[curve.startCornerIndex] ?? curve.startCornerIndex
+            let rawEnd = labelToRaw[curve.endCornerIndex] ?? curve.endCornerIndex
+            let mapped = CurvedEdge(startCornerIndex: rawStart, endCornerIndex: rawEnd, radius: curve.radius, isConcave: curve.isConcave, edge: curve.edge)
+            mapped.startBoundarySegmentIndex = curve.startBoundarySegmentIndex
+            mapped.startBoundaryIsEnd = curve.startBoundaryIsEnd
+            mapped.endBoundarySegmentIndex = curve.endBoundarySegmentIndex
+            mapped.endBoundaryIsEnd = curve.endBoundaryIsEnd
+            mapped.startEdgeProgress = curve.startEdgeProgress
+            mapped.endEdgeProgress = curve.endEdgeProgress
+            return mapped
+        }
     }
 
     static func path(for shape: ShapeKind, size: CGSize, curves: [CurvedEdge]) -> Path {
@@ -694,12 +737,12 @@ enum ShapePathBuilder {
     }
 
     private static func boundaryAngleCuts(for piece: Piece) -> [AngleCut] {
-        let cornerCount = pieceCornerCount(for: piece)
-        return piece.angleCuts.filter { $0.anchorCornerIndex >= 0 && $0.anchorCornerIndex < cornerCount }
+        let polygonCount = displayPolygonPoints(for: piece, includeAngles: false).count
+        return piece.angleCuts.filter { $0.anchorCornerIndex >= 0 && $0.anchorCornerIndex < polygonCount }
     }
 
     private static func pieceCornerRadii(for piece: Piece) -> [CornerRadius] {
-        let cornerCount = pieceCornerCount(for: piece)
+        let cornerCount = displayPolygonPoints(for: piece, includeAngles: false).count
         return piece.cornerRadii.filter { $0.radius > 0 && $0.cornerIndex >= 0 && $0.cornerIndex < cornerCount }
     }
 
@@ -752,7 +795,8 @@ enum ShapePathBuilder {
     }
 
     static func cornerLabelCount(for piece: Piece) -> Int {
-        pieceCornerCount(for: piece) + interiorCutouts(for: piece).count * 4
+        let outlineCount = displayPolygonPoints(for: piece, includeAngles: false).count
+        return outlineCount + interiorCutouts(for: piece).count * 4
     }
 
     static func pieceCornerCount(for piece: Piece) -> Int {
@@ -774,8 +818,8 @@ enum ShapePathBuilder {
     }
 
     static func cutoutCornerRanges(for piece: Piece) -> [(cutout: Cutout, range: Range<Int>)] {
-        let baseCount = pieceCornerCount(for: piece)
-        var nextIndex = baseCount
+        let outlineCount = displayPolygonPoints(for: piece, includeAngles: false).count
+        var nextIndex = outlineCount
         var ranges: [(Cutout, Range<Int>)] = []
         for cutout in interiorCutouts(for: piece) {
             let range = nextIndex..<(nextIndex + 4)
@@ -839,10 +883,14 @@ enum ShapePathBuilder {
         case .rectangle:
             let notches = notchCandidates(for: piece, size: rawSize)
             let angleCuts: [AngleCut]
-            if let limit = angleCutLimit {
-                angleCuts = Array(boundaryAngleCuts(for: piece).prefix(max(0, limit)))
+            if includeAngles {
+                if let limit = angleCutLimit {
+                    angleCuts = Array(boundaryAngleCuts(for: piece).prefix(max(0, limit)))
+                } else {
+                    angleCuts = boundaryAngleCuts(for: piece)
+                }
             } else {
-                angleCuts = includeAngles ? boundaryAngleCuts(for: piece) : []
+                angleCuts = []
             }
             let result = angledRectanglePoints(size: rawSize, notches: notches, angleCuts: angleCuts)
             let displayPoints = result.points.map { displayPoint(fromRaw: $0) }
@@ -850,10 +898,14 @@ enum ShapePathBuilder {
         case .rightTriangle:
             let notches = notchCandidates(for: piece, size: rawSize)
             let angleCuts: [AngleCut]
-            if let limit = angleCutLimit {
-                angleCuts = Array(boundaryAngleCuts(for: piece).prefix(max(0, limit)))
+            if includeAngles {
+                if let limit = angleCutLimit {
+                    angleCuts = Array(boundaryAngleCuts(for: piece).prefix(max(0, limit)))
+                } else {
+                    angleCuts = boundaryAngleCuts(for: piece)
+                }
             } else {
-                angleCuts = includeAngles ? boundaryAngleCuts(for: piece) : []
+                angleCuts = []
             }
             let result = angledRightTrianglePoints(size: rawSize, notches: notches, angleCuts: angleCuts)
             let displayPoints = result.points.map { displayPoint(fromRaw: $0) }
@@ -869,23 +921,33 @@ enum ShapePathBuilder {
         case .rectangle:
             let notches = notchCandidates(for: piece, size: rawSize)
             let angleCuts: [AngleCut]
-            if let limit = angleCutLimit {
-                angleCuts = Array(boundaryAngleCuts(for: piece).prefix(max(0, limit)))
+            if includeAngles {
+                if let limit = angleCutLimit {
+                    angleCuts = Array(boundaryAngleCuts(for: piece).prefix(max(0, limit)))
+                } else {
+                    angleCuts = boundaryAngleCuts(for: piece)
+                }
             } else {
-                angleCuts = includeAngles ? boundaryAngleCuts(for: piece) : []
+                angleCuts = []
             }
             let result = angledRectanglePoints(size: rawSize, notches: notches, angleCuts: angleCuts)
-            return result.points.map { displayPoint(fromRaw: $0) }
+            let displayPoints = result.points.map { displayPoint(fromRaw: $0) }
+            return reorderCornersClockwise(displayPoints)
         case .rightTriangle:
             let notches = notchCandidates(for: piece, size: rawSize)
             let angleCuts: [AngleCut]
-            if let limit = angleCutLimit {
-                angleCuts = Array(boundaryAngleCuts(for: piece).prefix(max(0, limit)))
+            if includeAngles {
+                if let limit = angleCutLimit {
+                    angleCuts = Array(boundaryAngleCuts(for: piece).prefix(max(0, limit)))
+                } else {
+                    angleCuts = boundaryAngleCuts(for: piece)
+                }
             } else {
-                angleCuts = includeAngles ? boundaryAngleCuts(for: piece) : []
+                angleCuts = []
             }
             let result = angledRightTrianglePoints(size: rawSize, notches: notches, angleCuts: angleCuts)
-            return result.points.map { displayPoint(fromRaw: $0) }
+            let displayPoints = result.points.map { displayPoint(fromRaw: $0) }
+            return reorderCornersClockwise(displayPoints)
         default:
             return []
         }
@@ -907,13 +969,19 @@ enum ShapePathBuilder {
     }
 
     private static func angledRectanglePoints(size: CGSize, notches: [Cutout], angleCuts: [AngleCut]) -> (points: [CGPoint], segments: [AngleSegment]) {
-        let base = notches.isEmpty ? rectanglePoints(size: size) : notchRectanglePoints(size: size, notches: notches)
-        return applyAngleCuts(to: base, shape: .rectangle, size: size, angleCuts: angleCuts)
+        let base = rectanglePoints(size: size)
+        let baseAfterNotches = basePolygonAfterNotches(base: base, size: size, shape: .rectangle, notches: notches)
+        let points = applyAngleCutsToPolygon(polygon: baseAfterNotches, angleCuts: angleCuts)
+        let segments = angleCutSegments(polygon: baseAfterNotches, angleCuts: angleCuts)
+        return (points: points, segments: segments)
     }
 
     private static func angledRightTrianglePoints(size: CGSize, notches: [Cutout], angleCuts: [AngleCut]) -> (points: [CGPoint], segments: [AngleSegment]) {
-        let base = notches.isEmpty ? rightTrianglePoints(size: size) : notchRightTrianglePoints(size: size, notches: notches)
-        return applyAngleCuts(to: base, shape: .rightTriangle, size: size, angleCuts: angleCuts)
+        let base = rightTrianglePoints(size: size)
+        let baseAfterNotches = basePolygonAfterNotches(base: base, size: size, shape: .rightTriangle, notches: notches)
+        let points = applyAngleCutsToPolygon(polygon: baseAfterNotches, angleCuts: angleCuts)
+        let segments = angleCutSegments(polygon: baseAfterNotches, angleCuts: angleCuts)
+        return (points: points, segments: segments)
     }
 
     private static func rectanglePoints(size: CGSize) -> [CGPoint] {
@@ -922,6 +990,158 @@ enum ShapePathBuilder {
 
     private static func rightTrianglePoints(size: CGSize) -> [CGPoint] {
         [CGPoint(x: 0, y: 0), CGPoint(x: size.width, y: 0), CGPoint(x: 0, y: size.height)]
+    }
+
+    private static func basePolygonAfterNotches(
+        base: [CGPoint],
+        size: CGSize,
+        shape: ShapeKind,
+        notches: [Cutout]
+    ) -> [CGPoint] {
+        let clipPolygons = notchClipPolygons(notches: notches, size: size, shape: shape)
+        guard !clipPolygons.isEmpty else { return base }
+        return booleanDifference(subject: base, clips: clipPolygons)
+    }
+
+    private static func applyAngleCutsToPolygon(polygon: [CGPoint], angleCuts: [AngleCut]) -> [CGPoint] {
+        guard !angleCuts.isEmpty, polygon.count >= 3 else { return polygon }
+        let displayPolygon = polygon.map { displayPoint(fromRaw: $0) }
+        let orderedDisplay = reorderCornersClockwise(displayPolygon)
+        let cutDisplay = applyAngleCutsDisplay(to: orderedDisplay, angleCuts: angleCuts)
+        let rawPoints = cutDisplay.map { rawPoint(fromDisplay: $0) }
+        return dedupePoints(rawPoints)
+    }
+
+    private static func booleanBasePolygon(
+        base: [CGPoint],
+        size: CGSize,
+        shape: ShapeKind,
+        notches: [Cutout],
+        angleCuts: [AngleCut]
+    ) -> [CGPoint] {
+        let baseAfterNotches = basePolygonAfterNotches(base: base, size: size, shape: shape, notches: notches)
+        return applyAngleCutsToPolygon(polygon: baseAfterNotches, angleCuts: angleCuts)
+    }
+
+    private static func angleCutSegments(polygon: [CGPoint], angleCuts: [AngleCut]) -> [AngleSegment] {
+        guard !angleCuts.isEmpty, polygon.count >= 3 else { return [] }
+        let displayPolygon = reorderCornersClockwise(polygon.map { displayPoint(fromRaw: $0) })
+        var segments: [AngleSegment] = []
+        segments.reserveCapacity(angleCuts.count)
+        for cut in angleCuts {
+            if let segment = angleCutSegmentRaw(cut, polygonDisplay: displayPolygon) {
+                segments.append(segment)
+            }
+        }
+        return segments
+    }
+
+    private static func notchClipPolygons(notches: [Cutout], size: CGSize, shape: ShapeKind) -> [[CGPoint]] {
+        guard !notches.isEmpty else { return [] }
+        var clips: [[CGPoint]] = []
+        clips.reserveCapacity(notches.count)
+        for cutout in notches {
+            guard cutout.kind != .circle else { continue }
+            let corners = GeometryHelpers.cutoutCornerPoints(cutout: cutout, size: size, shape: shape)
+            if corners.count >= 3 {
+                clips.append(corners)
+            }
+        }
+        return clips
+    }
+
+    private static func angleCutPolygonsRaw(
+        polygon: [CGPoint],
+        angleCuts: [AngleCut],
+        polygonDisplay: [CGPoint]? = nil
+    ) -> [[CGPoint]] {
+        guard !angleCuts.isEmpty, polygon.count >= 3 else { return [] }
+        let displayPolygon = polygonDisplay ?? polygon.map { displayPoint(fromRaw: $0) }
+        var clips: [[CGPoint]] = []
+        clips.reserveCapacity(angleCuts.count)
+        for cut in angleCuts {
+            if let polygon = angleCutPolygonRaw(cut, polygonDisplay: displayPolygon) {
+                clips.append(polygon)
+            }
+        }
+        return clips
+    }
+
+    private static func angleCutPolygonRaw(_ cut: AngleCut, polygonDisplay: [CGPoint]) -> [CGPoint]? {
+        let count = polygonDisplay.count
+        guard count >= 3 else { return nil }
+        let anchorIndex = normalizedIndex(cut.anchorCornerIndex, count: count)
+        let prevIndex = normalizedIndex(anchorIndex - 1, count: count)
+        let nextIndex = normalizedIndex(anchorIndex + 1, count: count)
+        let corner = polygonDisplay[anchorIndex]
+        let prev = polygonDisplay[prevIndex]
+        let next = polygonDisplay[nextIndex]
+        let alongEdge1 = abs(cut.anchorOffset)
+        let alongEdge2 = abs(cut.secondaryOffset)
+        let toNext = unitVector(from: corner, to: next)
+        let toPrev = unitVector(from: corner, to: prev)
+        let lenNext = distance(corner, next)
+        let lenPrev = distance(corner, prev)
+        guard alongEdge1 <= lenNext, alongEdge2 <= lenPrev else { return nil }
+
+        let p1 = CGPoint(x: corner.x + toNext.x * alongEdge1, y: corner.y + toNext.y * alongEdge1)
+        let p2 = CGPoint(x: corner.x + toPrev.x * alongEdge2, y: corner.y + toPrev.y * alongEdge2)
+        let apex = corner
+        return [
+            rawPoint(fromDisplay: apex),
+            rawPoint(fromDisplay: p1),
+            rawPoint(fromDisplay: p2)
+        ]
+    }
+
+    private static func angleCutSegmentRaw(_ cut: AngleCut, polygonDisplay: [CGPoint]) -> AngleSegment? {
+        let count = polygonDisplay.count
+        guard count >= 3 else { return nil }
+        let anchorIndex = normalizedIndex(cut.anchorCornerIndex, count: count)
+        let prevIndex = normalizedIndex(anchorIndex - 1, count: count)
+        let nextIndex = normalizedIndex(anchorIndex + 1, count: count)
+        let corner = polygonDisplay[anchorIndex]
+        let prev = polygonDisplay[prevIndex]
+        let next = polygonDisplay[nextIndex]
+        let alongEdge1 = abs(cut.anchorOffset)
+        let alongEdge2 = abs(cut.secondaryOffset)
+        let toNext = unitVector(from: corner, to: next)
+        let toPrev = unitVector(from: corner, to: prev)
+        let lenNext = distance(corner, next)
+        let lenPrev = distance(corner, prev)
+        guard alongEdge1 <= lenNext, alongEdge2 <= lenPrev else { return nil }
+
+        let p1 = CGPoint(x: corner.x + toNext.x * alongEdge1, y: corner.y + toNext.y * alongEdge1)
+        let p2 = CGPoint(x: corner.x + toPrev.x * alongEdge2, y: corner.y + toPrev.y * alongEdge2)
+        return AngleSegment(id: cut.id, start: rawPoint(fromDisplay: p2), end: rawPoint(fromDisplay: p1))
+    }
+
+
+
+    private static func booleanDifference(subject: [CGPoint], clips: [[CGPoint]]) -> [CGPoint] {
+        guard subject.count >= 3 else { return subject }
+        var overlay = CGOverlay()
+        overlay.add(path: subject, type: .subject)
+        for clip in clips where clip.count >= 3 {
+            overlay.add(path: clip, type: .clip)
+        }
+        let graph = overlay.buildGraph()
+        let shapes = graph.extractShapes(overlayRule: .difference)
+        let outerPaths = shapes.compactMap { $0.first }
+        guard !outerPaths.isEmpty else { return subject }
+        let best = outerPaths.max { abs(polygonArea($0)) < abs(polygonArea($1)) }
+        return best ?? subject
+    }
+
+    private static func polygonArea(_ points: [CGPoint]) -> CGFloat {
+        guard points.count >= 3 else { return 0 }
+        var area: CGFloat = 0
+        for index in 0..<points.count {
+            let a = points[index]
+            let b = points[(index + 1) % points.count]
+            area += (a.x * b.y) - (b.x * a.y)
+        }
+        return area / 2
     }
 
     private static func notchRightTrianglePoints(size: CGSize, notches: [Cutout]) -> [CGPoint] {
@@ -935,14 +1155,30 @@ enum ShapePathBuilder {
         var leftSpans: [(start: CGFloat, end: CGFloat, depth: CGFloat)] = []
         // Store hypotenuse notches with their t-values and axis-aligned rect bounds
         var hypotenuseSpans: [(tStart: CGFloat, tEnd: CGFloat, minX: CGFloat, maxX: CGFloat, minY: CGFloat, maxY: CGFloat)] = []
+        
+        // Track notches that touch top edge + hypotenuse (corner cut towards top-right)
+        // These modify where the top edge ends and where the hypotenuse starts
+        var topHypotenuseCornerMinX: CGFloat = width  // leftmost X of top+hypotenuse notch (limits top edge)
+        var topHypotenuseCornerIntersectY: CGFloat = 0 // Y where notch meets hypotenuse
+        var topHypotenuseCornerIntersectX: CGFloat = width // X where notch meets hypotenuse
+        var hasTopHypotenuseCorner = false
+        var topHypotenuseCornerIsClip = false
+        
+        // Track notches that touch left edge + hypotenuse (corner cut towards bottom-left)
+        // These modify where the left edge starts (from bottom) and where the hypotenuse ends
+        var leftHypotenuseCornerEdgeY: CGFloat = height  // Y where notch meets left edge (limits left edge)
+        var leftHypotenuseCornerIntersectX: CGFloat = 0  // X where notch meets hypotenuse
+        var leftHypotenuseCornerIntersectY: CGFloat = height // Y where notch meets hypotenuse
+        var hasLeftHypotenuseCorner = false
+        var leftHypotenuseCornerIsClip = false
 
         for notch in notches {
-            let halfWidth = notch.width / 2
-            let halfHeight = notch.height / 2
-            var minX = max(0, notch.centerX - halfWidth)
-            var maxX = min(width, notch.centerX + halfWidth)
-            var minY = max(0, notch.centerY - halfHeight)
-            var maxY = min(height, notch.centerY + halfHeight)
+            let corners = GeometryHelpers.cutoutCornerPoints(cutout: notch, size: size, shape: .rightTriangle)
+            let bounds = GeometryHelpers.bounds(for: corners)
+            var minX = bounds.minX
+            var maxX = bounds.maxX
+            var minY = bounds.minY
+            var maxY = bounds.maxY
 
             if minX <= edgeEpsilon { minX = 0 }
             if minY <= edgeEpsilon { minY = 0 }
@@ -952,17 +1188,76 @@ enum ShapePathBuilder {
             let touchesTop = minY <= edgeEpsilon
             let touchesLeft = minX <= edgeEpsilon
             let touchesHypotenuse = cutoutTouchesHypotenuse(
-                corners: GeometryHelpers.cutoutCornerPoints(cutout: notch, size: size, shape: .rightTriangle),
+                corners: corners,
                 size: size,
                 eps: edgeEpsilon
             )
+
+            var minValue = CGFloat.greatestFiniteMagnitude
+            var maxValue = -CGFloat.greatestFiniteMagnitude
+            var anyCornerInside = false
+            for corner in corners {
+                let value = (corner.x / max(width, 0.0001)) + (corner.y / max(height, 0.0001)) - 1
+                minValue = min(minValue, value)
+                maxValue = max(maxValue, value)
+                if value < -0.0001, corner.x >= -0.001, corner.y >= -0.001 {
+                    anyCornerInside = true
+                }
+            }
+            let spansHypotenuse = minValue < -0.0001 && maxValue > 0.0001
+            let touchesTopWithinBounds = touchesTop && minX < width - edgeEpsilon
+            let touchesLeftWithinBounds = touchesLeft && minY < height - edgeEpsilon
+            if !(anyCornerInside || spansHypotenuse || touchesTopWithinBounds || touchesLeftWithinBounds) {
+                continue
+            }
 
             if touchesTop && touchesLeft {
                 topLeftMaxX = max(topLeftMaxX, maxX)
                 topLeftMaxY = max(topLeftMaxY, maxY)
             }
-
+            
+            // Handle top + hypotenuse corner: notch touches top edge and hypotenuse (but not left edge)
+            // This creates a corner cut between the top edge and hypotenuse
+            if touchesTop && touchesHypotenuse && !touchesLeft {
+                topHypotenuseCornerMinX = min(topHypotenuseCornerMinX, minX)
+                let yAtMinX = height * (1 - minX / max(width, 0.0001))
+                if yAtMinX < maxY - edgeEpsilon {
+                    // Hypotenuse intersects above the notch bottom; treat as a clipped corner.
+                    topHypotenuseCornerIsClip = true
+                    topHypotenuseCornerIntersectX = min(topHypotenuseCornerIntersectX, minX)
+                    topHypotenuseCornerIntersectY = max(topHypotenuseCornerIntersectY, yAtMinX)
+                } else {
+                    let intersectY = maxY
+                    let intersectX = width * (1 - intersectY / max(height, 0.0001))
+                    topHypotenuseCornerIntersectX = min(topHypotenuseCornerIntersectX, intersectX)
+                    topHypotenuseCornerIntersectY = max(topHypotenuseCornerIntersectY, intersectY)
+                }
+                hasTopHypotenuseCorner = true
+                continue
+            }
+            
+            // Handle left + hypotenuse corner: notch touches left edge and hypotenuse (but not top edge)
+            // This creates a corner cut between the left edge and hypotenuse
+            if touchesLeft && touchesHypotenuse && !touchesTop {
+                leftHypotenuseCornerEdgeY = min(leftHypotenuseCornerEdgeY, minY)
+                let xAtMinY = width * (1 - minY / max(height, 0.0001))
+                if xAtMinY < maxX - edgeEpsilon {
+                    // Hypotenuse intersects left of the notch right edge; treat as a clipped corner.
+                    leftHypotenuseCornerIsClip = true
+                    leftHypotenuseCornerIntersectX = max(leftHypotenuseCornerIntersectX, xAtMinY)
+                    leftHypotenuseCornerIntersectY = min(leftHypotenuseCornerIntersectY, minY)
+                } else {
+                    let intersectX = maxX
+                    let intersectY = height * (1 - intersectX / max(width, 0.0001))
+                    leftHypotenuseCornerIntersectX = max(leftHypotenuseCornerIntersectX, intersectX)
+                    leftHypotenuseCornerIntersectY = min(leftHypotenuseCornerIntersectY, intersectY)
+                }
+                hasLeftHypotenuseCorner = true
+                continue
+            }
+            
             let touchesCount = [touchesTop, touchesLeft, touchesHypotenuse].filter { $0 }.count
+            
             if touchesCount == 1 {
                 if touchesTop {
                     topSpans.append((start: minX, end: maxX, depth: maxY))
@@ -972,16 +1267,6 @@ enum ShapePathBuilder {
                     if let span = cutoutHypotenuseSpan(minX: minX, maxX: maxX, minY: minY, maxY: maxY, size: size) {
                         hypotenuseSpans.append((tStart: span.start, tEnd: span.end, minX: span.minX, maxX: span.maxX, minY: span.minY, maxY: span.maxY))
                     }
-                }
-            } else if touchesHypotenuse {
-                if let span = cutoutHypotenuseSpan(minX: minX, maxX: maxX, minY: minY, maxY: maxY, size: size) {
-                    hypotenuseSpans.append((tStart: span.start, tEnd: span.end, minX: span.minX, maxX: span.maxX, minY: span.minY, maxY: span.maxY))
-                }
-                if touchesTop && !touchesLeft {
-                    topSpans.append((start: minX, end: maxX, depth: maxY))
-                }
-                if touchesLeft && !touchesTop {
-                    leftSpans.append((start: minY, end: maxY, depth: maxX))
                 }
             }
         }
@@ -994,14 +1279,36 @@ enum ShapePathBuilder {
 
         let hypotenuseStart = CGPoint(x: width, y: 0)
         let hypotenuseEnd = CGPoint(x: 0, y: height)
+        
+        // Calculate where the hypotenuse actually starts and ends (accounting for corner cuts)
+        // The t-value represents position along hypotenuse: 0 = top-right corner (width, 0), 1 = bottom-left corner (0, height)
+        var hypotenuseStartT: CGFloat = 0
+        if hasTopHypotenuseCorner {
+            // For top+hypotenuse corner, calculate t where the notch depth meets the hypotenuse
+            // The hypotenuse Y at a given X is: y = height * (1 - x/width)
+            // We want the t-value where y = topHypotenuseCornerIntersectY
+            hypotenuseStartT = topHypotenuseCornerIntersectY / height
+        }
+        
+        var hypotenuseEndT: CGFloat = 1
+        if hasLeftHypotenuseCorner {
+            // For left+hypotenuse corner, calculate t where the notch depth meets the hypotenuse
+            hypotenuseEndT = leftHypotenuseCornerIntersectY / height
+        }
 
         var points: [CGPoint] = []
         let startX = hasTopLeft ? topLeftMaxX : 0
         points.append(CGPoint(x: startX, y: 0))
 
+        // The effective end of the top edge (before top+hypotenuse corner)
+        var topEdgeEndX: CGFloat = width
+        if hasTopHypotenuseCorner {
+            topEdgeEndX = topHypotenuseCornerMinX
+        }
+
         for span in mergedTop {
             let clampedStart = max(span.start, startX)
-            let clampedEnd = min(span.end, width)
+            let clampedEnd = min(span.end, topEdgeEndX)
             if clampedEnd <= clampedStart { continue }
             if points.last?.x ?? 0 < clampedStart {
                 points.append(CGPoint(x: clampedStart, y: 0))
@@ -1010,14 +1317,39 @@ enum ShapePathBuilder {
             points.append(CGPoint(x: clampedEnd, y: span.depth))
             points.append(CGPoint(x: clampedEnd, y: 0))
         }
-        points.append(CGPoint(x: width, y: 0))
+        
+        // End the top edge and transition to hypotenuse
+        if hasTopHypotenuseCorner {
+            // Go to where the top edge ends, then down, then right to the hypotenuse
+            // Path: (topHypotenuseCornerMinX, 0) -> (topHypotenuseCornerMinX, intersectY) -> (point on hypotenuse)
+            if points.last?.x ?? 0 < topHypotenuseCornerMinX {
+                points.append(CGPoint(x: topHypotenuseCornerMinX, y: 0))
+            }
+            if !topHypotenuseCornerIsClip {
+                // Go down to the notch depth for a stepped notch.
+                points.append(CGPoint(x: topHypotenuseCornerMinX, y: topHypotenuseCornerIntersectY))
+            }
+            // Go to where the hypotenuse intersects the notch rectangle (clip or notch)
+            points.append(CGPoint(x: topHypotenuseCornerIntersectX, y: topHypotenuseCornerIntersectY))
+        } else {
+            points.append(CGPoint(x: width, y: 0))
+        }
 
         // Walk along the hypotenuse, inserting notch paths at the right positions
-        var currentT: CGFloat = 0
+        // Start from hypotenuseStartT (which accounts for top-right corner cut)
+        var currentT: CGFloat = hypotenuseStartT
         for span in orderedHypotenuseSpans {
+            // Skip spans that are entirely before the hypotenuse start or after the end (covered by corner cuts)
+            if span.tEnd <= hypotenuseStartT { continue }
+            if span.tStart >= hypotenuseEndT { continue }
+            
+            // Clamp span to the effective hypotenuse range
+            let effectiveSpanStart = max(span.tStart, hypotenuseStartT)
+            let effectiveSpanEnd = min(span.tEnd, hypotenuseEndT)
+            
             // If there's a gap before this notch, add the hypotenuse point at the notch entry
-            if span.tStart > currentT + 0.0001 {
-                let entryPoint = pointOnHypotenuse(start: hypotenuseStart, end: hypotenuseEnd, t: span.tStart)
+            if effectiveSpanStart > currentT + 0.0001 {
+                let entryPoint = pointOnHypotenuse(start: hypotenuseStart, end: hypotenuseEnd, t: effectiveSpanStart)
                 if let last = points.last, GeometryHelpers.distance(last, entryPoint) > 0.001 {
                     points.append(entryPoint)
                 }
@@ -1025,8 +1357,8 @@ enum ShapePathBuilder {
             
             // Add the axis-aligned notch path (going into the triangle)
             let notchPath = axisAlignedHypotenuseNotchPath(
-                tStart: span.tStart,
-                tEnd: span.tEnd,
+                tStart: effectiveSpanStart,
+                tEnd: effectiveSpanEnd,
                 minX: span.minX,
                 maxX: span.maxX,
                 minY: span.minY,
@@ -1039,19 +1371,44 @@ enum ShapePathBuilder {
                 }
             }
             
-            currentT = span.tEnd
+            currentT = effectiveSpanEnd
         }
         
-        // Add the final hypotenuse endpoint if we haven't reached it
-        let finalPoint = CGPoint(x: 0, y: height)
-        if let last = points.last, GeometryHelpers.distance(last, finalPoint) > 0.001 {
-            points.append(finalPoint)
+        // Add the final hypotenuse endpoint or corner cut point
+        if hasLeftHypotenuseCorner {
+            // Go from hypotenuse to the corner point, then down to where the left edge starts
+            let hypEntryPoint = CGPoint(x: leftHypotenuseCornerIntersectX, y: leftHypotenuseCornerIntersectY)
+            if let last = points.last, GeometryHelpers.distance(last, hypEntryPoint) > 0.001 {
+                points.append(hypEntryPoint)
+            }
+            if leftHypotenuseCornerIsClip {
+                points.append(CGPoint(x: 0, y: height))
+            } else {
+                // Go down to the notch top edge
+                points.append(CGPoint(x: leftHypotenuseCornerIntersectX, y: leftHypotenuseCornerEdgeY))
+                // Go left to the left edge
+                points.append(CGPoint(x: 0, y: leftHypotenuseCornerEdgeY))
+            }
+        } else {
+            let finalPoint = CGPoint(x: 0, y: height)
+            if let last = points.last, GeometryHelpers.distance(last, finalPoint) > 0.001 {
+                points.append(finalPoint)
+            }
         }
 
+        // The effective top of the left edge (after left+hypotenuse corner)
+        var leftEdgeStartY: CGFloat = height
+        if hasLeftHypotenuseCorner {
+            leftEdgeStartY = leftHypotenuseCornerEdgeY
+        }
         let leftUpY = hasTopLeft ? topLeftMaxY : 0
+        
+        // First, go along the left edge from the corner cut (or bottom) upward
+        // Note: for hasLeftHypotenuseCorner, we already added (0, leftHypotenuseCornerEdgeY) above
+        
         for span in mergedLeft.reversed() {
             let clampedStart = max(span.start, leftUpY)
-            let clampedEnd = min(span.end, height)
+            let clampedEnd = min(span.end, leftEdgeStartY)
             if clampedEnd <= clampedStart { continue }
             if points.last?.y ?? height > clampedEnd {
                 points.append(CGPoint(x: 0, y: clampedEnd))

@@ -23,6 +23,10 @@
 		};
 /* End PBXContainerItemProxy section */
 
+/* Begin PBXBuildFile section */
+		AAAC36C4F9DB4875A3A22D68 /* iOverlay in Frameworks */ = {isa = PBXBuildFile; productRef = 4C657334C2CB4D1DB980B1A6 /* iOverlay */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXFileReference section */
 		8CE7D4BF2F42A829005C2965 /* FabSpecPro.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = FabSpecPro.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		8CE7D4D02F42A82B005C2965 /* FabSpecProTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = FabSpecProTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -65,6 +69,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				AAAC36C4F9DB4875A3A22D68 /* iOverlay in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -125,6 +130,7 @@
 			);
 			name = FabSpecPro;
 			packageProductDependencies = (
+				4C657334C2CB4D1DB980B1A6 /* iOverlay */,
 			);
 			productName = FabSpecPro;
 			productReference = 8CE7D4BF2F42A829005C2965 /* FabSpecPro.app */;
@@ -208,6 +214,9 @@
 			);
 			mainGroup = 8CE7D4B62F42A829005C2965;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				250C9C5AF5BB440FA8F46829 /* XCRemoteSwiftPackageReference "iOverlay" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 8CE7D4C02F42A829005C2965 /* Products */;
 			projectDirPath = "";
@@ -280,6 +289,25 @@
 			targetProxy = 8CE7D4DB2F42A82B005C2965 /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		250C9C5AF5BB440FA8F46829 /* XCRemoteSwiftPackageReference "iOverlay" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/iShape-Swift/iOverlay";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 1.22.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		4C657334C2CB4D1DB980B1A6 /* iOverlay */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 250C9C5AF5BB440FA8F46829 /* XCRemoteSwiftPackageReference "iOverlay" */;
+			productName = iOverlay;
+		};
+/* End XCSwiftPackageProductDependency section */
 
 /* Begin XCBuildConfiguration section */
 		8CE7D4E42F42A82B005C2965 /* Debug */ = {

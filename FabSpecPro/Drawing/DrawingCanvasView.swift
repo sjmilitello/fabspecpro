@@ -252,12 +252,29 @@ struct DrawingCanvasView: View {
                 context.draw(depthLabel, at: widthPoint, anchor: .center)
             }
         case .rightTriangle:
-            let legALabel = lengthLabel
-            let legBLabel = depthLabel
-            let lengthPoint = CGPoint(x: origin.x + width / 2, y: top - lengthLabelPadding)
-            let widthPoint = CGPoint(x: left - widthLabelPadding, y: origin.y + height / 2)
-            context.draw(legALabel, at: lengthPoint, anchor: .center)
-            context.draw(legBLabel, at: widthPoint, anchor: .center)
+            // Draw segment labels for split edges (when notches create multiple segments)
+            drawSegmentDimensionLabels(in: &context, metrics: metrics)
+            
+            // Check if edges are split into multiple segments by notches
+            let segmentGroups = Dictionary(grouping: ShapePathBuilder.boundarySegments(for: piece), by: { $0.edge })
+            let segmentCounts: [EdgePosition: Int] = [
+                .legA: segmentGroups[.legA]?.count ?? (segmentGroups.isEmpty ? 1 : 0),
+                .legB: segmentGroups[.legB]?.count ?? (segmentGroups.isEmpty ? 1 : 0),
+                .hypotenuse: segmentGroups[.hypotenuse]?.count ?? (segmentGroups.isEmpty ? 1 : 0)
+            ]
+            
+            // Only draw full leg labels if the edge is not split into multiple segments
+            if segmentCounts[.legA] == 1 {
+                let legALabel = lengthLabel
+                let lengthPoint = CGPoint(x: origin.x + width / 2, y: top - lengthLabelPadding)
+                context.draw(legALabel, at: lengthPoint, anchor: .center)
+            }
+            
+            if segmentCounts[.legB] == 1 {
+                let legBLabel = depthLabel
+                let widthPoint = CGPoint(x: left - widthLabelPadding, y: origin.y + height / 2)
+                context.draw(legBLabel, at: widthPoint, anchor: .center)
+            }
         }
     }
 
@@ -309,20 +326,25 @@ struct DrawingCanvasView: View {
                 .font(.system(size: labelFontSize, weight: .semibold))
                 .foregroundStyle(Theme.secondaryText)
             let isConcave = isConcaveCorner(points: pieceCorners, index: index, clockwise: isPieceClockwise)
-            let direction = notchCornerDirectionIfApplicable(point: point)
-                ?? concaveCornerDirection(
-                    point: point,
-                    bounds: pieceBounds,
-                    shape: piece.shape,
-                    isConcave: isConcave
-                )
+            
+            // Check if this is a notch corner first - notch corners get special diagonal directions
+            let notchDirection = notchCornerDirectionIfApplicable(point: point)
+            let concaveDirection = concaveCornerDirection(
+                point: point,
+                bounds: pieceBounds,
+                shape: piece.shape,
+                isConcave: isConcave
+            )
+            let direction = notchDirection
+                ?? concaveDirection
                 ?? cornerLabelDirection(points: pieceCorners, index: index, center: pieceCenter, clockwise: isPieceClockwise)
             
-            // For points on the hypotenuse, use the hypotenuse outward normal direction
-            // to push the label perpendicular to the line, not along it
+            // For points on the hypotenuse that are NOT notch corners or concave corners,
+            // use the hypotenuse outward normal direction to push the label perpendicular to the line.
+            // Concave corners (like F and G from notch cutouts) should use their diagonal direction instead.
             var finalDirection = direction
             let labelOffset: CGFloat
-            if piece.shape == .rightTriangle && isPointOnHypotenuse(point: point, pieceSize: metrics.pieceSize) {
+            if piece.shape == .rightTriangle && notchDirection == nil && concaveDirection == nil && isPointOnHypotenuse(point: point, pieceSize: metrics.pieceSize) {
                 // Hypotenuse normal points outward (toward bottom-right)
                 finalDirection = hypotenuseOutwardNormal(pieceSize: metrics.pieceSize)
                 labelOffset = hypotenuseLabelOffset
@@ -539,8 +561,16 @@ struct DrawingCanvasView: View {
                 let maxY = displayCutout.centerY + halfHeight + tolerance
                 
                 if point.x >= minX && point.x <= maxX && point.y >= minY && point.y <= maxY {
-                    let center = CGPoint(x: displayCutout.centerX, y: displayCutout.centerY)
-                    return unitVector(from: center, to: point)
+                    // For hypotenuse notch corners, use diagonal directions like a rectangle
+                    // Determine which corner of the notch this point is closest to
+                    let isLeftHalf = point.x < displayCutout.centerX
+                    let isTopHalf = point.y < displayCutout.centerY
+                    
+                    // Return diagonal direction based on corner position (like rectangle corners)
+                    let dirX: CGFloat = isLeftHalf ? -1 : 1
+                    let dirY: CGFloat = isTopHalf ? -1 : 1
+                    let length = sqrt(2.0)
+                    return CGPoint(x: dirX / length, y: dirY / length)
                 }
             }
         }
@@ -767,14 +797,8 @@ struct DrawingCanvasView: View {
             let code = assignment.treatmentAbbreviation
             guard !code.isEmpty else { continue }
             guard assignment.cutoutEdge == nil, assignment.angleEdgeId == nil else { continue }
-            if piece.shape == .rightTriangle {
-                switch assignment.edge {
-                case .top, .right, .bottom, .left:
-                    continue
-                default:
-                    break
-                }
-            }
+            // Check for segment assignments BEFORE the right triangle edge filter
+            // because segment edgeRaw is "segment:edge:index" which doesn't parse as EdgePosition
             if let segmentEdge = assignment.segmentEdge {
                 if let segment = boundarySegments.first(where: { $0.edge == segmentEdge.edge && $0.index == segmentEdge.index }) {
                     let label = Text(code)
@@ -785,14 +809,24 @@ struct DrawingCanvasView: View {
                 }
                 continue
             }
-            if piece.shape == .rectangle, (segmentCounts[assignment.edge] ?? 0) > 1 {
-                let hasSegmentAssignments = piece.edgeAssignments.contains { $0.segmentEdge?.edge == assignment.edge }
-                if hasSegmentAssignments {
+            if piece.shape == .rightTriangle {
+                switch assignment.edge {
+                case .top, .right, .bottom, .left:
                     continue
+                default:
+                    break
                 }
-                if (piece.curve(for: assignment.edge)?.radius ?? 0) <= 0 {
-                    continue
-                }
+            }
+            // Skip whole-edge treatments when segments exist and there are segment assignments
+            let edgeSegmentCount = segmentCounts[assignment.edge] ?? 0
+            let hasSegmentAssignments = piece.edgeAssignments.contains { $0.segmentEdge?.edge == assignment.edge }
+            if hasSegmentAssignments {
+                // If there are segment-specific treatments for this edge, skip the whole-edge treatment
+                continue
+            }
+            // Also skip whole-edge treatments for edges with multiple segments (unless curved)
+            if edgeSegmentCount > 1 && (piece.curve(for: assignment.edge)?.radius ?? 0) <= 0 {
+                continue
             }
             let label = Text(code)
                 .font(.system(size: labelFontSize, weight: .bold))
@@ -1142,6 +1176,13 @@ struct DrawingCanvasView: View {
             if verticalLen > 0 {
                 verticalCenterY = segmentCenterOnLine(points: polygon, isVertical: true, value: interiorX, rangeMin: minY, rangeMax: maxY)
             }
+        } else if touchesTop || touchesBottom {
+            // For notches that touch top/bottom but not left/right, calculate the visible vertical length
+            // as the portion of the cutout that's inside the piece bounds
+            let clippedMinY = max(minY, 0)
+            let clippedMaxY = min(maxY, pieceHeight)
+            verticalLen = clippedMaxY - clippedMinY
+            verticalCenterY = (clippedMinY + clippedMaxY) / 2
         }
         var horizontalLen: CGFloat = 0
         var horizontalCenterX: CGFloat = displayCutout.centerX
@@ -1150,6 +1191,13 @@ struct DrawingCanvasView: View {
             if horizontalLen > 0 {
                 horizontalCenterX = segmentCenterOnLine(points: polygon, isVertical: false, value: interiorY, rangeMin: minX, rangeMax: maxX)
             }
+        } else if touchesLeft || touchesRight {
+            // For notches that touch left/right but not top/bottom, calculate the visible horizontal length
+            // as the portion of the cutout that's inside the piece bounds
+            let clippedMinX = max(minX, 0)
+            let clippedMaxX = min(maxX, pieceWidth)
+            horizontalLen = clippedMaxX - clippedMinX
+            horizontalCenterX = (clippedMinX + clippedMaxX) / 2
         }
 
         guard verticalLen > 0 || horizontalLen > 0 else { return nil }
@@ -1260,10 +1308,17 @@ struct DrawingCanvasView: View {
         for (edge, edgeSegments) in grouped where edgeSegments.count > 1 {
             for segment in edgeSegments {
                 let lengthValue: CGFloat
-                if edge == .top || edge == .bottom {
+                // For horizontal edges (top, bottom, legA), use x-coordinate difference
+                // For vertical edges (left, right, legB), use y-coordinate difference
+                if edge == .top || edge == .bottom || edge == .legA {
                     lengthValue = abs(segment.end.x - segment.start.x)
-                } else {
+                } else if edge == .left || edge == .right || edge == .legB {
                     lengthValue = abs(segment.end.y - segment.start.y)
+                } else {
+                    // For hypotenuse or other diagonal edges, calculate actual distance
+                    let dx = segment.end.x - segment.start.x
+                    let dy = segment.end.y - segment.start.y
+                    lengthValue = sqrt(dx * dx + dy * dy)
                 }
                 let text = MeasurementParser.formatInches(Double(lengthValue))
                 let label = Text("\(text)\"")
@@ -1531,21 +1586,16 @@ struct DrawingCanvasView: View {
                 return metrics.toCanvas(adjusted)
             }
         }
-        let baseOffset = 6 / max(metrics.scale, 0.01)
-        let direction: CGPoint
-        switch segment.edge {
-        case .top:
-            direction = CGPoint(x: 0, y: -1)
-        case .bottom:
-            direction = CGPoint(x: 0, y: 1)
-        case .left:
-            direction = CGPoint(x: -1, y: 0)
-        case .right:
-            direction = CGPoint(x: 1, y: 0)
-        default:
-            direction = CGPoint(x: 0, y: -1)
-        }
-        let adjusted = CGPoint(x: mid.x + direction.x * baseOffset, y: mid.y + direction.y * baseOffset)
+        // Use polygon-aware positioning for all shapes
+        let polygon = ShapePathBuilder.displayPolygonPoints(for: piece, includeAngles: true)
+        let offsetDistance = 8 / max(metrics.scale, 0.01)
+        let adjusted = offsetOutsidePolygon(
+            point: mid,
+            segmentStart: segment.start,
+            segmentEnd: segment.end,
+            polygon: polygon,
+            distance: offsetDistance
+        )
         return metrics.toCanvas(adjusted)
     }
 
@@ -2244,8 +2294,47 @@ private extension EdgeTapGestureOverlay {
                 (.legB, abs(point.x - rect.minX)),
                 (.hypotenuse, hypDistance)
             ]
-            if let edge = bestEdge(from: distances, curveMap: curveMap, point: point, rect: rect, threshold: threshold) {
-                return EdgeTapTarget(edge: edge, segmentIndex: nil)
+            // Check for split segments (from notches) similar to rectangle case
+            let segmentGroups = Dictionary(grouping: boundarySegments, by: { $0.edge })
+            let hasMissingEdges = segmentGroups.keys.count < 3
+            if let targetEdge = bestEdge(from: distances, curveMap: curveMap, point: point, rect: rect, threshold: threshold) {
+                let edgeSegments = boundarySegments.filter { $0.edge == targetEdge }
+                let edgeHasMultipleSegments = edgeSegments.count > 1
+                if edgeHasMultipleSegments || hasMissingEdges {
+                    if let closest = edgeSegments.min(by: { lhs, rhs in
+                        let lhsMid = CGPoint(x: (lhs.start.x + lhs.end.x) / 2, y: (lhs.start.y + lhs.end.y) / 2)
+                        let rhsMid = CGPoint(x: (rhs.start.x + rhs.end.x) / 2, y: (rhs.start.y + rhs.end.y) / 2)
+                        let pointPiece = metrics.toPiece(point)
+                        let lhsAxis: CGFloat
+                        let rhsAxis: CGFloat
+                        switch targetEdge {
+                        case .left, .right, .legB:
+                            lhsAxis = abs(pointPiece.y - lhsMid.y)
+                            rhsAxis = abs(pointPiece.y - rhsMid.y)
+                        case .top, .bottom, .legA:
+                            lhsAxis = abs(pointPiece.x - lhsMid.x)
+                            rhsAxis = abs(pointPiece.x - rhsMid.x)
+                        case .hypotenuse:
+                            lhsAxis = abs(pointPiece.x - lhsMid.x) + abs(pointPiece.y - lhsMid.y)
+                            rhsAxis = abs(pointPiece.x - rhsMid.x) + abs(pointPiece.y - rhsMid.y)
+                        }
+                        if abs(lhsAxis - rhsAxis) < 0.0001 {
+                            let lhsStart = metrics.toCanvas(lhs.start)
+                            let lhsEnd = metrics.toCanvas(lhs.end)
+                            let rhsStart = metrics.toCanvas(rhs.start)
+                            let rhsEnd = metrics.toCanvas(rhs.end)
+                            let lhsDistance = distanceToSegment(point: point, a: lhsStart, b: lhsEnd)
+                            let rhsDistance = distanceToSegment(point: point, a: rhsStart, b: rhsEnd)
+                            return lhsDistance < rhsDistance
+                        }
+                        return lhsAxis < rhsAxis
+                    }) {
+                        let segmentIndex = edgeHasMultipleSegments ? closest.index : nil
+                        return EdgeTapTarget(edge: closest.edge, segmentIndex: segmentIndex)
+                    }
+                }
+                // Edge doesn't have multiple segments, return without segment index
+                return EdgeTapTarget(edge: targetEdge, segmentIndex: nil)
             }
             return nil
         case .quarterCircle:

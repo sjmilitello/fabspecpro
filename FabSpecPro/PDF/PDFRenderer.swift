@@ -955,7 +955,8 @@ enum PDFRenderer {
         context.addPath(cgPath)
         context.strokePath()
 
-        for cutout in piece.cutouts where cutout.centerX >= 0 && cutout.centerY >= 0 && !isEffectiveNotch(cutout: cutout, size: size, shape: piece.shape) {
+        let rawSize = ShapePathBuilder.pieceSize(for: piece)
+        for cutout in piece.cutouts where cutout.centerX >= 0 && cutout.centerY >= 0 && !isEffectiveNotch(cutout: cutout, size: size, shape: piece.shape) && !isCornerCut(cutout: cutout, pieceSize: rawSize, shape: piece.shape) {
             let displayCutout = displayCutout(for: cutout)
             let angleCuts = localAngleCuts(for: cutout, piece: piece)
             let cornerRadii = localCornerRadii(for: cutout, piece: piece)
@@ -1125,8 +1126,9 @@ enum PDFRenderer {
     }
 
     private static func drawCutoutDimensionLabels(in context: CGContext, piece: Piece, size: CGSize, scale: CGFloat, offsetX: CGFloat, offsetY: CGFloat) {
-        // Get cutouts that are NOT notches (interior holes)
-        let cutouts = piece.cutouts.filter { !isEffectiveNotch(cutout: $0, size: size, shape: piece.shape) && $0.centerX >= 0 && $0.centerY >= 0 && $0.kind != .circle }
+        // Get cutouts that are NOT notches (interior holes) and NOT corner cuts
+        let rawSize = ShapePathBuilder.pieceSize(for: piece)
+        let cutouts = piece.cutouts.filter { !isEffectiveNotch(cutout: $0, size: size, shape: piece.shape) && !isCornerCut(cutout: $0, pieceSize: rawSize, shape: piece.shape) && $0.centerX >= 0 && $0.centerY >= 0 && $0.kind != .circle }
         guard !cutouts.isEmpty else { return }
 
         for cutout in cutouts {
@@ -1386,6 +1388,40 @@ enum PDFRenderer {
         let maxY = bounds.maxY
         let eps: CGFloat = 0.01
         return minX <= eps || minY <= eps || maxX >= size.width - eps || maxY >= size.height - eps
+    }
+
+    /// Detects if a cutout is a "corner cut" that removes an entire corner of the triangle.
+    /// Corner cuts touch two adjacent edges and extend to a corner point.
+    /// Uses raw (non-display) coordinates since that's how cutouts are stored.
+    private static func isCornerCut(cutout: Cutout, pieceSize: CGSize, shape: ShapeKind) -> Bool {
+        guard shape == .rightTriangle else { return false }
+        
+        let width = pieceSize.width
+        let height = pieceSize.height
+        let edgeEpsilon: CGFloat = 0.5
+        
+        let halfWidth = cutout.width / 2
+        let halfHeight = cutout.height / 2
+        let minX = max(0, cutout.centerX - halfWidth)
+        let maxX = min(width, cutout.centerX + halfWidth)
+        let minY = max(0, cutout.centerY - halfHeight)
+        let maxY = min(height, cutout.centerY + halfHeight)
+        
+        let touchesTop = minY <= edgeEpsilon
+        let touchesLeft = minX <= edgeEpsilon
+        let touchesRight = maxX >= width - edgeEpsilon
+        let touchesBottom = maxY >= height - edgeEpsilon
+        
+        // Top-left corner cut: touches top and left edges
+        if touchesTop && touchesLeft { return true }
+        
+        // Top-right corner cut (raw coords): touches top and right edge
+        if touchesTop && touchesRight && !touchesLeft { return true }
+        
+        // Bottom-left corner cut (raw coords): touches left and bottom edge
+        if touchesLeft && touchesBottom && !touchesTop { return true }
+        
+        return false
     }
 
     /// Returns the position for a segment's edge notation label (like "PE"), accounting for curved edges
@@ -2371,8 +2407,9 @@ enum PDFRenderer {
     }
 
     private static func cutoutNoteLines(for piece: Piece) -> [String] {
+        let rawSize = ShapePathBuilder.pieceSize(for: piece)
         let visibleCutouts = piece.cutouts.filter { $0.centerX >= 0 && $0.centerY >= 0 }
-        let holes = visibleCutouts.filter { !isEffectiveNotch(cutout: $0, size: ShapePathBuilder.pieceSize(for: piece), shape: piece.shape) }
+        let holes = visibleCutouts.filter { !isEffectiveNotch(cutout: $0, size: rawSize, shape: piece.shape) && !isCornerCut(cutout: $0, pieceSize: rawSize, shape: piece.shape) }
         var lines: [String] = []
         // Curves are stored with display edge positions
         let displayLeftCurveOffset = curveEdgeOffset(piece: piece, edge: .left)
