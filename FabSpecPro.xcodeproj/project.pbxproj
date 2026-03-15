@@ -6,6 +6,10 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		AAAC36C4F9DB4875A3A22D68 /* iOverlay in Frameworks */ = {isa = PBXBuildFile; productRef = 4C657334C2CB4D1DB980B1A6 /* iOverlay */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXContainerItemProxy section */
 		8CE7D4D12F42A82B005C2965 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -22,10 +26,6 @@
 			remoteInfo = FabSpecPro;
 		};
 /* End PBXContainerItemProxy section */
-
-/* Begin PBXBuildFile section */
-		AAAC36C4F9DB4875A3A22D68 /* iOverlay in Frameworks */ = {isa = PBXBuildFile; productRef = 4C657334C2CB4D1DB980B1A6 /* iOverlay */; };
-/* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
 		8CE7D4BF2F42A829005C2965 /* FabSpecPro.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = FabSpecPro.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -289,25 +289,6 @@
 			targetProxy = 8CE7D4DB2F42A82B005C2965 /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
-
-/* Begin XCRemoteSwiftPackageReference section */
-		250C9C5AF5BB440FA8F46829 /* XCRemoteSwiftPackageReference "iOverlay" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/iShape-Swift/iOverlay";
-			requirement = {
-				kind = upToNextMajorVersion;
-				minimumVersion = 1.22.0;
-			};
-		};
-/* End XCRemoteSwiftPackageReference section */
-
-/* Begin XCSwiftPackageProductDependency section */
-		4C657334C2CB4D1DB980B1A6 /* iOverlay */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = 250C9C5AF5BB440FA8F46829 /* XCRemoteSwiftPackageReference "iOverlay" */;
-			productName = iOverlay;
-		};
-/* End XCSwiftPackageProductDependency section */
 
 /* Begin XCBuildConfiguration section */
 		8CE7D4E42F42A82B005C2965 /* Debug */ = {
@@ -658,6 +639,25 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		250C9C5AF5BB440FA8F46829 /* XCRemoteSwiftPackageReference "iOverlay" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/iShape-Swift/iOverlay";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 1.22.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		4C657334C2CB4D1DB980B1A6 /* iOverlay */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 250C9C5AF5BB440FA8F46829 /* XCRemoteSwiftPackageReference "iOverlay" */;
+			productName = iOverlay;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 8CE7D4B72F42A829005C2965 /* Project object */;
 }

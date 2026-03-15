@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import CoreGraphics
 import Testing
 @testable import FabSpecPro
 
@@ -369,29 +370,30 @@ struct GeometryHelpersCoordinateTests {
     
     @Test func displayPointFromRaw() {
         let raw = CGPoint(x: 5, y: 10)
-        let display = GeometryHelpers.displayPoint(fromRaw: raw)
+        let display = ShapePathBuilder.displayPoint(fromRaw: raw)
         #expect(display.x == 10)
         #expect(display.y == 5)
     }
     
     @Test func rawPointFromDisplay() {
         let display = CGPoint(x: 10, y: 5)
-        let raw = GeometryHelpers.rawPoint(fromDisplay: display)
+        let raw = ShapePathBuilder.rawPoint(fromDisplay: display)
         #expect(raw.x == 5)
         #expect(raw.y == 10)
     }
     
-    @Test func displaySizeFromRaw() {
-        let raw = CGSize(width: 24, height: 18)
-        let display = GeometryHelpers.displaySize(fromRaw: raw)
+    @Test @MainActor func displaySizeFromRaw() throws {
+        let container = try createTestContainer()
+        let piece = createTestPiece(container: container, width: "24", height: "18")
+        let display = ShapePathBuilder.displaySize(for: piece)
         #expect(display.width == 18)
         #expect(display.height == 24)
     }
     
     @Test func roundTripCoordinateTransform() {
         let original = CGPoint(x: 7, y: 13)
-        let display = GeometryHelpers.displayPoint(fromRaw: original)
-        let backToRaw = GeometryHelpers.rawPoint(fromDisplay: display)
+        let display = ShapePathBuilder.displayPoint(fromRaw: original)
+        let backToRaw = ShapePathBuilder.rawPoint(fromDisplay: display)
         #expect(backToRaw.x == original.x)
         #expect(backToRaw.y == original.y)
     }

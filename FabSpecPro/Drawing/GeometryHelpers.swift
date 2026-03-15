@@ -47,9 +47,14 @@ enum GeometryHelpers {
     }
 
     static func cutoutCornerPoints(cutout: Cutout, size: CGSize, shape: ShapeKind) -> [CGPoint] {
-        let halfWidth = cutout.width / 2
-        let halfHeight = cutout.height / 2
         let center = CGPoint(x: cutout.centerX, y: cutout.centerY)
+        let angle = cutoutRotationAngle(cutout: cutout, size: size, shape: shape)
+        // For hypotenuse-oriented cutouts, swap width/height so that:
+        // - width is perpendicular to the hypotenuse
+        // - height (length) is parallel to the hypotenuse
+        let isHypotenuseOriented = shape == .rightTriangle && cutout.orientation == .hypotenuse
+        let halfWidth = (isHypotenuseOriented ? cutout.height : cutout.width) / 2
+        let halfHeight = (isHypotenuseOriented ? cutout.width : cutout.height) / 2
         let base = [
             CGPoint(x: center.x - halfWidth, y: center.y - halfHeight),
             CGPoint(x: center.x + halfWidth, y: center.y - halfHeight),
@@ -57,7 +62,6 @@ enum GeometryHelpers {
             CGPoint(x: center.x - halfWidth, y: center.y + halfHeight)
         ]
 
-        let angle = cutoutRotationAngle(cutout: cutout, size: size, shape: shape)
         if abs(angle) < 0.0001 {
             return base
         }

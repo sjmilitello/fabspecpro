@@ -20,7 +20,6 @@ struct DrawingCanvasView: View {
         GeometryReader { proxy in
             let metrics = DrawingMetrics(piece: piece, in: proxy.size)
             let rawPieceSize = ShapePathBuilder.pieceSize(for: piece)
-            let displayPieceSize = ShapePathBuilder.displaySize(for: piece)
 
             ZStack {
                 Canvas { context, _ in
@@ -37,11 +36,14 @@ struct DrawingCanvasView: View {
                         let displayCutout = rotatedCutout(cutout)
                         let angleCuts = localAngleCuts(for: cutout)
                         let cornerRadii = localCornerRadii(for: cutout)
+                        // Use rawPieceSize for rotation angle calculation to match notch rendering
+                        // The displayCutout has swapped coordinates, and rawPieceSize ensures
+                        // the rotation angle is computed consistently with how notches are rendered
                         let cutoutPath = ShapePathBuilder.cutoutPath(
                             displayCutout,
                             angleCuts: angleCuts,
                             cornerRadii: cornerRadii,
-                            size: displayPieceSize,
+                            size: rawPieceSize,
                             shape: piece.shape
                         )
                         layerContext.stroke(cutoutPath, with: .color(Theme.accent), lineWidth: strokeWidth)
@@ -319,6 +321,9 @@ struct DrawingCanvasView: View {
         let pieceBounds = bounds(for: pieceCorners)
         let baseCorners = baseShapeCorners()
         let pieceCenter = CGPoint(x: (pieceBounds.minX + pieceBounds.maxX) / 2, y: (pieceBounds.minY + pieceBounds.maxY) / 2)
+        let basePolygon = ShapePathBuilder.displayPolygonPoints(for: piece, includeAngles: false, includeNotches: false)
+        let baseBounds = basePolygon.isEmpty ? pieceBounds : bounds(for: basePolygon)
+        let baseCenter = CGPoint(x: (baseBounds.minX + baseBounds.maxX) / 2, y: (baseBounds.minY + baseBounds.maxY) / 2)
         let isPieceClockwise = polygonIsClockwise(pieceCorners)
 
         for (index, point) in pieceCorners.enumerated() {
@@ -335,33 +340,67 @@ struct DrawingCanvasView: View {
                 shape: piece.shape,
                 isConcave: isConcave
             )
+            let baseDirection = isBaseCorner(point: point, baseCorners: baseCorners, tolerance: 0.5)
+                ? unitVector(from: baseCenter, to: point)
+                : nil
             let direction = notchDirection
                 ?? concaveDirection
+                ?? baseDirection
                 ?? cornerLabelDirection(points: pieceCorners, index: index, center: pieceCenter, clockwise: isPieceClockwise)
             
             // For points on the hypotenuse that are NOT notch corners or concave corners,
             // use the hypotenuse outward normal direction to push the label perpendicular to the line.
             // Concave corners (like F and G from notch cutouts) should use their diagonal direction instead.
             var finalDirection = direction
-            let labelOffset: CGFloat
-            if piece.shape == .rightTriangle && notchDirection == nil && concaveDirection == nil && isPointOnHypotenuse(point: point, pieceSize: metrics.pieceSize) {
-                // Hypotenuse normal points outward (toward bottom-right)
-                finalDirection = hypotenuseOutwardNormal(pieceSize: metrics.pieceSize)
-                labelOffset = hypotenuseLabelOffset
+            var labelOffset: CGFloat = baseLabelOffset
+            var basePoint = point
+
+            let boundaryEdges = edgesContaining(point: point, bounds: pieceBounds, shape: piece.shape, tolerance: 0.5)
+            if let curvedEdge = boundaryEdges.first(where: { piece.curve(for: $0)?.radius ?? 0 > 0 }),
+               let curve = piece.curve(for: curvedEdge),
+               let geometry = fullEdgeGeometryDisplay(edge: curvedEdge) {
+                let t = edgeProgress(point: point, geometry: geometry, edge: curvedEdge)
+                let control = controlPointDisplay(for: geometry, curve: curve)
+                let curvePoint = quadBezierPoint(t: t, start: geometry.start, control: control, end: geometry.end)
+                let normal = normalized(geometry.normal)
+                finalDirection = curve.isConcave ? CGPoint(x: -normal.x, y: -normal.y) : normal
+                labelOffset = curvedEdge == .hypotenuse ? hypotenuseLabelOffset : baseLabelOffset
+                basePoint = curvePoint
             } else {
-                labelOffset = baseLabelOffset
+                var curveOffset = curveOffsetVector(
+                    for: point,
+                    points: pieceCorners,
+                    baseCorners: baseCorners,
+                    bounds: pieceBounds,
+                    shape: piece.shape
+                )
+                var overrideDirection: CGPoint?
+                if notchDirection != nil {
+                    if !boundaryEdges.isEmpty {
+                        var sum = CGPoint.zero
+                        for edge in boundaryEdges {
+                            let normal = edgeNormal(for: edge, shape: piece.shape)
+                            sum.x += normal.x
+                            sum.y += normal.y
+                        }
+                        overrideDirection = normalized(sum)
+                    }
+                }
+                if let overrideDirection {
+                    finalDirection = overrideDirection
+                    labelOffset = 8
+                    curveOffset = .zero
+                } else if piece.shape == .rightTriangle && notchDirection == nil && concaveDirection == nil && isPointOnHypotenuse(point: point, pieceSize: metrics.pieceSize) {
+                    // Hypotenuse normal points outward (toward bottom-right)
+                    finalDirection = hypotenuseOutwardNormal(pieceSize: metrics.pieceSize)
+                    labelOffset = hypotenuseLabelOffset
+                }
+                basePoint = CGPoint(x: basePoint.x + curveOffset.x, y: basePoint.y + curveOffset.y)
             }
-            
-            let curveOffset = curveOffsetVector(
-                for: point,
-                points: pieceCorners,
-                baseCorners: baseCorners,
-                bounds: pieceBounds,
-                shape: piece.shape
-            )
+
             let displayPoint = CGPoint(
-                x: origin.x + point.x * scale + finalDirection.x * labelOffset + curveOffset.x * scale,
-                y: origin.y + point.y * scale + finalDirection.y * labelOffset + curveOffset.y * scale
+                x: origin.x + basePoint.x * scale + finalDirection.x * labelOffset,
+                y: origin.y + basePoint.y * scale + finalDirection.y * labelOffset
             )
             context.draw(label, at: displayPoint, anchor: .center)
         }
@@ -863,12 +902,18 @@ struct DrawingCanvasView: View {
             guard let cutoutEdge = assignment.cutoutEdge else { continue }
             guard let cutout = piece.cutouts.first(where: { $0.id == cutoutEdge.id }) else { continue }
             guard cutout.centerX >= 0 && cutout.centerY >= 0 else { continue }
-            guard isInteriorNotchEdge(cutout: cutout, edge: cutoutEdge.edge, pieceSize: metrics.pieceSize, shape: piece.shape) else { continue }
-            let label = Text(code)
-                .font(.system(size: labelFontSize, weight: .bold))
-                .foregroundStyle(Theme.accent)
-            let position = cutoutEdgeLabelPosition(cutout: cutout, edge: cutoutEdge.edge, metrics: metrics)
-            context.draw(label, at: position, anchor: .center)
+            let outerPolygon = ShapePathBuilder.displayPolygonPoints(for: piece, includeAngles: true, includeNotches: false)
+            let displayCutout = rotatedCutout(cutout)
+            let displaySize = ShapePathBuilder.displaySize(for: piece)
+            if let edgeInfo = visibleCutoutEdgeInfo(displayCutout: displayCutout, edge: cutoutEdge.edge, displaySize: displaySize, polygon: outerPolygon),
+               edgeInfo.length > 0.0001 {
+                let label = Text(code)
+                    .font(.system(size: labelFontSize, weight: .bold))
+                    .foregroundStyle(Theme.accent)
+                let position = cutoutEdgeLabelPosition(cutout: cutout, edge: cutoutEdge.edge, metrics: metrics)
+                context.draw(label, at: position, anchor: .center)
+            }
+            continue
         }
     }
 
@@ -935,16 +980,20 @@ struct DrawingCanvasView: View {
 
     private func drawNotchDimensionLabels(in context: inout GraphicsContext, cutout: Cutout, metrics: DrawingMetrics) {
         let displayCutout = rotatedCutout(cutout)
-        let polygon = ShapePathBuilder.displayPolygonPoints(for: piece, includeAngles: true)
-        let metricsInfo = notchInteriorEdgeMetrics(cutout: cutout, metrics: metrics, polygon: polygon)
-        var widthValue = metricsInfo?.width ?? CGFloat(cutout.width)
-        var lengthValue = metricsInfo?.length ?? CGFloat(cutout.height)
+        let outerPolygon = ShapePathBuilder.displayPolygonPoints(for: piece, includeAngles: true, includeNotches: false)
+        let metricsInfo = notchInteriorEdgeMetrics(cutout: cutout, metrics: metrics, polygon: outerPolygon)
 
         let center = CGPoint(x: displayCutout.centerX, y: displayCutout.centerY)
         let halfWidth = displayCutout.width / 2
         let halfHeight = displayCutout.height / 2
-        let widthPadding = (isReadOnly ? 9 : 12) / max(metrics.scale, 0.01)
-        let heightPadding = (isReadOnly ? 5 : 6) / max(metrics.scale, 0.01)
+        let basePaddingMultiplier: CGFloat = 0.75
+        let apexWidthPaddingMultiplier: CGFloat = 1.05
+        let apexLengthPaddingMultiplier: CGFloat = 1.0
+        let widthPadding = (isReadOnly ? 9 : 12) * basePaddingMultiplier / max(metrics.scale, 0.01)
+        let heightPadding = (isReadOnly ? 5 : 6) * basePaddingMultiplier / max(metrics.scale, 0.01)
+        let labelPadding = max(widthPadding, heightPadding)
+        let apexWidthLabelPadding = labelPadding * (apexWidthPaddingMultiplier / basePaddingMultiplier)
+        let apexLengthLabelPadding = labelPadding * (apexLengthPaddingMultiplier / basePaddingMultiplier)
         let minX = center.x - halfWidth
         let maxX = center.x + halfWidth
         let minY = center.y - halfHeight
@@ -952,31 +1001,6 @@ struct DrawingCanvasView: View {
         let pieceWidth = metrics.pieceSize.width
         let pieceHeight = metrics.pieceSize.height
         let edgeEpsilon: CGFloat = 0.01
-
-        // Check if this is a hypotenuse notch for right triangles
-        let pieceSize = ShapePathBuilder.pieceSize(for: piece)
-        let isHypotenuseNotch = piece.shape == .rightTriangle && isNotchOnHypotenuse(cutout: cutout, pieceSize: pieceSize)
-        
-        if isHypotenuseNotch {
-            // For hypotenuse notches, position labels inside the piece (toward top-left / triangle interior)
-            let widthText = MeasurementParser.formatInches(Double(widthValue))
-            let heightText = MeasurementParser.formatInches(Double(lengthValue))
-            
-            // Width label - to the left of the notch (inside the triangle)
-            let widthPoint = CGPoint(x: minX - widthPadding, y: center.y)
-            let widthLabel = Text("\(widthText)\"")
-                .font(.system(size: labelFontSize, weight: .semibold))
-                .foregroundStyle(Theme.secondaryText)
-            context.draw(widthLabel, at: metrics.toCanvas(widthPoint), anchor: .center)
-            
-            // Length label - above the notch (inside the triangle)
-            let lengthPoint = CGPoint(x: center.x, y: minY - heightPadding)
-            let lengthLabel = Text("\(heightText)\"")
-                .font(.system(size: labelFontSize, weight: .semibold))
-                .foregroundStyle(Theme.secondaryText)
-            context.draw(lengthLabel, at: metrics.toCanvas(lengthPoint), anchor: .center)
-            return
-        }
 
         // Determine which edges the notch touches in display coordinates
         let touchesDisplayLeft = minX <= edgeEpsilon
@@ -990,72 +1014,320 @@ struct DrawingCanvasView: View {
         // For top/bottom edge notches, the vertical distance (widthValue) is affected by the curve
         var widthFromApex = false
         var lengthFromApex = false
+        var widthCurveDepth: CGFloat = 0
+        var lengthCurveDepth: CGFloat = 0
 
-        if touchesDisplayLeft {
-            // Left edge notch - check for curve on left edge
-            if let curve = piece.curve(for: .left), curve.radius > 0 {
-                let curveDepth = curve.isConcave ? -CGFloat(curve.radius) : CGFloat(curve.radius)
-                lengthValue += curveDepth
-                lengthFromApex = true
+        if piece.shape == .rightTriangle {
+            if touchesDisplayLeft {
+                // Leg B notch - check for curve on leg B
+                if let curve = piece.curve(for: .legB), curve.radius > 0 {
+                    lengthCurveDepth = curve.isConcave ? -CGFloat(curve.radius) : CGFloat(curve.radius)
+                    lengthFromApex = true
+                }
             }
-        } else if touchesDisplayRight {
-            // Right edge notch - check for curve on right edge
-            if let curve = piece.curve(for: .right), curve.radius > 0 {
-                let curveDepth = curve.isConcave ? -CGFloat(curve.radius) : CGFloat(curve.radius)
-                lengthValue += curveDepth
-                lengthFromApex = true
+            if touchesDisplayTop {
+                // Leg A notch - check for curve on leg A
+                if let curve = piece.curve(for: .legA), curve.radius > 0 {
+                    widthCurveDepth = curve.isConcave ? -CGFloat(curve.radius) : CGFloat(curve.radius)
+                    widthFromApex = true
+                }
+            }
+        } else {
+            if touchesDisplayLeft {
+                // Left edge notch - check for curve on left edge
+                if let curve = piece.curve(for: .left), curve.radius > 0 {
+                    lengthCurveDepth = curve.isConcave ? -CGFloat(curve.radius) : CGFloat(curve.radius)
+                    lengthFromApex = true
+                }
+            } else if touchesDisplayRight {
+                // Right edge notch - check for curve on right edge
+                if let curve = piece.curve(for: .right), curve.radius > 0 {
+                    lengthCurveDepth = curve.isConcave ? -CGFloat(curve.radius) : CGFloat(curve.radius)
+                    lengthFromApex = true
+                }
+            }
+
+            if touchesDisplayTop {
+                // Top edge notch - check for curve on top edge
+                if let curve = piece.curve(for: .top), curve.radius > 0 {
+                    widthCurveDepth = curve.isConcave ? -CGFloat(curve.radius) : CGFloat(curve.radius)
+                    widthFromApex = true
+                }
+            } else if touchesDisplayBottom {
+                // Bottom edge notch - check for curve on bottom edge
+                if let curve = piece.curve(for: .bottom), curve.radius > 0 {
+                    widthCurveDepth = curve.isConcave ? -CGFloat(curve.radius) : CGFloat(curve.radius)
+                    widthFromApex = true
+                }
             }
         }
 
-        if touchesDisplayTop {
-            // Top edge notch - check for curve on top edge
-            if let curve = piece.curve(for: .top), curve.radius > 0 {
-                let curveDepth = curve.isConcave ? -CGFloat(curve.radius) : CGFloat(curve.radius)
-                widthValue += curveDepth
+        let displaySize = ShapePathBuilder.displaySize(for: piece)
+
+        func edgeInfo(for edge: EdgePosition, fallback: CGPoint) -> (edge: EdgePosition, mid: CGPoint, length: CGFloat) {
+            if let info = visibleCutoutEdgeInfo(displayCutout: displayCutout, edge: edge, displaySize: displaySize, polygon: outerPolygon) {
+                return (edge: edge, mid: info.mid, length: info.length)
+            }
+            return (edge: edge, mid: fallback, length: 0)
+        }
+
+        let leftInfo = edgeInfo(for: .left, fallback: CGPoint(x: center.x - halfWidth, y: center.y))
+        let rightInfo = edgeInfo(for: .right, fallback: CGPoint(x: center.x + halfWidth, y: center.y))
+        let topInfo = edgeInfo(for: .top, fallback: CGPoint(x: center.x, y: center.y - halfHeight))
+        let bottomInfo = edgeInfo(for: .bottom, fallback: CGPoint(x: center.x, y: center.y + halfHeight))
+
+        let leftDistance = distanceToPolygonBoundary(from: leftInfo.mid, polygon: outerPolygon)
+        let rightDistance = distanceToPolygonBoundary(from: rightInfo.mid, polygon: outerPolygon)
+        let topDistance = distanceToPolygonBoundary(from: topInfo.mid, polygon: outerPolygon)
+        let bottomDistance = distanceToPolygonBoundary(from: bottomInfo.mid, polygon: outerPolygon)
+
+        let boundaryTolerance: CGFloat = 0.01
+        func chooseEdgeInfo(primary: (info: (edge: EdgePosition, mid: CGPoint, length: CGFloat), distance: CGFloat), secondary: (info: (edge: EdgePosition, mid: CGPoint, length: CGFloat), distance: CGFloat)) -> (edge: EdgePosition, mid: CGPoint, length: CGFloat) {
+            let primaryInside = primary.distance > boundaryTolerance && primary.info.length > 0
+            let secondaryInside = secondary.distance > boundaryTolerance && secondary.info.length > 0
+            if primaryInside != secondaryInside {
+                return primaryInside ? primary.info : secondary.info
+            }
+            if primary.info.length > 0 && secondary.info.length == 0 {
+                return primary.info
+            }
+            if secondary.info.length > 0 && primary.info.length == 0 {
+                return secondary.info
+            }
+            return primary.distance >= secondary.distance ? primary.info : secondary.info
+        }
+
+        let widthEdgeInfo = chooseEdgeInfo(
+            primary: (info: rightInfo, distance: rightDistance),
+            secondary: (info: leftInfo, distance: leftDistance)
+        )
+        let lengthEdgeInfo = chooseEdgeInfo(
+            primary: (info: bottomInfo, distance: bottomDistance),
+            secondary: (info: topInfo, distance: topDistance)
+        )
+
+        var widthEdgeMid = widthEdgeInfo.mid
+        var lengthEdgeMid = lengthEdgeInfo.mid
+        func curveDepth(for edge: EdgePosition) -> CGFloat? {
+            guard let curve = piece.curve(for: edge), curve.radius > 0 else { return nil }
+            return curve.isConcave ? -CGFloat(curve.radius) : CGFloat(curve.radius)
+        }
+        if piece.shape == .rightTriangle {
+            if touchesDisplayTop, let depth = curveDepth(for: .legA) {
+                widthCurveDepth = depth
                 widthFromApex = true
             }
-        } else if touchesDisplayBottom {
-            // Bottom edge notch - check for curve on bottom edge
-            if let curve = piece.curve(for: .bottom), curve.radius > 0 {
-                let curveDepth = curve.isConcave ? -CGFloat(curve.radius) : CGFloat(curve.radius)
-                widthValue += curveDepth
-                widthFromApex = true
+            if touchesDisplayLeft, let depth = curveDepth(for: .legB) {
+                lengthCurveDepth = depth
+                lengthFromApex = true
+            }
+            if isNotchOnHypotenuse(cutout: displayCutout, pieceSize: displaySize),
+               let hypDepth = curveDepth(for: .hypotenuse) {
+                let hypStart = CGPoint(x: displaySize.width, y: 0)
+                let hypEnd = CGPoint(x: 0, y: displaySize.height)
+                let distWidth = GeometryHelpers.pointLineDistance(point: widthEdgeMid, a: hypStart, b: hypEnd)
+                let distLength = GeometryHelpers.pointLineDistance(point: lengthEdgeMid, a: hypStart, b: hypEnd)
+                if distWidth <= distLength {
+                    widthCurveDepth = hypDepth
+                    widthFromApex = true
+                } else {
+                    lengthCurveDepth = hypDepth
+                    lengthFromApex = true
+                }
             }
         }
+
+        // For hypotenuse-oriented cutouts, width/height are NOT swapped in displayCutout
+        let isHypotenuseOriented = piece.shape == .rightTriangle && cutout.orientation == .hypotenuse
+        let expectedWidth = isHypotenuseOriented ? displayCutout.width : displayCutout.height
+        let expectedLength = isHypotenuseOriented ? displayCutout.height : displayCutout.width
+        let lengthEpsilon: CGFloat = 0.001
+        var widthValue = expectedWidth
+        var lengthValue = expectedLength
+
+        if piece.shape == .rightTriangle, cutout.orientation == .hypotenuse {
+            let corners = GeometryHelpers.cutoutCornerPoints(cutout: displayCutout, size: displaySize, shape: piece.shape)
+            if corners.count == 4 {
+                struct RotatedEdgeInfo {
+                    let mid: CGPoint
+                    let length: CGFloat
+                    let distance: CGFloat
+                    let fullLength: CGFloat
+                }
+
+                func visibleEdgeInfo(start: CGPoint, end: CGPoint, fullLength: CGFloat) -> RotatedEdgeInfo? {
+                    let startInside = pointIsInsideOrOnPolygon(start, polygon: outerPolygon)
+                    let endInside = pointIsInsideOrOnPolygon(end, polygon: outerPolygon)
+                    if startInside && endInside {
+                        let mid = CGPoint(x: (start.x + end.x) / 2, y: (start.y + end.y) / 2)
+                        let length = distance(start, end)
+                        let dist = distanceToPolygonBoundary(from: mid, polygon: outerPolygon)
+                        return RotatedEdgeInfo(mid: mid, length: length, distance: dist, fullLength: fullLength)
+                    }
+                    if let clipped = clippedSegmentInfo(start: start, end: end, polygon: outerPolygon) {
+                        let dist = distanceToPolygonBoundary(from: clipped.mid, polygon: outerPolygon)
+                        return RotatedEdgeInfo(mid: clipped.mid, length: clipped.length, distance: dist, fullLength: fullLength)
+                    }
+                    return nil
+                }
+
+                // Corners are ordered: [0]=top-left, [1]=top-right, [2]=bottom-right, [3]=bottom-left (before rotation)
+                // Edge pairs (before rotation):
+                // - Top/bottom edges (0-1 and 2-3): span cutout.width (which is displayCutout.width due to coordinate swap)
+                // - Left/right edges (1-2 and 3-0): span cutout.height (which is displayCutout.height due to coordinate swap)
+                //
+                // In display coordinates:
+                // - Width dimension = displayCutout.height (the original cutout.width)
+                // - Length dimension = displayCutout.width (the original cutout.height)
+                //
+                // So for correct mapping:
+                // - "Width" label uses edges spanning displayCutout.height → left/right edges (1-2 and 3-0)
+                // - "Length" label uses edges spanning displayCutout.width → top/bottom edges (0-1 and 2-3)
+                let widthEdge0 = (start: corners[1], end: corners[2])   // right edge - spans displayCutout.height (width dimension)
+                let widthEdge1 = (start: corners[3], end: corners[0])   // left edge - spans displayCutout.height (width dimension)
+                let lengthEdge0 = (start: corners[0], end: corners[1])  // top edge - spans displayCutout.width (length dimension)
+                let lengthEdge1 = (start: corners[2], end: corners[3])  // bottom edge - spans displayCutout.width (length dimension)
+
+                let widthInfo0 = visibleEdgeInfo(start: widthEdge0.start, end: widthEdge0.end, fullLength: expectedWidth)
+                let widthInfo1 = visibleEdgeInfo(start: widthEdge1.start, end: widthEdge1.end, fullLength: expectedWidth)
+                let lengthInfo0 = visibleEdgeInfo(start: lengthEdge0.start, end: lengthEdge0.end, fullLength: expectedLength)
+                let lengthInfo1 = visibleEdgeInfo(start: lengthEdge1.start, end: lengthEdge1.end, fullLength: expectedLength)
+
+                // Pick the best visible edge from each pair based on distance (farthest from boundary)
+                // For boundary-crossing notches, show visible edge length; otherwise show full dimension
+                let bestWidth: RotatedEdgeInfo?
+                switch (widthInfo0, widthInfo1) {
+                case let (a?, b?):
+                    bestWidth = a.distance >= b.distance ? a : b
+                case let (a?, nil):
+                    bestWidth = a
+                case let (nil, b?):
+                    bestWidth = b
+                default:
+                    bestWidth = nil
+                }
+
+                let bestLength: RotatedEdgeInfo?
+                switch (lengthInfo0, lengthInfo1) {
+                case let (a?, b?):
+                    bestLength = a.distance >= b.distance ? a : b
+                case let (a?, nil):
+                    bestLength = a
+                case let (nil, b?):
+                    bestLength = b
+                default:
+                    bestLength = nil
+                }
+
+                if let best = bestWidth {
+                    widthEdgeMid = best.mid
+                    // Show visible edge length (clipped) if crossing boundary, otherwise full dimension
+                    widthValue = best.length < best.fullLength - lengthEpsilon ? best.length : best.fullLength
+                }
+
+                if let best = bestLength {
+                    lengthEdgeMid = best.mid
+                    // Show visible edge length (clipped) if crossing boundary, otherwise full dimension
+                    lengthValue = best.length < best.fullLength - lengthEpsilon ? best.length : best.fullLength
+                }
+            }
+        } else {
+            if widthEdgeInfo.length > 0, widthEdgeInfo.length < expectedWidth - lengthEpsilon {
+                let widthStart = segmentStartPoint(for: widthEdgeInfo.edge, cutout: displayCutout, displaySize: displaySize)
+                let widthEnd = segmentEndPoint(for: widthEdgeInfo.edge, cutout: displayCutout, displaySize: displaySize)
+                let widthInside = pointIsInsideOrOnPolygon(widthStart, polygon: outerPolygon)
+                    && pointIsInsideOrOnPolygon(widthEnd, polygon: outerPolygon)
+                widthValue = widthInside ? expectedWidth : widthEdgeInfo.length
+            } else if let metricsWidth = metricsInfo?.width, metricsWidth > 0, metricsWidth < expectedWidth - lengthEpsilon {
+                widthValue = metricsWidth
+            }
+            if lengthEdgeInfo.length > 0, lengthEdgeInfo.length < expectedLength - lengthEpsilon {
+                let lengthStart = segmentStartPoint(for: lengthEdgeInfo.edge, cutout: displayCutout, displaySize: displaySize)
+                let lengthEnd = segmentEndPoint(for: lengthEdgeInfo.edge, cutout: displayCutout, displaySize: displaySize)
+                let lengthInside = pointIsInsideOrOnPolygon(lengthStart, polygon: outerPolygon)
+                    && pointIsInsideOrOnPolygon(lengthEnd, polygon: outerPolygon)
+                lengthValue = lengthInside ? expectedLength : lengthEdgeInfo.length
+            } else if let metricsLength = metricsInfo?.length, metricsLength > 0, metricsLength < expectedLength - lengthEpsilon {
+                lengthValue = metricsLength
+            }
+        }
+        if piece.shape == .rightTriangle,
+           let hypCurve = piece.curve(for: .hypotenuse),
+           hypCurve.radius > 0,
+           isNotchOnHypotenuse(cutout: displayCutout, pieceSize: displaySize) {
+            let hypStart = CGPoint(x: displaySize.width, y: 0)
+            let hypEnd = CGPoint(x: 0, y: displaySize.height)
+            let distWidth = GeometryHelpers.pointLineDistance(point: widthEdgeMid, a: hypStart, b: hypEnd)
+            let distLength = GeometryHelpers.pointLineDistance(point: lengthEdgeMid, a: hypStart, b: hypEnd)
+            let hypDepth = hypCurve.isConcave ? -CGFloat(hypCurve.radius) : CGFloat(hypCurve.radius)
+            let tolerance = max(0.05, max(displaySize.width, displaySize.height) * 0.002)
+            if distWidth <= distLength, distWidth <= tolerance {
+                widthCurveDepth = hypDepth
+                widthFromApex = true
+            } else if distLength <= tolerance {
+                lengthCurveDepth = hypDepth
+                lengthFromApex = true
+            }
+        }
+        widthValue += widthCurveDepth
+        lengthValue += lengthCurveDepth
 
         let widthText = MeasurementParser.formatInches(Double(widthValue))
         let heightText = MeasurementParser.formatInches(Double(lengthValue))
 
-        // Standard positioning for non-apex labels
-        let interiorX: CGFloat
-        if minX <= edgeEpsilon {
-            interiorX = maxX + widthPadding
-        } else if maxX >= pieceWidth - edgeEpsilon {
-            interiorX = minX - widthPadding
-        } else {
-            interiorX = maxX + widthPadding
+        let cutoutCorners = cutoutCornerPoints(for: displayCutout, displaySize: displaySize)
+        func apexLabelPoint(edgeMid: CGPoint, offset: CGFloat) -> (point: CGPoint, angle: CGFloat)? {
+            guard cutoutCorners.count == 4 else { return nil }
+            var closestMid = edgeMid
+            var closestStart = cutoutCorners[0]
+            var closestEnd = cutoutCorners[1]
+            var bestDistance = CGFloat.greatestFiniteMagnitude
+            for index in 0..<cutoutCorners.count {
+                let start = cutoutCorners[index]
+                let end = cutoutCorners[(index + 1) % cutoutCorners.count]
+                let mid = CGPoint(x: (start.x + end.x) / 2, y: (start.y + end.y) / 2)
+                let distance = GeometryHelpers.distance(mid, edgeMid)
+                if distance < bestDistance {
+                    bestDistance = distance
+                    closestMid = mid
+                    closestStart = start
+                    closestEnd = end
+                }
+            }
+            let edgeVector = CGPoint(x: closestEnd.x - closestStart.x, y: closestEnd.y - closestStart.y)
+            let normal = normalized(CGPoint(x: -edgeVector.y, y: edgeVector.x))
+            let centerVector = CGPoint(x: closestMid.x - center.x, y: closestMid.y - center.y)
+            let dot = normal.x * centerVector.x + normal.y * centerVector.y
+            let outward = dot < 0 ? CGPoint(x: -normal.x, y: -normal.y) : normal
+            let point = CGPoint(x: closestMid.x + outward.x * offset, y: closestMid.y + outward.y * offset)
+            let angle = atan2(edgeVector.y, edgeVector.x)
+            return (point, angle)
         }
 
-        let interiorY: CGFloat
-        if minY <= edgeEpsilon {
-            interiorY = maxY + heightPadding
-        } else if maxY >= pieceHeight - edgeEpsilon {
-            interiorY = minY - heightPadding
-        } else {
-            interiorY = maxY + heightPadding
-        }
-
-        let widthPoint = CGPoint(x: interiorX, y: metricsInfo?.widthCenterY ?? center.y)
-        let lengthPoint = CGPoint(x: metricsInfo?.lengthCenterX ?? center.x, y: interiorY)
+        let minClearance = 10 / max(metrics.scale, 0.01)
+        let widthPoint = outsidePointWithClearance(
+            edgeMid: widthEdgeMid,
+            center: center,
+            baseOffset: widthFromApex ? apexWidthLabelPadding : labelPadding,
+            minClearance: minClearance,
+            polygon: outerPolygon
+        )
+        let lengthPoint = outsidePointWithClearance(
+            edgeMid: lengthEdgeMid,
+            center: center,
+            baseOffset: lengthFromApex ? apexLengthLabelPadding : labelPadding,
+            minClearance: minClearance,
+            polygon: outerPolygon
+        )
 
         // Draw width label (for top/bottom edge notches - widthFromApex)
         // Position: to the right of the notch edge
         if widthFromApex {
             // Two-line label: "X\" from" on top, "Apex" below
-            // Position to the right of the notch interior edge
-            let apexPadding = (isReadOnly ? 15 : 20) / max(metrics.scale, 0.01)
-            let apexX = maxX + apexPadding
-            let apexPoint = CGPoint(x: apexX, y: metricsInfo?.widthCenterY ?? center.y)
+            // Position along the notch interior edge
+            let shouldAlignToEdge = abs(widthCurveDepth) > 0.0001
+            let apexInfo = shouldAlignToEdge ? (apexLabelPoint(edgeMid: widthEdgeMid, offset: apexWidthLabelPadding)) : nil
+            let apexPoint = apexInfo?.point ?? widthPoint
             let line1 = Text("\(widthText)\" to")
                 .font(.system(size: labelFontSize, weight: .semibold))
                 .foregroundStyle(Theme.secondaryText)
@@ -1064,8 +1336,21 @@ struct DrawingCanvasView: View {
                 .foregroundStyle(Theme.secondaryText)
             let canvasPoint = metrics.toCanvas(apexPoint)
             let lineSpacing: CGFloat = 10
-            context.draw(line1, at: CGPoint(x: canvasPoint.x, y: canvasPoint.y - lineSpacing / 2), anchor: .center)
-            context.draw(line2, at: CGPoint(x: canvasPoint.x, y: canvasPoint.y + lineSpacing / 2), anchor: .center)
+            if let apexInfo, abs(widthCurveDepth) > 0.0001 {
+                var rotation = apexInfo.angle
+                if rotation > .pi / 2 || rotation < -.pi / 2 {
+                    rotation += .pi
+                }
+                context.drawLayer { layer in
+                    layer.translateBy(x: canvasPoint.x, y: canvasPoint.y)
+                    layer.rotate(by: .radians(rotation))
+                    layer.draw(line1, at: CGPoint(x: 0, y: -lineSpacing / 2), anchor: .center)
+                    layer.draw(line2, at: CGPoint(x: 0, y: lineSpacing / 2), anchor: .center)
+                }
+            } else {
+                context.draw(line1, at: CGPoint(x: canvasPoint.x, y: canvasPoint.y - lineSpacing / 2), anchor: .center)
+                context.draw(line2, at: CGPoint(x: canvasPoint.x, y: canvasPoint.y + lineSpacing / 2), anchor: .center)
+            }
         } else {
             let widthLabel = Text("\(widthText)\"")
                 .font(.system(size: labelFontSize, weight: .semibold))
@@ -1077,10 +1362,10 @@ struct DrawingCanvasView: View {
         // Position: below the notch
         if lengthFromApex {
             // Two-line label: "X\" from" on top, "Apex" below
-            // Position below the notch interior edge
-            let apexPadding = (isReadOnly ? 10 : 14) / max(metrics.scale, 0.01)
-            let apexY = maxY + apexPadding
-            let apexPoint = CGPoint(x: metricsInfo?.lengthCenterX ?? center.x, y: apexY)
+            // Position along the notch interior edge
+            let shouldAlignToEdge = abs(lengthCurveDepth) > 0.0001
+            let apexInfo = shouldAlignToEdge ? apexLabelPoint(edgeMid: lengthEdgeMid, offset: apexLengthLabelPadding) : nil
+            let apexPoint = apexInfo?.point ?? lengthPoint
             let line1 = Text("\(heightText)\" to")
                 .font(.system(size: labelFontSize, weight: .semibold))
                 .foregroundStyle(Theme.secondaryText)
@@ -1103,34 +1388,78 @@ struct DrawingCanvasView: View {
         // Skip circles - they only have diameter, not width/length
         guard cutout.kind != .circle else { return }
         
+        // Get display cutout (with swapped coordinates for display)
         let displayCutout = rotatedCutout(cutout)
         let center = CGPoint(x: displayCutout.centerX, y: displayCutout.centerY)
-        let halfWidth = displayCutout.width / 2
-        let halfHeight = displayCutout.height / 2
-        
-        // Use the raw cutout dimensions (width = horizontal in display, height = vertical in display)
-        let widthValue = CGFloat(displayCutout.width)
-        let lengthValue = CGFloat(displayCutout.height)
-        
+
+        let displaySize = ShapePathBuilder.displaySize(for: piece)
+        let outerPolygon = ShapePathBuilder.displayPolygonPoints(for: piece, includeAngles: true, includeNotches: false)
+        let padding: CGFloat = 4 * 0.75 / max(metrics.scale, 0.01)
+
+        // In display coordinates with swapped width/height:
+        // - Left/right edges (3→0 and 1→2) span displayCutout.height = user's WIDTH
+        // - Top/bottom edges (0→1 and 2→3) span displayCutout.width = user's LENGTH
+        let widthEdgeInfo = visibleCutoutEdgeInfo(
+            displayCutout: displayCutout,
+            edge: .left,
+            displaySize: displaySize,
+            polygon: outerPolygon
+        ) ?? visibleCutoutEdgeInfo(
+            displayCutout: displayCutout,
+            edge: .right,
+            displaySize: displaySize,
+            polygon: outerPolygon
+        )
+
+        let lengthEdgeInfo = visibleCutoutEdgeInfo(
+            displayCutout: displayCutout,
+            edge: .top,
+            displaySize: displaySize,
+            polygon: outerPolygon
+        ) ?? visibleCutoutEdgeInfo(
+            displayCutout: displayCutout,
+            edge: .bottom,
+            displaySize: displaySize,
+            polygon: outerPolygon
+        )
+
+        let widthEdgeMid = widthEdgeInfo?.mid ?? CGPoint(x: center.x, y: center.y - displayCutout.height / 2)
+        let lengthEdgeMid = lengthEdgeInfo?.mid ?? CGPoint(x: center.x - displayCutout.width / 2, y: center.y)
+
+        let minClearance = 10 / max(metrics.scale, 0.01)
+        let widthPoint = outsidePointWithClearance(
+            edgeMid: widthEdgeMid,
+            center: center,
+            baseOffset: padding,
+            minClearance: minClearance,
+            polygon: outerPolygon
+        )
+        let lengthPoint = outsidePointWithClearance(
+            edgeMid: lengthEdgeMid,
+            center: center,
+            baseOffset: padding,
+            minClearance: minClearance,
+            polygon: outerPolygon
+        )
+
+        // For hypotenuse-oriented cutouts, width/height are NOT swapped in displayCutout,
+        // so we use them directly. For other cutouts, they are swapped.
+        let isHypotenuseOriented = piece.shape == .rightTriangle && cutout.orientation == .hypotenuse
+        let widthValue = CGFloat(isHypotenuseOriented ? displayCutout.width : displayCutout.height)
+        let lengthValue = CGFloat(isHypotenuseOriented ? displayCutout.height : displayCutout.width)
         let widthText = MeasurementParser.formatInches(Double(widthValue))
         let lengthText = MeasurementParser.formatInches(Double(lengthValue))
-        
-        // Padding from cutout edge
-        let padding: CGFloat = 4 / max(metrics.scale, 0.01)
-        
-        // Width label - centered horizontally above the cutout
-        let widthPoint = CGPoint(x: center.x, y: center.y - halfHeight - padding)
+
         let widthLabel = Text("\(widthText)\"")
             .font(.system(size: labelFontSize, weight: .semibold))
             .foregroundStyle(Theme.accent)
-        context.draw(widthLabel, at: metrics.toCanvas(widthPoint), anchor: .bottom)
-        
-        // Length label - centered vertically to the left of the cutout
-        let lengthPoint = CGPoint(x: center.x - halfWidth - padding, y: center.y)
         let lengthLabel = Text("\(lengthText)\"")
             .font(.system(size: labelFontSize, weight: .semibold))
             .foregroundStyle(Theme.accent)
-        context.draw(lengthLabel, at: metrics.toCanvas(lengthPoint), anchor: .trailing)
+        
+        // Use center anchors for consistent positioning on rotated cutouts
+        context.draw(widthLabel, at: metrics.toCanvas(widthPoint), anchor: .center)
+        context.draw(lengthLabel, at: metrics.toCanvas(lengthPoint), anchor: .center)
     }
 
     private func notchInteriorEdgeMetrics(cutout: Cutout, metrics: DrawingMetrics, polygon: [CGPoint]) -> (width: CGFloat, length: CGFloat, widthCenterY: CGFloat, lengthCenterX: CGFloat)? {
@@ -1374,7 +1703,13 @@ struct DrawingCanvasView: View {
         if let curve = curveMap[edge], curve.radius > 0 {
             let polygon = ShapePathBuilder.displayPolygonPoints(for: piece, includeAngles: true)
             let baseBounds = shape == .rightTriangle ? CGRect(origin: .zero, size: ShapePathBuilder.displaySize(for: piece)) : nil
-            if let geometry = edgeGeometryFromPolygon(edge: edge, polygon: polygon, shape: shape, baseBounds: baseBounds) {
+            let geometry: (start: CGPoint, end: CGPoint, normal: CGPoint)?
+            if edge == .hypotenuse, shape == .rightTriangle {
+                geometry = fullHypotenuseGeometry()
+            } else {
+                geometry = edgeGeometryFromPolygon(edge: edge, polygon: polygon, shape: shape, baseBounds: baseBounds)
+            }
+            if let geometry {
                 let mid = quadBezierPoint(t: 0.5, start: geometry.start, control: controlPointDisplay(for: geometry, curve: curve), end: geometry.end)
                 let baseOffset = CGFloat(edge == .hypotenuse ? 12 : 8)
                 var offsetDistance = baseOffset / max(metrics.scale, 0.01)
@@ -1400,7 +1735,13 @@ struct DrawingCanvasView: View {
         if shape == .rightTriangle, edge == .legA || edge == .legB || edge == .hypotenuse {
             let polygon = ShapePathBuilder.displayPolygonPoints(for: piece, includeAngles: true)
             let baseBounds = CGRect(origin: .zero, size: ShapePathBuilder.displaySize(for: piece))
-            if let geometry = edgeGeometryFromPolygon(edge: edge, polygon: polygon, shape: shape, baseBounds: baseBounds) {
+            let geometry: (start: CGPoint, end: CGPoint, normal: CGPoint)?
+            if edge == .hypotenuse {
+                geometry = fullHypotenuseGeometry()
+            } else {
+                geometry = edgeGeometryFromPolygon(edge: edge, polygon: polygon, shape: shape, baseBounds: baseBounds)
+            }
+            if let geometry {
                 let mid = CGPoint(x: (geometry.start.x + geometry.end.x) / 2, y: (geometry.start.y + geometry.end.y) / 2)
                 let offsetDistance = 10 / max(metrics.scale, 0.01)
                 let outward = normalized(geometry.normal)
@@ -1439,39 +1780,9 @@ struct DrawingCanvasView: View {
         let mid = CGPoint(x: (segment.start.x + segment.end.x) / 2, y: (segment.start.y + segment.end.y) / 2)
         if let curve = piece.curve(for: segment.edge), curve.radius > 0 {
             let polygon = ShapePathBuilder.displayPolygonPoints(for: piece, includeAngles: true)
-            let baseBounds = piece.shape == .rightTriangle ? CGRect(origin: .zero, size: ShapePathBuilder.displaySize(for: piece)) : nil
-            let geometry: (start: CGPoint, end: CGPoint, normal: CGPoint)?
-            if piece.shape == .rectangle {
-                let size = ShapePathBuilder.displaySize(for: piece)
-                switch segment.edge {
-                case .top:
-                    geometry = (CGPoint(x: 0, y: 0), CGPoint(x: size.width, y: 0), CGPoint(x: 0, y: -1))
-                case .right:
-                    geometry = (CGPoint(x: size.width, y: 0), CGPoint(x: size.width, y: size.height), CGPoint(x: 1, y: 0))
-                case .bottom:
-                    geometry = (CGPoint(x: size.width, y: size.height), CGPoint(x: 0, y: size.height), CGPoint(x: 0, y: 1))
-                case .left:
-                    geometry = (CGPoint(x: 0, y: size.height), CGPoint(x: 0, y: 0), CGPoint(x: -1, y: 0))
-                default:
-                    geometry = edgeGeometryFromPolygon(edge: segment.edge, polygon: polygon, shape: piece.shape, baseBounds: baseBounds)
-                }
-            } else {
-                geometry = edgeGeometryFromPolygon(edge: segment.edge, polygon: polygon, shape: piece.shape, baseBounds: baseBounds)
-            }
+            let geometry = fullEdgeGeometryDisplay(edge: segment.edge)
             if let geometry {
-                let denom: CGFloat
-                let t: CGFloat
-                switch segment.edge {
-                case .top, .bottom, .legA:
-                    denom = geometry.end.x - geometry.start.x
-                    t = denom == 0 ? 0.5 : (mid.x - geometry.start.x) / denom
-                case .left, .right, .legB:
-                    denom = geometry.end.y - geometry.start.y
-                    t = denom == 0 ? 0.5 : (mid.y - geometry.start.y) / denom
-                case .hypotenuse:
-                    let total = distance(geometry.start, geometry.end)
-                    t = total == 0 ? 0.5 : distance(geometry.start, mid) / total
-                }
+                let t = edgeProgress(point: mid, geometry: geometry, edge: segment.edge)
                 let clampedT = min(max(t, 0), 1)
                 let control = controlPointDisplay(for: geometry, curve: curve)
                 let curvePoint = quadBezierPoint(t: clampedT, start: geometry.start, control: control, end: geometry.end)
@@ -1483,7 +1794,11 @@ struct DrawingCanvasView: View {
                 if segment.edge == .left || segment.edge == .right {
                     curveOffsetDistance += (20 / max(metrics.scale, 0.01))
                 }
-                let outward = normalized(geometry.normal)
+                let edgeNotationOffset = 6 / max(metrics.scale, 0.01)
+                let minGap = (segment.edge == .hypotenuse ? 12 : 10) / max(metrics.scale, 0.01)
+                curveOffsetDistance = max(curveOffsetDistance, edgeNotationOffset + minGap)
+                let normal = normalized(geometry.normal)
+                let direction = curve.isConcave ? CGPoint(x: -normal.x, y: -normal.y) : normal
                 var adjusted = offsetRelativeToPolygon(
                     point: curvePoint,
                     segmentStart: geometry.start,
@@ -1491,12 +1806,12 @@ struct DrawingCanvasView: View {
                     polygon: polygon,
                     distance: curveOffsetDistance,
                     preferInside: false,
-                    preferredDirection: outward
+                    preferredDirection: direction
                 )
                 if pointIsInsidePolygon(adjusted, polygon: polygon) {
                     adjusted = CGPoint(
-                        x: curvePoint.x - outward.x * curveOffsetDistance,
-                        y: curvePoint.y - outward.y * curveOffsetDistance
+                        x: curvePoint.x - direction.x * curveOffsetDistance,
+                        y: curvePoint.y - direction.y * curveOffsetDistance
                     )
                 }
                 return metrics.toCanvas(adjusted)
@@ -1515,14 +1830,23 @@ struct DrawingCanvasView: View {
             direction = CGPoint(x: -1, y: 0)
         case .right:
             direction = CGPoint(x: 1, y: 0)
-        default:
-            direction = CGPoint(x: 0, y: -1)
+        case .legA:
+            direction = CGPoint(x: 0, y: -1)  // legA is horizontal at top, label goes up
+        case .legB:
+            direction = CGPoint(x: -1, y: 0)  // legB is vertical at left, label goes left
+        case .hypotenuse:
+            // Hypotenuse outward normal points toward bottom-right (outside the triangle)
+            let norm = 1.0 / sqrt(2.0)
+            direction = CGPoint(x: norm, y: norm)
         }
                 let offsetDistance: CGFloat
-                if segment.edge == .left || segment.edge == .right {
+                if segment.edge == .left || segment.edge == .right || segment.edge == .legB {
                     offsetDistance = baseOffset + sideBoost + extraPadding + (10 / max(metrics.scale, 0.01))
-                } else if segment.edge == .top || segment.edge == .bottom {
+                } else if segment.edge == .top || segment.edge == .bottom || segment.edge == .legA {
                     offsetDistance = baseOffset + extraPadding
+                } else if segment.edge == .hypotenuse {
+                    // Hypotenuse needs extra padding to avoid interfering with edge notations
+                    offsetDistance = baseOffset + sideBoost + extraPadding
                 } else {
                     offsetDistance = baseOffset
                 }
@@ -1534,46 +1858,15 @@ struct DrawingCanvasView: View {
         let mid = CGPoint(x: (segment.start.x + segment.end.x) / 2, y: (segment.start.y + segment.end.y) / 2)
         if let curve = piece.curve(for: segment.edge), curve.radius > 0 {
             let polygon = ShapePathBuilder.displayPolygonPoints(for: piece, includeAngles: true)
-            let baseBounds = piece.shape == .rightTriangle ? CGRect(origin: .zero, size: ShapePathBuilder.displaySize(for: piece)) : nil
-            let geometry: (start: CGPoint, end: CGPoint, normal: CGPoint)?
-            if piece.shape == .rectangle {
-                let size = ShapePathBuilder.displaySize(for: piece)
-                switch segment.edge {
-                case .top:
-                    geometry = (CGPoint(x: 0, y: 0), CGPoint(x: size.width, y: 0), CGPoint(x: 0, y: -1))
-                case .right:
-                    geometry = (CGPoint(x: size.width, y: 0), CGPoint(x: size.width, y: size.height), CGPoint(x: 1, y: 0))
-                case .bottom:
-                    geometry = (CGPoint(x: size.width, y: size.height), CGPoint(x: 0, y: size.height), CGPoint(x: 0, y: 1))
-                case .left:
-                    geometry = (CGPoint(x: 0, y: size.height), CGPoint(x: 0, y: 0), CGPoint(x: -1, y: 0))
-                default:
-                    geometry = edgeGeometryFromPolygon(edge: segment.edge, polygon: polygon, shape: piece.shape, baseBounds: baseBounds)
-                }
-            } else {
-                geometry = edgeGeometryFromPolygon(edge: segment.edge, polygon: polygon, shape: piece.shape, baseBounds: baseBounds)
-            }
+            let geometry = fullEdgeGeometryDisplay(edge: segment.edge)
             if let geometry {
-                let denom: CGFloat
-                let t: CGFloat
-                switch segment.edge {
-                case .top, .bottom, .legA:
-                    denom = geometry.end.x - geometry.start.x
-                    t = denom == 0 ? 0.5 : (mid.x - geometry.start.x) / denom
-                case .left, .right, .legB:
-                    denom = geometry.end.y - geometry.start.y
-                    t = denom == 0 ? 0.5 : (mid.y - geometry.start.y) / denom
-                case .hypotenuse:
-                    let total = distance(geometry.start, geometry.end)
-                    t = total == 0 ? 0.5 : distance(geometry.start, mid) / total
-                }
+                let t = edgeProgress(point: mid, geometry: geometry, edge: segment.edge)
                 let clampedT = min(max(t, 0), 1)
                 let control = controlPointDisplay(for: geometry, curve: curve)
                 let curvePoint = quadBezierPoint(t: clampedT, start: geometry.start, control: control, end: geometry.end)
                 let offsetDistance = 6 / max(metrics.scale, 0.01)
-                let centroid = polygon.reduce(CGPoint.zero) { CGPoint(x: $0.x + $1.x, y: $0.y + $1.y) }
-                let center = CGPoint(x: centroid.x / CGFloat(polygon.count), y: centroid.y / CGFloat(polygon.count))
-                let outward = normalized(CGPoint(x: curvePoint.x - center.x, y: curvePoint.y - center.y))
+                let normal = normalized(geometry.normal)
+                let direction = curve.isConcave ? CGPoint(x: -normal.x, y: -normal.y) : normal
                 let adjusted = offsetRelativeToPolygon(
                     point: curvePoint,
                     segmentStart: geometry.start,
@@ -1581,7 +1874,7 @@ struct DrawingCanvasView: View {
                     polygon: polygon,
                     distance: offsetDistance,
                     preferInside: false,
-                    preferredDirection: outward
+                    preferredDirection: direction
                 )
                 return metrics.toCanvas(adjusted)
             }
@@ -1607,68 +1900,280 @@ struct DrawingCanvasView: View {
         let halfWidth = bounds.width / 2
         let halfHeight = bounds.height / 2
         let center = CGPoint(x: displayCutout.centerX, y: displayCutout.centerY)
-        let point: CGPoint
-
         if cutout.kind == .circle {
-            point = center
-            return metrics.toCanvas(point)
+            return metrics.toCanvas(center)
         }
 
         let polygon = ShapePathBuilder.displayPolygonPoints(for: piece, includeAngles: true)
-        if let metricsInfo = notchInteriorEdgeMetrics(cutout: cutout, metrics: metrics, polygon: polygon) {
-            switch edge {
-            case .left:
-                point = CGPoint(x: center.x - halfWidth, y: metricsInfo.widthCenterY)
-            case .right:
-                point = CGPoint(x: center.x + halfWidth, y: metricsInfo.widthCenterY)
-            case .top:
-                point = CGPoint(x: metricsInfo.lengthCenterX, y: center.y - halfHeight)
-            case .bottom:
-                point = CGPoint(x: metricsInfo.lengthCenterX, y: center.y + halfHeight)
-            default:
-                point = center
-            }
-            let offsetDistance = 6 / max(metrics.scale, 0.01)
-            let adjusted = offsetOutsidePolygon(
-                point: point,
-                segmentStart: segmentStartPoint(for: edge, cutout: displayCutout, displaySize: displaySize),
-                segmentEnd: segmentEndPoint(for: edge, cutout: displayCutout, displaySize: displaySize),
-                polygon: polygon,
-                distance: offsetDistance
-            )
-            return metrics.toCanvas(adjusted)
-        }
-
-        let cutoutPolygon = corners
-        let topMid = CGPoint(x: (corners[0].x + corners[1].x) / 2, y: (corners[0].y + corners[1].y) / 2)
-        let rightMid = CGPoint(x: (corners[1].x + corners[2].x) / 2, y: (corners[1].y + corners[2].y) / 2)
-        let bottomMid = CGPoint(x: (corners[2].x + corners[3].x) / 2, y: (corners[2].y + corners[3].y) / 2)
-        let leftMid = CGPoint(x: (corners[3].x + corners[0].x) / 2, y: (corners[3].y + corners[0].y) / 2)
-
+        let offsetDistance = 6 / max(metrics.scale, 0.01)
+        let fallbackMid: CGPoint
         switch edge {
         case .top:
-            point = topMid
+            fallbackMid = CGPoint(x: center.x, y: center.y - halfHeight)
         case .bottom:
-            point = bottomMid
+            fallbackMid = CGPoint(x: center.x, y: center.y + halfHeight)
         case .left:
-            point = leftMid
+            fallbackMid = CGPoint(x: center.x - halfWidth, y: center.y)
         case .right:
-            point = rightMid
+            fallbackMid = CGPoint(x: center.x + halfWidth, y: center.y)
         default:
-            point = topMid
+            fallbackMid = center
         }
 
-        let offsetDistance = 6 / max(metrics.scale, 0.01)
-        let adjusted = offsetRelativeToPolygon(
-            point: point,
-            segmentStart: segmentStartPoint(for: edge, cutout: displayCutout, displaySize: displaySize),
-            segmentEnd: segmentEndPoint(for: edge, cutout: displayCutout, displaySize: displaySize),
-            polygon: cutoutPolygon,
-            distance: offsetDistance,
-            preferInside: true,
-            preferredDirection: nil
+        let edgeMid = visibleCutoutEdgeInfo(
+            displayCutout: displayCutout,
+            edge: edge,
+            displaySize: displaySize,
+            polygon: polygon
+        )?.mid ?? fallbackMid
+
+        let inwardNormal = normalized(CGPoint(x: center.x - edgeMid.x, y: center.y - edgeMid.y))
+        let adjusted = CGPoint(
+            x: edgeMid.x + inwardNormal.x * offsetDistance,
+            y: edgeMid.y + inwardNormal.y * offsetDistance
         )
         return metrics.toCanvas(adjusted)
+    }
+    
+    /// Find the midpoint of a cutout edge that may be clipped by the triangle hypotenuse
+    private func findClippedCutoutEdgeMidpoint(cutout: Cutout, edge: EdgePosition, corners: [CGPoint], polygon: [CGPoint], displaySize: CGSize) -> CGPoint? {
+        guard corners.count == 4, polygon.count >= 3 else { return nil }
+        
+        // Get the cutout edge endpoints
+        let edgeCorners = cutoutEdgeCorners(corners: corners, edge: edge)
+        let edgeStart = edgeCorners.start
+        let edgeEnd = edgeCorners.end
+        
+        // Hypotenuse line: from (displaySize.width, 0) to (0, displaySize.height)
+        // Line equation: x/width + y/height = 1, or: x*height + y*width = width*height
+        let width = displaySize.width
+        let height = displaySize.height
+        
+        // Check if either endpoint is outside the triangle (beyond hypotenuse)
+        let startValue = edgeStart.x / width + edgeStart.y / height
+        let endValue = edgeEnd.x / width + edgeEnd.y / height
+        let eps: CGFloat = 0.01
+        
+        let startOutside = startValue > 1 + eps
+        let endOutside = endValue > 1 + eps
+        
+        // If neither endpoint is outside, no clipping needed
+        if !startOutside && !endOutside {
+            return nil
+        }
+        
+        // If both endpoints are outside, edge is not visible
+        if startOutside && endOutside {
+            return nil
+        }
+        
+        // One endpoint is inside, one is outside - calculate intersection with hypotenuse
+        // Parametric line: P = edgeStart + t*(edgeEnd - edgeStart)
+        // Hypotenuse: x/width + y/height = 1
+        // Substitute: (edgeStart.x + t*dx)/width + (edgeStart.y + t*dy)/height = 1
+        let dx = edgeEnd.x - edgeStart.x
+        let dy = edgeEnd.y - edgeStart.y
+        
+        // (edgeStart.x/width + edgeStart.y/height) + t*(dx/width + dy/height) = 1
+        let a = edgeStart.x / width + edgeStart.y / height
+        let b = dx / width + dy / height
+        
+        guard abs(b) > 0.0001 else { return nil }
+        
+        let t = (1 - a) / b
+        let intersectPoint = CGPoint(
+            x: edgeStart.x + t * dx,
+            y: edgeStart.y + t * dy
+        )
+        
+        // Calculate the midpoint of the visible portion
+        let visibleStart = startOutside ? intersectPoint : edgeStart
+        let visibleEnd = endOutside ? intersectPoint : edgeEnd
+        
+        return CGPoint(
+            x: (visibleStart.x + visibleEnd.x) / 2,
+            y: (visibleStart.y + visibleEnd.y) / 2
+        )
+    }
+
+    private func visibleCutoutEdgeInfo(displayCutout: Cutout, edge: EdgePosition, displaySize: CGSize, polygon: [CGPoint]) -> (mid: CGPoint, length: CGFloat)? {
+        let start = segmentStartPoint(for: edge, cutout: displayCutout, displaySize: displaySize)
+        let end = segmentEndPoint(for: edge, cutout: displayCutout, displaySize: displaySize)
+        return clippedSegmentInfo(start: start, end: end, polygon: polygon)
+    }
+
+    private func clippedSegmentInfo(start: CGPoint, end: CGPoint, polygon: [CGPoint]) -> (mid: CGPoint, length: CGFloat)? {
+        guard polygon.count >= 3 else { return nil }
+        let epsilon: CGFloat = 0.0001
+        var hits: [(t: CGFloat, point: CGPoint)] = []
+        var bestColinear: (mid: CGPoint, length: CGFloat)?
+
+        if pointIsInsideOrOnPolygon(start, polygon: polygon) {
+            hits.append((t: 0, point: start))
+        }
+        if pointIsInsideOrOnPolygon(end, polygon: polygon) {
+            hits.append((t: 1, point: end))
+        }
+
+        for i in 0..<polygon.count {
+            let a = polygon[i]
+            let b = polygon[(i + 1) % polygon.count]
+            if let t = segmentIntersectionParameter(p: start, p2: end, q: a, q2: b) {
+                let point = pointAlongSegment(start: start, end: end, t: t)
+                hits.append((t: t, point: point))
+            }
+
+            // Handle colinear overlap with polygon edges.
+            if segmentIsColinear(start: start, end: end, a: a, b: b, tolerance: 0.0005) {
+                if let overlap = colinearOverlap(start: start, end: end, a: a, b: b) {
+                    if overlap.length > (bestColinear?.length ?? 0) {
+                        bestColinear = overlap
+                    }
+                }
+            }
+        }
+
+        guard !hits.isEmpty else { return nil }
+        hits.sort { $0.t < $1.t }
+
+        var unique: [(t: CGFloat, point: CGPoint)] = []
+        for hit in hits {
+            if let last = unique.last, abs(hit.t - last.t) <= epsilon {
+                continue
+            }
+            unique.append(hit)
+        }
+
+        var bestMid: CGPoint?
+        var bestLength: CGFloat = 0
+
+        if unique.count == 1 {
+            if let bestColinear, bestColinear.length > epsilon {
+                return bestColinear
+            }
+            return nil
+        }
+
+        for index in 0..<(unique.count - 1) {
+            let t0 = unique[index].t
+            let t1 = unique[index + 1].t
+            if t1 - t0 <= epsilon { continue }
+            let midT = (t0 + t1) / 2
+            let mid = pointAlongSegment(start: start, end: end, t: midT)
+            if pointIsInsideOrOnPolygon(mid, polygon: polygon) {
+                let p0 = pointAlongSegment(start: start, end: end, t: t0)
+                let p1 = pointAlongSegment(start: start, end: end, t: t1)
+                let length = distance(p0, p1)
+                if length > bestLength {
+                    bestLength = length
+                    bestMid = mid
+                }
+            }
+        }
+
+        if let bestMid, bestLength > 0.000001 {
+            return (mid: bestMid, length: bestLength)
+        }
+
+        if let bestColinear, bestColinear.length > epsilon {
+            return bestColinear
+        }
+
+        return nil
+    }
+
+    private func pointIsInsideOrOnPolygon(_ point: CGPoint, polygon: [CGPoint]) -> Bool {
+        if pointIsInsidePolygon(point, polygon: polygon) { return true }
+        let tolerance: CGFloat = 0.0005
+        for i in 0..<polygon.count {
+            let a = polygon[i]
+            let b = polygon[(i + 1) % polygon.count]
+            if GeometryHelpers.pointSegmentDistance(point: point, a: a, b: b) <= tolerance {
+                return true
+            }
+        }
+        return false
+    }
+
+    private func distanceToPolygonBoundary(from point: CGPoint, polygon: [CGPoint]) -> CGFloat {
+        guard polygon.count >= 2 else { return 0 }
+        var best = CGFloat.greatestFiniteMagnitude
+        for i in 0..<polygon.count {
+            let a = polygon[i]
+            let b = polygon[(i + 1) % polygon.count]
+            let dist = GeometryHelpers.pointSegmentDistance(point: point, a: a, b: b)
+            best = min(best, dist)
+        }
+        return best == .greatestFiniteMagnitude ? 0 : best
+    }
+
+    private func outsidePointWithClearance(edgeMid: CGPoint, center: CGPoint, baseOffset: CGFloat, minClearance: CGFloat, polygon: [CGPoint]) -> CGPoint {
+        let normal = normalized(CGPoint(x: edgeMid.x - center.x, y: edgeMid.y - center.y))
+        let point = CGPoint(
+            x: edgeMid.x + normal.x * baseOffset,
+            y: edgeMid.y + normal.y * baseOffset
+        )
+        return point
+    }
+
+    private func pointAlongSegment(start: CGPoint, end: CGPoint, t: CGFloat) -> CGPoint {
+        CGPoint(x: start.x + (end.x - start.x) * t, y: start.y + (end.y - start.y) * t)
+    }
+
+    private func segmentIsColinear(start: CGPoint, end: CGPoint, a: CGPoint, b: CGPoint, tolerance: CGFloat) -> Bool {
+        let lineDistStart = GeometryHelpers.pointLineDistance(point: start, a: a, b: b)
+        let lineDistEnd = GeometryHelpers.pointLineDistance(point: end, a: a, b: b)
+        return lineDistStart <= tolerance && lineDistEnd <= tolerance
+    }
+
+    private func colinearOverlap(start: CGPoint, end: CGPoint, a: CGPoint, b: CGPoint) -> (mid: CGPoint, length: CGFloat)? {
+        if abs(start.x - end.x) >= abs(start.y - end.y) {
+            let segMin = min(start.x, end.x)
+            let segMax = max(start.x, end.x)
+            let edgeMin = min(a.x, b.x)
+            let edgeMax = max(a.x, b.x)
+            let overlapMin = max(segMin, edgeMin)
+            let overlapMax = min(segMax, edgeMax)
+            guard overlapMax > overlapMin else { return nil }
+            let midX = (overlapMin + overlapMax) / 2
+            let y = (start.y + end.y) / 2
+            return (mid: CGPoint(x: midX, y: y), length: overlapMax - overlapMin)
+        }
+        let segMin = min(start.y, end.y)
+        let segMax = max(start.y, end.y)
+        let edgeMin = min(a.y, b.y)
+        let edgeMax = max(a.y, b.y)
+        let overlapMin = max(segMin, edgeMin)
+        let overlapMax = min(segMax, edgeMax)
+        guard overlapMax > overlapMin else { return nil }
+        let midY = (overlapMin + overlapMax) / 2
+        let x = (start.x + end.x) / 2
+        return (mid: CGPoint(x: x, y: midY), length: overlapMax - overlapMin)
+    }
+
+    private func segmentIntersectionParameter(p: CGPoint, p2: CGPoint, q: CGPoint, q2: CGPoint) -> CGFloat? {
+        let r = CGPoint(x: p2.x - p.x, y: p2.y - p.y)
+        let s = CGPoint(x: q2.x - q.x, y: q2.y - q.y)
+        let rxs = r.x * s.y - r.y * s.x
+        let epsilon: CGFloat = 0.0001
+        if abs(rxs) < epsilon { return nil }
+        let qmp = CGPoint(x: q.x - p.x, y: q.y - p.y)
+        let t = (qmp.x * s.y - qmp.y * s.x) / rxs
+        let u = (qmp.x * r.y - qmp.y * r.x) / rxs
+        if t >= -epsilon && t <= 1 + epsilon && u >= -epsilon && u <= 1 + epsilon {
+            return min(max(t, 0), 1)
+        }
+        return nil
+    }
+
+    private func fullHypotenuseGeometry() -> (start: CGPoint, end: CGPoint, normal: CGPoint)? {
+        guard piece.shape == .rightTriangle else { return nil }
+        let size = ShapePathBuilder.displaySize(for: piece)
+        let start = CGPoint(x: size.width, y: 0)
+        let end = CGPoint(x: 0, y: size.height)
+        let direction = normalized(CGPoint(x: end.x - start.x, y: end.y - start.y))
+        let normal = CGPoint(x: direction.y, y: -direction.x)
+        return (start: start, end: end, normal: normal)
     }
 
     private func edgeGeometryFromPolygon(edge: EdgePosition, polygon: [CGPoint], shape: ShapeKind, baseBounds: CGRect?) -> (start: CGPoint, end: CGPoint, normal: CGPoint)? {
@@ -1805,6 +2310,57 @@ struct DrawingCanvasView: View {
         return (segment.start, segment.end, normal)
     }
 
+    private func fullEdgeGeometryDisplay(edge: EdgePosition) -> (start: CGPoint, end: CGPoint, normal: CGPoint)? {
+        let size = ShapePathBuilder.displaySize(for: piece)
+        switch piece.shape {
+        case .rectangle:
+            switch edge {
+            case .top:
+                return (CGPoint(x: 0, y: 0), CGPoint(x: size.width, y: 0), CGPoint(x: 0, y: -1))
+            case .right:
+                return (CGPoint(x: size.width, y: 0), CGPoint(x: size.width, y: size.height), CGPoint(x: 1, y: 0))
+            case .bottom:
+                return (CGPoint(x: size.width, y: size.height), CGPoint(x: 0, y: size.height), CGPoint(x: 0, y: 1))
+            case .left:
+                return (CGPoint(x: 0, y: size.height), CGPoint(x: 0, y: 0), CGPoint(x: -1, y: 0))
+            default:
+                return nil
+            }
+        case .rightTriangle:
+            switch edge {
+            case .legA:
+                return (CGPoint(x: 0, y: 0), CGPoint(x: size.width, y: 0), CGPoint(x: 0, y: -1))
+            case .legB:
+                return (CGPoint(x: 0, y: size.height), CGPoint(x: 0, y: 0), CGPoint(x: -1, y: 0))
+            case .hypotenuse:
+                return fullHypotenuseGeometry()
+            default:
+                return nil
+            }
+        default:
+            return nil
+        }
+    }
+
+    private func edgeProgress(point: CGPoint, geometry: (start: CGPoint, end: CGPoint, normal: CGPoint), edge: EdgePosition) -> CGFloat {
+        switch edge {
+        case .top, .bottom, .legA:
+            let denom = geometry.end.x - geometry.start.x
+            if abs(denom) < 0.0001 { return 0.5 }
+            return (point.x - geometry.start.x) / denom
+        case .left, .right, .legB:
+            let denom = geometry.end.y - geometry.start.y
+            if abs(denom) < 0.0001 { return 0.5 }
+            return (point.y - geometry.start.y) / denom
+        case .hypotenuse:
+            let dx = geometry.end.x - geometry.start.x
+            let dy = geometry.end.y - geometry.start.y
+            let denom = dx * dx + dy * dy
+            if denom < 0.0001 { return 0.5 }
+            return ((point.x - geometry.start.x) * dx + (point.y - geometry.start.y) * dy) / denom
+        }
+    }
+
     private func distance(_ a: CGPoint, _ b: CGPoint) -> CGFloat {
         let dx = a.x - b.x
         let dy = a.y - b.y
@@ -1821,9 +2377,14 @@ struct DrawingCanvasView: View {
     private func segmentIsOnHypotenuse(start: CGPoint, end: CGPoint, bounds: CGRect) -> Bool {
         let a = CGPoint(x: bounds.maxX, y: bounds.minY)
         let b = CGPoint(x: bounds.minX, y: bounds.maxY)
-        let tolerance: CGFloat = 1.0
+        let tolerance = hypotenuseTolerance(for: bounds)
         return pointLineDistance(point: start, a: a, b: b) <= tolerance &&
             pointLineDistance(point: end, a: a, b: b) <= tolerance
+    }
+
+    private func hypotenuseTolerance(for bounds: CGRect) -> CGFloat {
+        let scale = max(max(bounds.width, bounds.height), 1)
+        return max(0.05, scale * 0.002)
     }
 
     private func pointLineDistance(point: CGPoint, a: CGPoint, b: CGPoint) -> CGFloat {
@@ -2562,10 +3123,16 @@ private extension EdgeTapGestureOverlay {
 }
 
 private func rotatedCutout(_ cutout: Cutout) -> Cutout {
+    // For hypotenuse-oriented cutouts, do NOT swap width/height.
+    // The rotation in cutoutCornerPoints handles the orientation correctly.
+    // Swapping dimensions here would cause a double-transformation that results
+    // in width/length being visually swapped when the cutout transitions from
+    // interior to boundary (notch).
+    let isHypotenuseOriented = cutout.orientation == .hypotenuse
     return Cutout(
         kind: cutout.kind,
-        width: cutout.height,
-        height: cutout.width,
+        width: isHypotenuseOriented ? cutout.width : cutout.height,
+        height: isHypotenuseOriented ? cutout.height : cutout.width,
         centerX: cutout.centerY,
         centerY: cutout.centerX,
         isNotch: cutout.isNotch,
@@ -2594,16 +3161,56 @@ private func isInteriorNotchEdge(cutout: Cutout, edge: EdgePosition, pieceSize: 
     let maxY = bounds.maxY
     let edgeEpsilon: CGFloat = 0.01
 
+    // For right triangles, also check if the edge crosses the hypotenuse
+    if shape == .rightTriangle {
+        // Get the actual corner points of the cutout edge
+        let edgeCorners = cutoutEdgeCorners(corners: corners, edge: edge)
+        let start = edgeCorners.start
+        let end = edgeCorners.end
+        
+        // Check if both endpoints of this edge are outside the triangle (beyond hypotenuse)
+        // Hypotenuse line: x + y = displaySize.width (in display coordinates)
+        let startValue = start.x + start.y
+        let endValue = end.x + end.y
+        let hypotenuseValue = displaySize.width
+        
+        // If both endpoints are beyond the hypotenuse, this edge is not interior
+        if startValue > hypotenuseValue + edgeEpsilon && endValue > hypotenuseValue + edgeEpsilon {
+            return false
+        }
+        
+        // If one endpoint is beyond the hypotenuse and one is inside, the edge is clipped
+        // We should still show it if part of it is visible
+    }
+
     switch edge {
     case .left:
         return minX > edgeEpsilon
     case .right:
-        return maxX < pieceSize.width - edgeEpsilon
+        return maxX < displaySize.width - edgeEpsilon
     case .top:
         return minY > edgeEpsilon
     case .bottom:
-        return maxY < pieceSize.height - edgeEpsilon
+        return maxY < displaySize.height - edgeEpsilon
     default:
         return true
+    }
+}
+
+private func cutoutEdgeCorners(corners: [CGPoint], edge: EdgePosition) -> (start: CGPoint, end: CGPoint) {
+    guard corners.count == 4 else {
+        return (CGPoint.zero, CGPoint.zero)
+    }
+    switch edge {
+    case .top:
+        return (corners[0], corners[1])
+    case .right:
+        return (corners[1], corners[2])
+    case .bottom:
+        return (corners[2], corners[3])
+    case .left:
+        return (corners[3], corners[0])
+    default:
+        return (CGPoint.zero, CGPoint.zero)
     }
 }

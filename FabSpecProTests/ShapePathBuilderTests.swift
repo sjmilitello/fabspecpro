@@ -609,4 +609,50 @@ struct TriangleTopRightCornerCutTests {
         }
         #expect(hasCornerCutPoint, "Should have corner cut point at approximately (4, 20) display coords")
     }
+    
+    @Test @MainActor func hypotenuseNotchWithCurve() throws {
+        let container = try createTestContainer()
+        let piece = createTestPiece(container: container, shape: .rightTriangle, width: "24", height: "18")
+        
+        // Add a notch cutout on the hypotenuse
+        // For a 24x18 triangle, hypotenuse goes from (24,0) to (0,18) in raw coords
+        // Place cutout near the middle
+        let cutout = Cutout(kind: .rectangle, width: 4, height: 4, centerX: 12, centerY: 9)
+        cutout.orientation = .hypotenuse
+        cutout.isNotch = true
+        piece.cutouts.append(cutout)
+        
+        // Add a hypotenuse curve
+        let curve = CurvedEdge(edge: .hypotenuse, radius: 3, isConcave: false)
+        piece.curvedEdges.append(curve)
+        
+        // Generate the path
+        let path = ShapePathBuilder.path(for: piece)
+        
+        // The path should exist and have some elements
+        #expect(!path.isEmpty, "Path should not be empty")
+        
+        // Get the bounding box - if curves are applied, the bounds should extend beyond the triangle
+        let bounds = path.boundingRect
+        print("Path bounds: \(bounds)")
+        
+        // For a convex curve on the hypotenuse, the path should extend beyond the original triangle bounds
+        // The display size is (18, 24) - width and height swapped
+        // If the curve is applied, maxX should be > 18 or maxY should be > 24
+        let displaySize = ShapePathBuilder.displaySize(for: piece)
+        print("Display size: \(displaySize)")
+        
+        // Check if the curve is having any effect
+        // A convex curve would push the hypotenuse outward
+        let curveApplied = bounds.maxX > displaySize.width + 0.1 || 
+                           bounds.maxY > displaySize.height + 0.1 ||
+                           bounds.minX < -0.1 ||
+                           bounds.minY < -0.1
+        
+        print("Curve applied: \(curveApplied)")
+        print("bounds.maxX=\(bounds.maxX), displaySize.width=\(displaySize.width)")
+        print("bounds.maxY=\(bounds.maxY), displaySize.height=\(displaySize.height)")
+        
+        #expect(curveApplied, "Hypotenuse curve should extend the path beyond original triangle bounds")
+    }
 }
