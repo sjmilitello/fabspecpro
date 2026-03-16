@@ -688,7 +688,27 @@ enum ShapePathBuilder {
     }
 
     static func cutoutTouchesBoundary(cutout: Cutout, size: CGSize, shape: ShapeKind) -> Bool {
-        let corners = GeometryHelpers.cutoutCornerPoints(cutout: cutout, size: size, shape: shape)
+        // For custom angle cutouts, use UNROTATED corners to determine if it touches the boundary.
+        // This prevents interior cutouts from being incorrectly classified as notches just because
+        // their rotated corners happen to extend to/beyond the triangle edges.
+        let corners: [CGPoint]
+        if shape == .rightTriangle && cutout.orientation == .custom {
+            // Create an unrotated version of the cutout (as if customAngleDegrees = 0)
+            let unrotatedCutout = Cutout(
+                kind: cutout.kind,
+                width: cutout.width,
+                height: cutout.height,
+                centerX: cutout.centerX,
+                centerY: cutout.centerY,
+                isNotch: cutout.isNotch,
+                orientation: .legs,  // Use legs orientation to get unrotated corners
+                customAngleDegrees: 0
+            )
+            corners = GeometryHelpers.cutoutCornerPoints(cutout: unrotatedCutout, size: size, shape: shape)
+        } else {
+            corners = GeometryHelpers.cutoutCornerPoints(cutout: cutout, size: size, shape: shape)
+        }
+        
         let bounds = GeometryHelpers.bounds(for: corners)
         let minX = bounds.minX
         let maxX = bounds.maxX
@@ -1130,9 +1150,22 @@ enum ShapePathBuilder {
         clips.reserveCapacity(notches.count)
         for cutout in notches {
             guard cutout.kind != .circle else { continue }
-            let corners = GeometryHelpers.cutoutCornerPoints(cutout: cutout, size: size, shape: shape)
-            if corners.count >= 3 {
-                clips.append(corners)
+            
+            if shape == .rightTriangle && cutout.orientation == .custom {
+                // For custom angle notches, calculate corners directly in raw coordinates.
+                // This is similar to how .legs works, but with rotation applied.
+                //
+                // The cutout is stored in raw coordinates (centerX, centerY, width, height).
+                // We just need to apply the custom angle rotation around the center.
+                let corners = GeometryHelpers.cutoutCornerPoints(cutout: cutout, size: size, shape: shape)
+                if corners.count >= 3 {
+                    clips.append(corners)
+                }
+            } else {
+                let corners = GeometryHelpers.cutoutCornerPoints(cutout: cutout, size: size, shape: shape)
+                if corners.count >= 3 {
+                    clips.append(corners)
+                }
             }
         }
         return clips
@@ -1306,7 +1339,8 @@ enum ShapePathBuilder {
             
             // Handle top + hypotenuse corner: notch touches top edge and hypotenuse (but not left edge)
             // This creates a corner cut between the top edge and hypotenuse
-            if touchesTop && touchesHypotenuse && !touchesLeft {
+            // Only process .hypotenuse orientation notches - .legs and .custom should keep rectangular shape
+            if touchesTop && touchesHypotenuse && !touchesLeft && notch.orientation == .hypotenuse {
                 topHypotenuseCornerMinX = min(topHypotenuseCornerMinX, minX)
                 let yAtMinX = height * (1 - minX / max(width, 0.0001))
                 if yAtMinX < maxY - edgeEpsilon {
@@ -1326,7 +1360,8 @@ enum ShapePathBuilder {
             
             // Handle left + hypotenuse corner: notch touches left edge and hypotenuse (but not top edge)
             // This creates a corner cut between the left edge and hypotenuse
-            if touchesLeft && touchesHypotenuse && !touchesTop {
+            // Only process .hypotenuse orientation notches - .legs and .custom should keep rectangular shape
+            if touchesLeft && touchesHypotenuse && !touchesTop && notch.orientation == .hypotenuse {
                 leftHypotenuseCornerEdgeY = min(leftHypotenuseCornerEdgeY, minY)
                 let xAtMinY = width * (1 - minY / max(height, 0.0001))
                 if xAtMinY < maxX - edgeEpsilon {
@@ -1352,6 +1387,13 @@ enum ShapePathBuilder {
                 } else if touchesLeft {
                     leftSpans.append((start: minY, end: maxY, depth: maxX))
                 } else if touchesHypotenuse {
+                    // Only process notches with .hypotenuse orientation through the hypotenuse
+                    // axis-aligned path. Notches with .legs or .custom orientation should keep
+                    // their rectangular shape and be handled by the boolean difference approach
+                    // in notchClipPolygons, not stretched toward the hypotenuse angle.
+                    if notch.orientation != .hypotenuse {
+                        continue
+                    }
                     if let span = cutoutHypotenuseSpan(minX: minX, maxX: maxX, minY: minY, maxY: maxY, size: size) {
                         hypotenuseSpans.append((tStart: span.start, tEnd: span.end, minX: span.minX, maxX: span.maxX, minY: span.minY, maxY: span.maxY))
                     }
@@ -3207,6 +3249,170 @@ enum ShapePathBuilder {
             }
         }
         
+        // Determine which points should actually be projected onto the hypotenuse curve.
+        // A point should only be projected if it's an endpoint of a diagonal hypotenuse segment.
+        // Points that are only connected to horizontal/vertical edges (notch interior corners)
+        // should NOT be projected - they need to maintain their square corner positions.
+        var hypotenuseProjectablePoints: Set<Int> = []
+        for segmentIndex in hypotenuseSegmentIndices {
+            let nextIndex = (segmentIndex + 1) % points.count
+            hypotenuseProjectablePoints.insert(segmentIndex)
+            hypotenuseProjectablePoints.insert(nextIndex)
+        }
+        
+        // For hypotenuse points that are connected to notch edges (interior edges of cutouts),
+        // we need to extend those edges straight to the curve instead of projecting the point.
+        // This applies to horizontal/vertical edges (square to legs) AND angled edges (custom angle).
+        // The notch edge direction is defined by a point on the edge and a direction vector.
+        struct NotchEdgeExtension {
+            let interiorPoint: CGPoint  // The interior corner point (stays fixed)
+            let direction: CGPoint      // Unit direction vector along the edge
+        }
+        var notchEdgeExtensions: [Int: NotchEdgeExtension] = [:]
+        
+        // Find hypotenuse points that are connected to notch edges (non-diagonal segments)
+        for pointIndex in hypotenuseProjectablePoints {
+            let point = points[pointIndex]
+            let prevIndex = (pointIndex - 1 + points.count) % points.count
+            let nextIndex = (pointIndex + 1) % points.count
+            let prevPoint = points[prevIndex]
+            let nextPoint = points[nextIndex]
+            
+            // Check if previous segment is a notch edge (NOT on hypotenuse diagonal)
+            // A segment is a notch edge if it's not in hypotenuseSegmentIndices
+            let prevSegmentIndex = prevIndex  // Segment from prevPoint to point
+            let nextSegmentIndex = pointIndex // Segment from point to nextPoint
+            
+            let prevIsNotchEdge = !hypotenuseSegmentIndices.contains(prevSegmentIndex)
+            let nextIsNotchEdge = !hypotenuseSegmentIndices.contains(nextSegmentIndex)
+            
+            // Prefer the notch edge that connects to an interior corner
+            if prevIsNotchEdge {
+                // Edge goes from prevPoint (interior) to point (on hypotenuse)
+                let dx = point.x - prevPoint.x
+                let dy = point.y - prevPoint.y
+                let length = sqrt(dx * dx + dy * dy)
+                if length > eps {
+                    let direction = CGPoint(x: dx / length, y: dy / length)
+                    notchEdgeExtensions[pointIndex] = NotchEdgeExtension(
+                        interiorPoint: prevPoint,
+                        direction: direction
+                    )
+                }
+            } else if nextIsNotchEdge {
+                // Edge goes from point (on hypotenuse) to nextPoint (interior)
+                let dx = nextPoint.x - point.x
+                let dy = nextPoint.y - point.y
+                let length = sqrt(dx * dx + dy * dy)
+                if length > eps {
+                    // Direction is from interior toward hypotenuse (reverse)
+                    let direction = CGPoint(x: -dx / length, y: -dy / length)
+                    notchEdgeExtensions[pointIndex] = NotchEdgeExtension(
+                        interiorPoint: nextPoint,
+                        direction: direction
+                    )
+                }
+            }
+        }
+        
+        // Helper function to find where a ray (line from point in direction) intersects a quadratic Bezier
+        // Returns the intersection point on the curve that is in the direction from linePoint
+        func rayQuadIntersection(
+            linePoint: CGPoint,
+            direction: CGPoint,
+            curveStart: CGPoint,
+            curveControl: CGPoint,
+            curveEnd: CGPoint,
+            nearT: CGFloat
+        ) -> CGPoint? {
+            // Parametric ray: R(s) = linePoint + s * direction, s >= 0
+            // Quadratic Bezier: B(t) = (1-t)²·P0 + 2(1-t)t·P1 + t²·P2
+            //
+            // We need to find t where the ray intersects the curve.
+            // Substituting and solving:
+            // linePoint + s * direction = B(t)
+            //
+            // This gives us two equations (x and y). We can eliminate s:
+            // (B(t).x - linePoint.x) / direction.x = (B(t).y - linePoint.y) / direction.y
+            // Cross multiply:
+            // (B(t).x - linePoint.x) * direction.y = (B(t).y - linePoint.y) * direction.x
+            //
+            // Let B(t) = a*t² + b*t + c for each coordinate
+            // Bx(t) = ax*t² + bx*t + cx where:
+            //   ax = curveStart.x - 2*curveControl.x + curveEnd.x
+            //   bx = 2*(curveControl.x - curveStart.x)
+            //   cx = curveStart.x
+            // Similarly for y
+            
+            let ax = curveStart.x - 2 * curveControl.x + curveEnd.x
+            let bx = 2 * (curveControl.x - curveStart.x)
+            let cx = curveStart.x
+            
+            let ay = curveStart.y - 2 * curveControl.y + curveEnd.y
+            let by = 2 * (curveControl.y - curveStart.y)
+            let cy = curveStart.y
+            
+            // Equation: (ax*t² + bx*t + cx - linePoint.x) * direction.y 
+            //         = (ay*t² + by*t + cy - linePoint.y) * direction.x
+            //
+            // Expanding:
+            // ax*dy*t² + bx*dy*t + (cx - lx)*dy = ay*dx*t² + by*dx*t + (cy - ly)*dx
+            //
+            // Rearranging to standard form A*t² + B*t + C = 0:
+            let dx = direction.x
+            let dy = direction.y
+            let lx = linePoint.x
+            let ly = linePoint.y
+            
+            let A = ax * dy - ay * dx
+            let B = bx * dy - by * dx
+            let C = (cx - lx) * dy - (cy - ly) * dx
+            
+            var solutions: [CGFloat] = []
+            if abs(A) < 0.0001 {
+                // Linear case
+                if abs(B) > 0.0001 {
+                    solutions.append(-C / B)
+                }
+            } else {
+                let discriminant = B * B - 4 * A * C
+                if discriminant >= 0 {
+                    let sqrtD = sqrt(discriminant)
+                    solutions.append((-B + sqrtD) / (2 * A))
+                    solutions.append((-B - sqrtD) / (2 * A))
+                }
+            }
+            
+            // Filter valid t values (on the curve) and check that s >= 0 (in the ray direction)
+            var validSolutions: [(t: CGFloat, s: CGFloat)] = []
+            for t in solutions {
+                guard t >= -0.01 && t <= 1.01 else { continue }
+                let clampedT = max(0, min(1, t))
+                let curvePoint = quadPoint(start: curveStart, control: curveControl, end: curveEnd, t: clampedT)
+                
+                // Calculate s (how far along the ray)
+                let s: CGFloat
+                if abs(dx) > abs(dy) {
+                    s = (curvePoint.x - lx) / dx
+                } else if abs(dy) > 0.0001 {
+                    s = (curvePoint.y - ly) / dy
+                } else {
+                    continue
+                }
+                
+                // s should be positive (in the direction of the ray)
+                if s >= -0.01 {
+                    validSolutions.append((clampedT, s))
+                }
+            }
+            
+            // Pick the solution closest to nearT
+            guard let best = validSolutions.min(by: { abs($0.t - nearT) < abs($1.t - nearT) }) else {
+                return nil
+            }
+            return quadPoint(start: curveStart, control: curveControl, end: curveEnd, t: best.t)
+        }
+        
         // Edge-based control overrides for non-span curves
         var edgeControlOverrides: [EdgePosition: CGPoint] = [:]
         for (edge, curve) in edgeCurves where curve.radius > 0 {
@@ -3318,8 +3524,27 @@ enum ShapePathBuilder {
                 case .top, .bottom, .legA:
                     if abs(point.y - fullGeometry.start.y) > 1.0 { continue }
                 case .hypotenuse:
+                    // Only project points that are endpoints of diagonal hypotenuse segments.
+                    // This excludes notch interior corners which should maintain square positions.
+                    if !hypotenuseProjectablePoints.contains(pointIndex) { continue }
                     if !pointIsOnEdge(point, edge: .hypotenuse, bounds: hypotenuseBounds, shape: shape, tolerance: hypotenuseTolerance(for: hypotenuseBounds)) {
                         continue
+                    }
+                    
+                    // Check if this point is connected to a notch edge
+                    // If so, extend that edge straight to the curve instead of projecting parametrically
+                    if let notchExtension = notchEdgeExtensions[pointIndex] {
+                        if let intersection = rayQuadIntersection(
+                            linePoint: notchExtension.interiorPoint,
+                            direction: notchExtension.direction,
+                            curveStart: spanStart,
+                            curveControl: control,
+                            curveEnd: spanEnd,
+                            nearT: t
+                        ) {
+                            drawPoints[pointIndex] = intersection
+                            continue
+                        }
                     }
                 }
                 drawPoints[pointIndex] = quadPoint(start: spanStart, control: control, end: spanEnd, t: t)
@@ -3341,22 +3566,42 @@ enum ShapePathBuilder {
             for pointIndex in 0..<points.count {
                 let point = points[pointIndex]
                 if edge == .hypotenuse {
-                    guard pointHypotenuseT[pointIndex] != nil else { continue }
+                    // Only project points that are endpoints of diagonal hypotenuse segments.
+                    // This excludes notch interior corners which should maintain square positions.
+                    guard hypotenuseProjectablePoints.contains(pointIndex) else { continue }
+                    guard let preT = pointHypotenuseT[pointIndex] else { continue }
+                    
+                    // Check if this point is connected to a notch edge
+                    // If so, extend that edge straight to the curve instead of projecting parametrically
+                    if let notchExtension = notchEdgeExtensions[pointIndex] {
+                        if let intersection = rayQuadIntersection(
+                            linePoint: notchExtension.interiorPoint,
+                            direction: notchExtension.direction,
+                            curveStart: geometry.start,
+                            curveControl: control,
+                            curveEnd: geometry.end,
+                            nearT: preT
+                        ) {
+                            drawPoints[pointIndex] = intersection
+                            continue
+                        }
+                    }
+                    
+                    // Standard parametric projection for non-notch hypotenuse points
+                    if let spanRange, (preT < spanRange.min - 0.0001 || preT > spanRange.max + 0.0001) {
+                        continue
+                    }
+                    drawPoints[pointIndex] = quadPoint(start: geometry.start, control: control, end: geometry.end, t: preT)
                 } else {
                     if !pointIsOnEdge(point, edge: edge, bounds: hypotenuseBounds, shape: shape, tolerance: tolerance) {
                         continue
                     }
+                    let t = tForEdge(point: point, geometry: geometry, edge: edge)
+                    if let spanRange, (t < spanRange.min - 0.0001 || t > spanRange.max + 0.0001) {
+                        continue
+                    }
+                    drawPoints[pointIndex] = quadPoint(start: geometry.start, control: control, end: geometry.end, t: t)
                 }
-                let t: CGFloat
-                if edge == .hypotenuse, let preT = pointHypotenuseT[pointIndex] {
-                    t = preT
-                } else {
-                    t = tForEdge(point: point, geometry: geometry, edge: edge)
-                }
-                if let spanRange, (t < spanRange.min - 0.0001 || t > spanRange.max + 0.0001) {
-                    continue
-                }
-                drawPoints[pointIndex] = quadPoint(start: geometry.start, control: control, end: geometry.end, t: t)
             }
         }
 

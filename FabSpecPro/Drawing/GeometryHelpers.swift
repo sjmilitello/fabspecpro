@@ -40,21 +40,32 @@ enum GeometryHelpers {
     // MARK: - Cutout Helpers
 
     static func cutoutRotationAngle(cutout: Cutout, size: CGSize, shape: ShapeKind) -> CGFloat {
-        guard shape == .rightTriangle, cutout.orientation == .hypotenuse else { return 0 }
-        let width = max(size.width, 0.0001)
-        let height = max(size.height, 0.0001)
-        return -atan2(height, width)
+        guard shape == .rightTriangle else { return 0 }
+        switch cutout.orientation {
+        case .hypotenuse:
+            let width = max(size.width, 0.0001)
+            let height = max(size.height, 0.0001)
+            return -atan2(height, width)
+        case .custom:
+            // Simple direct mapping: user angle → rotation angle
+            // The negative sign makes positive angles rotate clockwise (toward hypotenuse)
+            return -cutout.customAngleDegrees * .pi / 180
+        case .legs:
+            return 0
+        }
     }
 
     static func cutoutCornerPoints(cutout: Cutout, size: CGSize, shape: ShapeKind) -> [CGPoint] {
         let center = CGPoint(x: cutout.centerX, y: cutout.centerY)
         let angle = cutoutRotationAngle(cutout: cutout, size: size, shape: shape)
-        // For hypotenuse-oriented cutouts, swap width/height so that:
+        // For hypotenuse-aligned cutouts, swap width/height so that:
         // - width is perpendicular to the hypotenuse
         // - height (length) is parallel to the hypotenuse
-        let isHypotenuseOriented = shape == .rightTriangle && cutout.orientation == .hypotenuse
-        let halfWidth = (isHypotenuseOriented ? cutout.height : cutout.width) / 2
-        let halfHeight = (isHypotenuseOriented ? cutout.width : cutout.height) / 2
+        // For custom angles, do NOT swap - just rotate from the "square to legs" baseline.
+        // This ensures smooth rotation as the angle changes from 0° to 90°.
+        let shouldSwapDimensions = shape == .rightTriangle && cutout.orientation == .hypotenuse
+        let halfWidth = (shouldSwapDimensions ? cutout.height : cutout.width) / 2
+        let halfHeight = (shouldSwapDimensions ? cutout.width : cutout.height) / 2
         let base = [
             CGPoint(x: center.x - halfWidth, y: center.y - halfHeight),
             CGPoint(x: center.x + halfWidth, y: center.y - halfHeight),

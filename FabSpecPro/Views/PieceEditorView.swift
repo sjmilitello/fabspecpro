@@ -1649,13 +1649,37 @@ private struct CutoutRow: View {
                     HStack(spacing: 8) {
                         Button("Square to Legs") {
                             cutout.orientation = .legs
+                            cutout.customAngleDegrees = 0
                         }
                         .buttonStyle(PillButtonStyle(isProminent: cutout.orientation == .legs))
 
                         Button("Square to Hypotenuse") {
                             cutout.orientation = .hypotenuse
+                            cutout.customAngleDegrees = 0
                         }
                         .buttonStyle(PillButtonStyle(isProminent: cutout.orientation == .hypotenuse))
+
+                        Button("Custom Angle") {
+                            cutout.orientation = .custom
+                        }
+                        .buttonStyle(PillButtonStyle(isProminent: cutout.orientation == .custom))
+                    }
+
+                    if cutout.orientation == .custom {
+                        HStack {
+                            Text("Angle:")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(Theme.secondaryText)
+                            TextField("0", value: Binding(
+                                get: { cutout.customAngleDegrees },
+                                set: { cutout.customAngleDegrees = $0 }
+                            ), format: .number)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 80)
+                            Text("°")
+                                .font(.system(size: 11))
+                                .foregroundStyle(Theme.secondaryText)
+                        }
                     }
                 }
 

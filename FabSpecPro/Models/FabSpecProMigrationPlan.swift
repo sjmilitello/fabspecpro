@@ -213,9 +213,28 @@ enum FabSpecProSchemaV12: VersionedSchema {
     }
 }
 
+/// Schema V13: Adds customAngleDegrees to Cutout for custom angle rotation
+enum FabSpecProSchemaV13: VersionedSchema {
+    static var versionIdentifier: Schema.Version { Schema.Version(1, 12, 0) }
+    static var models: [any PersistentModel.Type] {
+        [
+            Project.self,
+            Piece.self,
+            EdgeTreatment.self,
+            EdgeAssignment.self,
+            Cutout.self,
+            CurvedEdge.self,
+            AngleCut.self,
+            CornerRadius.self,
+            BusinessHeader.self,
+            MaterialOption.self
+        ]
+    }
+}
+
 enum FabSpecProMigrationPlan: SchemaMigrationPlan {
     static var schemas: [any VersionedSchema.Type] {
-        [FabSpecProSchemaV1.self, FabSpecProSchemaV2.self, FabSpecProSchemaV3.self, FabSpecProSchemaV4.self, FabSpecProSchemaV5.self, FabSpecProSchemaV6.self, FabSpecProSchemaV7.self, FabSpecProSchemaV8.self, FabSpecProSchemaV9.self, FabSpecProSchemaV10.self, FabSpecProSchemaV11.self, FabSpecProSchemaV12.self]
+        [FabSpecProSchemaV1.self, FabSpecProSchemaV2.self, FabSpecProSchemaV3.self, FabSpecProSchemaV4.self, FabSpecProSchemaV5.self, FabSpecProSchemaV6.self, FabSpecProSchemaV7.self, FabSpecProSchemaV8.self, FabSpecProSchemaV9.self, FabSpecProSchemaV10.self, FabSpecProSchemaV11.self, FabSpecProSchemaV12.self, FabSpecProSchemaV13.self]
     }
 
     static var stages: [MigrationStage] {
@@ -230,7 +249,8 @@ enum FabSpecProMigrationPlan: SchemaMigrationPlan {
             .lightweight(fromVersion: FabSpecProSchemaV8.self, toVersion: FabSpecProSchemaV9.self),
             .lightweight(fromVersion: FabSpecProSchemaV9.self, toVersion: FabSpecProSchemaV10.self),
             .lightweight(fromVersion: FabSpecProSchemaV10.self, toVersion: FabSpecProSchemaV11.self),
-            .lightweight(fromVersion: FabSpecProSchemaV11.self, toVersion: FabSpecProSchemaV12.self)
+            .lightweight(fromVersion: FabSpecProSchemaV11.self, toVersion: FabSpecProSchemaV12.self),
+            .lightweight(fromVersion: FabSpecProSchemaV12.self, toVersion: FabSpecProSchemaV13.self)
         ]
     }
 }

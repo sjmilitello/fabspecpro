@@ -4,6 +4,7 @@ import SwiftData
 enum CutoutOrientation: String, CaseIterable {
     case legs = "legs"           // Aligned with legA/legB (default for triangles)
     case hypotenuse = "hypotenuse"  // Rotated to align with hypotenuse
+    case custom = "custom"       // Custom angle rotation
 }
 
 @Model
@@ -22,8 +23,9 @@ final class Cutout {
     var createdAt: Date
     var piece: Piece?
     var orientationRaw: String = "legs"
+    var customAngleDegrees: Double = 0
 
-    init(kind: CutoutKind, width: Double, height: Double, centerX: Double, centerY: Double, isNotch: Bool = false, isApplied: Bool = true, cornerIndex: Int = -1, cornerAnchorX: Double = -1, cornerAnchorY: Double = -1, createdAt: Date = Date(), orientation: CutoutOrientation = .legs) {
+    init(kind: CutoutKind, width: Double, height: Double, centerX: Double, centerY: Double, isNotch: Bool = false, isApplied: Bool = true, cornerIndex: Int = -1, cornerAnchorX: Double = -1, cornerAnchorY: Double = -1, createdAt: Date = Date(), orientation: CutoutOrientation = .legs, customAngleDegrees: Double = 0) {
         self.id = UUID()
         self.kindRaw = kind.rawValue
         self.width = width
@@ -37,6 +39,7 @@ final class Cutout {
         self.isApplied = isApplied
         self.createdAt = createdAt
         self.orientationRaw = orientation.rawValue
+        self.customAngleDegrees = customAngleDegrees
     }
 
     var orientation: CutoutOrientation {
@@ -47,6 +50,11 @@ final class Cutout {
     var kind: CutoutKind {
         get { CutoutKind(rawValue: kindRaw) ?? .circle }
         set { kindRaw = newValue.rawValue }
+    }
+
+    /// Returns true if this cutout has any rotation (hypotenuse alignment or custom angle)
+    var isRotated: Bool {
+        orientation == .hypotenuse || (orientation == .custom && abs(customAngleDegrees) > 0.001)
     }
 }
 

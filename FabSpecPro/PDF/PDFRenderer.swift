@@ -1072,15 +1072,15 @@ enum PDFRenderer {
             var widthEdgeMid = widthEdgeInfo.mid
             var lengthEdgeMid = lengthEdgeInfo.mid
 
-            // For hypotenuse-oriented cutouts, width/height are NOT swapped in dispCutout
-            let isHypotenuseOriented = piece.shape == .rightTriangle && notch.orientation == .hypotenuse
-            let expectedWidth = isHypotenuseOriented ? dispCutout.width : dispCutout.height
-            let expectedLength = isHypotenuseOriented ? dispCutout.height : dispCutout.width
+            // For rotated cutouts (hypotenuse or custom angle), width/height are NOT swapped in dispCutout
+            let isEffectivelyRotated = piece.shape == .rightTriangle && notch.isRotated
+            let expectedWidth = isEffectivelyRotated ? dispCutout.width : dispCutout.height
+            let expectedLength = isEffectivelyRotated ? dispCutout.height : dispCutout.width
             let lengthEpsilon: CGFloat = 0.001
             var widthValue = expectedWidth
             var lengthValue = expectedLength
 
-            if piece.shape == .rightTriangle, notch.orientation == .hypotenuse {
+            if piece.shape == .rightTriangle, notch.isRotated {
                 let corners = GeometryHelpers.cutoutCornerPoints(cutout: dispCutout, size: displaySize, shape: piece.shape)
                 if corners.count == 4 {
                     struct RotatedEdgeInfo {
@@ -1196,7 +1196,7 @@ enum PDFRenderer {
                     lengthCurveDepth = curve.isConcave ? -CGFloat(curve.radius) : CGFloat(curve.radius)
                     lengthFromApex = true
                 }
-                if (isNotchOnHypotenuse(cutout: dispCutout, pieceSize: displaySize) || notch.orientation == .hypotenuse),
+                if (isNotchOnHypotenuse(cutout: dispCutout, pieceSize: displaySize) || notch.isRotated),
                    let hypCurve = piece.curve(for: .hypotenuse), hypCurve.radius > 0 {
                     let hypStart = CGPoint(x: displaySize.width, y: 0)
                     let hypEnd = CGPoint(x: 0, y: displaySize.height)
@@ -1398,11 +1398,11 @@ enum PDFRenderer {
             let widthCanvas = CGPoint(x: offsetX + widthPoint.x * scale, y: offsetY + widthPoint.y * scale)
             let lengthCanvas = CGPoint(x: offsetX + lengthPoint.x * scale, y: offsetY + lengthPoint.y * scale)
 
-            // For hypotenuse-oriented cutouts, width/height are NOT swapped in dispCutout,
+            // For rotated cutouts (hypotenuse or custom angle), width/height are NOT swapped in dispCutout,
             // so we use them directly. For other cutouts, they are swapped.
-            let isHypotenuseOriented = piece.shape == .rightTriangle && cutout.orientation == .hypotenuse
-            let widthValue = CGFloat(isHypotenuseOriented ? dispCutout.width : dispCutout.height)
-            let lengthValue = CGFloat(isHypotenuseOriented ? dispCutout.height : dispCutout.width)
+            let isEffectivelyRotated = piece.shape == .rightTriangle && cutout.isRotated
+            let widthValue = CGFloat(isEffectivelyRotated ? dispCutout.width : dispCutout.height)
+            let lengthValue = CGFloat(isEffectivelyRotated ? dispCutout.height : dispCutout.width)
             let widthText = MeasurementParser.formatInches(Double(widthValue))
             let lengthText = MeasurementParser.formatInches(Double(lengthValue))
 
@@ -3251,20 +3251,21 @@ enum PDFRenderer {
     }
 
     private static func displayCutout(for cutout: Cutout) -> Cutout {
-        // For hypotenuse-oriented cutouts, do NOT swap width/height.
+        // For rotated cutouts (hypotenuse or custom angle), do NOT swap width/height.
         // The rotation in cutoutCornerPoints handles the orientation correctly.
         // Swapping dimensions here would cause a double-transformation that results
         // in width/length being visually swapped when the cutout transitions from
         // interior to boundary (notch).
-        let isHypotenuseOriented = cutout.orientation == .hypotenuse
+        let isEffectivelyRotated = cutout.isRotated
         return Cutout(
             kind: cutout.kind,
-            width: isHypotenuseOriented ? cutout.width : cutout.height,
-            height: isHypotenuseOriented ? cutout.height : cutout.width,
+            width: isEffectivelyRotated ? cutout.width : cutout.height,
+            height: isEffectivelyRotated ? cutout.height : cutout.width,
             centerX: cutout.centerY,
             centerY: cutout.centerX,
             isNotch: cutout.isNotch,
-            orientation: cutout.orientation
+            orientation: cutout.orientation,
+            customAngleDegrees: cutout.customAngleDegrees
         )
     }
 

@@ -1137,7 +1137,8 @@ struct DrawingCanvasView: View {
             }
         }
 
-        // For hypotenuse-oriented cutouts, width/height are NOT swapped in displayCutout
+        // For hypotenuse-oriented cutouts, width/height are NOT swapped in displayCutout.
+        // For custom angles and legs, width/height ARE swapped in displayCutout.
         let isHypotenuseOriented = piece.shape == .rightTriangle && cutout.orientation == .hypotenuse
         let expectedWidth = isHypotenuseOriented ? displayCutout.width : displayCutout.height
         let expectedLength = isHypotenuseOriented ? displayCutout.height : displayCutout.width
@@ -1145,7 +1146,8 @@ struct DrawingCanvasView: View {
         var widthValue = expectedWidth
         var lengthValue = expectedLength
 
-        if piece.shape == .rightTriangle, cutout.orientation == .hypotenuse {
+        // For rotated cutouts (hypotenuse or custom angle with non-zero rotation), use corner-based measurement
+        if piece.shape == .rightTriangle, (cutout.orientation == .hypotenuse || (cutout.orientation == .custom && abs(cutout.customAngleDegrees) > 0.001)) {
             let corners = GeometryHelpers.cutoutCornerPoints(cutout: displayCutout, size: displaySize, shape: piece.shape)
             if corners.count == 4 {
                 struct RotatedEdgeInfo {
@@ -1442,8 +1444,8 @@ struct DrawingCanvasView: View {
             polygon: outerPolygon
         )
 
-        // For hypotenuse-oriented cutouts, width/height are NOT swapped in displayCutout,
-        // so we use them directly. For other cutouts, they are swapped.
+        // For hypotenuse-oriented cutouts, width/height are NOT swapped in displayCutout.
+        // For custom angles and legs, width/height ARE swapped in displayCutout.
         let isHypotenuseOriented = piece.shape == .rightTriangle && cutout.orientation == .hypotenuse
         let widthValue = CGFloat(isHypotenuseOriented ? displayCutout.width : displayCutout.height)
         let lengthValue = CGFloat(isHypotenuseOriented ? displayCutout.height : displayCutout.width)
@@ -3123,11 +3125,10 @@ private extension EdgeTapGestureOverlay {
 }
 
 private func rotatedCutout(_ cutout: Cutout) -> Cutout {
-    // For hypotenuse-oriented cutouts, do NOT swap width/height.
-    // The rotation in cutoutCornerPoints handles the orientation correctly.
-    // Swapping dimensions here would cause a double-transformation that results
-    // in width/length being visually swapped when the cutout transitions from
-    // interior to boundary (notch).
+    // For hypotenuse-aligned cutouts, do NOT swap width/height here.
+    // The dimension swap happens inside cutoutCornerPoints for hypotenuse.
+    // For custom angles and legs, swap width/height here for the coordinate transform.
+    // This ensures consistent behavior: custom angle at 0° looks like legs orientation.
     let isHypotenuseOriented = cutout.orientation == .hypotenuse
     return Cutout(
         kind: cutout.kind,
@@ -3136,7 +3137,8 @@ private func rotatedCutout(_ cutout: Cutout) -> Cutout {
         centerX: cutout.centerY,
         centerY: cutout.centerX,
         isNotch: cutout.isNotch,
-        orientation: cutout.orientation
+        orientation: cutout.orientation,
+        customAngleDegrees: cutout.customAngleDegrees
     )
 }
 
