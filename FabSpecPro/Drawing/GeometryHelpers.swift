@@ -104,7 +104,10 @@ enum GeometryHelpers {
             }
             result.append(point)
         }
-        if result.count > 1, distance(result.first!, result.last!) < tolerance {
+        if result.count > 1,
+           let first = result.first,
+           let last = result.last,
+           distance(first, last) < tolerance {
             result.removeLast()
         }
         return result

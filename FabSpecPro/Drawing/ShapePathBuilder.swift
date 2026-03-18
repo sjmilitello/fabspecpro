@@ -1794,9 +1794,9 @@ enum ShapePathBuilder {
         }
 
         func clipPolygon(_ polygon: [CGPoint], inside: (CGPoint) -> Bool, intersect: (CGPoint, CGPoint) -> CGPoint) -> [CGPoint] {
-            guard !polygon.isEmpty else { return [] }
+            guard let last = polygon.last else { return [] }
             var output: [CGPoint] = []
-            var prev = polygon.last!
+            var prev = last
             var prevInside = inside(prev)
             for point in polygon {
                 let currInside = inside(point)
@@ -1855,8 +1855,8 @@ enum ShapePathBuilder {
         }
 
         let sorted = hypotenusePoints.sorted { tValue(for: $0) < tValue(for: $1) }
-        let entry = sorted.first!
-        let exit = sorted.last!
+        // Safe: guard above ensures hypotenusePoints.count >= 2, so sorted is non-empty
+        guard let entry = sorted.first, let exit = sorted.last else { return nil }
         let tStart = tValue(for: entry)
         let tEnd = tValue(for: exit)
 

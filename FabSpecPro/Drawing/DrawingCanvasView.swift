@@ -2686,7 +2686,7 @@ private extension EdgeTapGestureOverlay {
                 let distanceFromEdge: CGFloat = abs(distanceToCenter - radius)
                 if distanceToCenter <= radius + threshold {
                     let distance = distanceFromEdge
-                    if best == nil || distance < best!.2 {
+                    if distance < (best?.2 ?? .greatestFiniteMagnitude) {
                         best = (cutout.id, .top, distance)
                     }
                 }
@@ -2709,7 +2709,7 @@ private extension EdgeTapGestureOverlay {
                 let endCanvas = metrics.toCanvas(end)
                 let distance = distanceToSegment(point: point, a: startCanvas, b: endCanvas)
                 if distance > threshold { continue }
-                if best == nil || distance < best!.2 {
+                if distance < (best?.2 ?? .greatestFiniteMagnitude) {
                     best = (cutout.id, edge, distance)
                 }
             }
@@ -2748,7 +2748,7 @@ private extension EdgeTapGestureOverlay {
                 let endCanvas = metrics.toCanvas(end)
                 let distance = distanceToSegment(point: point, a: startCanvas, b: endCanvas)
                 if distance > threshold { continue }
-                if best == nil || distance < best!.2 {
+                if distance < (best?.2 ?? .greatestFiniteMagnitude) {
                     best = (cutout.id, edge, distance)
                 }
             }
@@ -2767,7 +2767,7 @@ private extension EdgeTapGestureOverlay {
             let start = metrics.toCanvas(segment.start)
             let end = metrics.toCanvas(segment.end)
             let distance = distanceToSegment(point: point, a: start, b: end)
-            if distance <= threshold, best == nil || distance < best!.1 {
+            if distance <= threshold, distance < (best?.1 ?? .greatestFiniteMagnitude) {
                 best = (segment.id, distance)
             }
         }
