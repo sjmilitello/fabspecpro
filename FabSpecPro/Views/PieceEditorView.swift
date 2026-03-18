@@ -299,12 +299,10 @@ struct PieceEditorView: View {
                 collapsibleSubsection(title: "Cutouts", isOpen: $isCutoutsOpen) {
                     VStack(spacing: 12) {
                         cutoutButtons
-                        let displayCutouts = Array(piece.cutouts.reversed())
-                        let cutoutCount = displayCutouts.count
-                        ForEach(displayCutouts.indices, id: \.self) { index in
-                            let cutout = displayCutouts[index]
+                        let sortedCutouts = piece.cutouts.sorted { $0.createdAt > $1.createdAt }
+                        ForEach(Array(sortedCutouts.enumerated()), id: \.element.id) { index, cutout in
                             collapsibleItem(
-                                title: "Cutout \(cutoutCount - index)",
+                                title: "Cutout \(sortedCutouts.count - index)",
                                 isOpen: Binding(
                                     get: { openCutoutIds.contains(cutout.id) },
                                     set: { isOpen in
@@ -320,15 +318,14 @@ struct PieceEditorView: View {
                 collapsibleSubsection(title: "Corner Radius", isOpen: $isCornerRadiiOpen) {
                     VStack(spacing: 12) {
                         cornerRadiusButtons
-                        let displayCornerRadii = piece.cornerRadii.sorted { lhs, rhs in
+                        let sortedCornerRadii = piece.cornerRadii.sorted { lhs, rhs in
                             if lhs.cornerIndex == rhs.cornerIndex {
                                 return lhs.id.uuidString > rhs.id.uuidString
                             }
                             return lhs.cornerIndex > rhs.cornerIndex
                         }
-                        ForEach(displayCornerRadii.indices, id: \.self) { index in
-                            let cornerRadius = displayCornerRadii[index]
-                            let labelNumber = cornerRadius.cornerIndex >= 0 ? (cornerRadius.cornerIndex + 1) : (displayCornerRadii.count - index)
+                        ForEach(Array(sortedCornerRadii.enumerated()), id: \.element.id) { index, cornerRadius in
+                            let labelNumber = cornerRadius.cornerIndex >= 0 ? (cornerRadius.cornerIndex + 1) : (sortedCornerRadii.count - index)
                             collapsibleItem(
                                 title: "Corner \(labelNumber)",
                                 isOpen: Binding(
@@ -346,15 +343,14 @@ struct PieceEditorView: View {
                 collapsibleSubsection(title: "Angles", isOpen: $isAnglesOpen) {
                     VStack(spacing: 12) {
                         angleButtons
-                        let displayAngles = piece.angleCuts.sorted { lhs, rhs in
+                        let sortedAngles = piece.angleCuts.sorted { lhs, rhs in
                             if lhs.anchorCornerIndex == rhs.anchorCornerIndex {
                                 return lhs.id.uuidString > rhs.id.uuidString
                             }
                             return lhs.anchorCornerIndex > rhs.anchorCornerIndex
                         }
-                        ForEach(displayAngles.indices, id: \.self) { index in
-                            let angle = displayAngles[index]
-                            let labelNumber = angle.anchorCornerIndex >= 0 ? (angle.anchorCornerIndex + 1) : (displayAngles.count - index)
+                        ForEach(Array(sortedAngles.enumerated()), id: \.element.id) { index, angle in
+                            let labelNumber = angle.anchorCornerIndex >= 0 ? (angle.anchorCornerIndex + 1) : (sortedAngles.count - index)
                             collapsibleItem(
                                 title: "Angle \(labelNumber)",
                                 isOpen: Binding(
@@ -372,12 +368,10 @@ struct PieceEditorView: View {
                 collapsibleSubsection(title: "Curves", isOpen: $isCurvesOpen) {
                     VStack(spacing: 12) {
                         curveButtons
-                        let displayCurves = Array(piece.curvedEdges.reversed())
-                        let curveCount = displayCurves.count
-                        ForEach(displayCurves.indices, id: \.self) { index in
-                            let curve = displayCurves[index]
+                        let sortedCurves = piece.curvedEdges.reversed()
+                        ForEach(Array(sortedCurves.enumerated()), id: \.element.id) { index, curve in
                             collapsibleItem(
-                                title: "Curve \(curveCount - index)",
+                                title: "Curve \(piece.curvedEdges.count - index)",
                                 isOpen: Binding(
                                     get: { openCurveIds.contains(curve.id) },
                                     set: { isOpen in
@@ -1599,22 +1593,8 @@ private struct CutoutRow: View {
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(Theme.secondaryText)
                 HStack(spacing: 8) {
-                    ForEach(HoleShape.allCases, id: \.self) { shape in
-                        let isSelected = (cutout.kind == .circle && shape == .circle) || (cutout.kind != .circle && shape == .rectangle)
-                        Button(shape.rawValue) {
-                            cutout.kind = (shape == .circle) ? .circle : .rectangle
-                            if shape == .circle {
-                                selectedCorner = nil
-                                cutout.isNotch = false
-                                cutout.cornerIndex = -1
-                                cutout.cornerAnchorX = -1
-                                cutout.cornerAnchorY = -1
-                            } else if selectedCorner != nil {
-                                updateNotchCorner()
-                            }
-                        }
-                        .buttonStyle(PillButtonStyle(isProminent: isSelected))
-                    }
+                    shapeButton(for: .circle)
+                    shapeButton(for: .rectangle)
                 }
 
                 HStack(spacing: 12) {
@@ -1751,6 +1731,27 @@ private struct CutoutRow: View {
                 )
                 .clipShape(RoundedRectangle(cornerRadius: 8))
         }
+    }
+
+    @ViewBuilder
+    private func shapeButton(for shape: HoleShape) -> some View {
+        let currentKind = cutout.kind
+        let isSelected = (currentKind == .circle && shape == .circle) || (currentKind != .circle && shape == .rectangle)
+        Button(shape.rawValue) {
+            let newKind: CutoutKind = (shape == .circle) ? .circle : .rectangle
+            guard cutout.kind != newKind else { return }
+            cutout.kindRaw = newKind.rawValue
+            if shape == .circle {
+                selectedCorner = nil
+                cutout.isNotch = false
+                cutout.cornerIndex = -1
+                cutout.cornerAnchorX = -1
+                cutout.cornerAnchorY = -1
+            } else if selectedCorner != nil {
+                updateNotchCorner()
+            }
+        }
+        .buttonStyle(PillButtonStyle(isProminent: isSelected))
     }
 
     private func labeledField(_ title: String, value: Binding<Double>, allowNegative: Bool = false, showSignToggle: Bool = false, denominator: Int = 16) -> some View {
