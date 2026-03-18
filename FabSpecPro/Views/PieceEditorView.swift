@@ -1573,7 +1573,7 @@ private struct KeyboardOverlapModifier: ViewModifier {
 
 private struct CutoutRow: View {
     @Bindable var cutout: Cutout
-    let piece: Piece
+    @Bindable var piece: Piece
     @Environment(\.modelContext) private var modelContext
     @State private var selectedCorner: NotchCorner?
 
@@ -1831,7 +1831,7 @@ private struct CutoutRow: View {
 private struct CurveRow: View {
     @Bindable var curve: CurvedEdge
     let shape: ShapeKind
-    let piece: Piece
+    @Bindable var piece: Piece
     @Environment(\.modelContext) private var modelContext
 
     var body: some View {
@@ -2310,7 +2310,7 @@ private struct CurveRow: View {
 
 private struct AngleCutRow: View {
     @Bindable var angleCut: AngleCut
-    let piece: Piece
+    @Bindable var piece: Piece
     let angleIndex: Int
     @Environment(\.modelContext) private var modelContext
     @State private var isUpdatingFromDistance = false
@@ -2498,7 +2498,7 @@ private struct AngleCutRow: View {
 
 private struct CornerRadiusRow: View {
     @Bindable var cornerRadius: CornerRadius
-    let piece: Piece
+    @Bindable var piece: Piece
     @Environment(\.modelContext) private var modelContext
 
     var body: some View {
