@@ -503,7 +503,6 @@ struct PieceEditorView: View {
         for cutout in targets {
             modelContext.delete(cutout)
         }
-        piece.cutouts.removeAll()
         openCutoutIds.removeAll()
         markUpdated()
     }
@@ -579,7 +578,6 @@ struct PieceEditorView: View {
         for curve in targets {
             modelContext.delete(curve)
         }
-        piece.curvedEdges.removeAll()
         openCurveIds.removeAll()
         markUpdated()
     }
@@ -636,7 +634,6 @@ struct PieceEditorView: View {
         for radius in targets {
             modelContext.delete(radius)
         }
-        piece.cornerRadii.removeAll()
         openCornerRadiusIds.removeAll()
         markUpdated()
     }
@@ -675,7 +672,6 @@ struct PieceEditorView: View {
         for angle in targets {
             modelContext.delete(angle)
         }
-        piece.angleCuts.removeAll()
         openAngleIds.removeAll()
         markUpdated()
     }
@@ -1594,7 +1590,6 @@ private struct CutoutRow: View {
             HStack {
                 Spacer()
                 Button("Delete", role: .destructive) {
-                    cutout.piece?.cutouts.removeAll { $0.id == cutout.id }
                     modelContext.delete(cutout)
                 }
             }
@@ -2347,7 +2342,6 @@ private struct AngleCutRow: View {
         HStack {
             Spacer()
             Button("Delete", role: .destructive) {
-                angleCut.piece?.angleCuts.removeAll { $0.id == angleCut.id }
                 modelContext.delete(angleCut)
             }
         }
@@ -2521,7 +2515,6 @@ private struct CornerRadiusRow: View {
         HStack {
             Spacer()
             Button("Delete", role: .destructive) {
-                cornerRadius.piece?.cornerRadii.removeAll { $0.id == cornerRadius.id }
                 modelContext.delete(cornerRadius)
             }
         }
@@ -2616,7 +2609,6 @@ private struct CornerRadiusRow: View {
     private func removeAngle(at cornerIndex: Int) {
         let matching = piece.angleCuts.filter { $0.anchorCornerIndex == cornerIndex }
         guard !matching.isEmpty else { return }
-        piece.angleCuts.removeAll { $0.anchorCornerIndex == cornerIndex }
         for angle in matching {
             modelContext.delete(angle)
         }
