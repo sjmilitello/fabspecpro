@@ -33,11 +33,13 @@ func createTestPiece(
     let project = Project(name: "Test Project")
     context.insert(project)
     
-    let piece = Piece(name: "Test Piece", project: project)
+    let piece = Piece(name: "Test Piece")
     piece.shape = shape
     piece.widthText = width
     piece.heightText = height
-    
+    piece.project = project
+    project.pieces.append(piece)
+
     context.insert(piece)
     return piece
 }
@@ -236,18 +238,22 @@ struct ShapePathBuilderCutoutTests {
     }
     
     @Test @MainActor func cutoutTouchesBoundaryTop() throws {
+        let container = try createTestContainer()
+        let piece = createTestPiece(container: container, shape: .rectangle, width: "10", height: "10")
         let cutout = Cutout(kind: .rectangle, width: 2, height: 2, centerX: 5, centerY: 1)
-        let size = CGSize(width: 10, height: 10)
-        
-        let touches = ShapePathBuilder.cutoutTouchesBoundary(cutout: cutout, size: size, shape: .rectangle)
+        let size = ShapePathBuilder.displaySize(for: piece)
+
+        let touches = ShapePathBuilder.cutoutTouchesBoundary(cutout: cutout, piece: piece, size: size)
         #expect(touches == true)
     }
-    
+
     @Test @MainActor func cutoutDoesNotTouchBoundary() throws {
+        let container = try createTestContainer()
+        let piece = createTestPiece(container: container, shape: .rectangle, width: "10", height: "10")
         let cutout = Cutout(kind: .rectangle, width: 2, height: 2, centerX: 5, centerY: 5)
-        let size = CGSize(width: 10, height: 10)
-        
-        let touches = ShapePathBuilder.cutoutTouchesBoundary(cutout: cutout, size: size, shape: .rectangle)
+        let size = ShapePathBuilder.displaySize(for: piece)
+
+        let touches = ShapePathBuilder.cutoutTouchesBoundary(cutout: cutout, piece: piece, size: size)
         #expect(touches == false)
     }
     
@@ -390,31 +396,6 @@ struct ShapePathBuilderCurvedEdgeTests {
         
         let path = ShapePathBuilder.path(for: piece)
         #expect(!path.isEmpty)
-    }
-}
-
-// MARK: - Span Validation Tests
-
-struct ShapePathBuilderSpanTests {
-    
-    @Test @MainActor func segmentIndicesBetween() throws {
-        // Test segment indices between two points
-        let indices = ShapePathBuilder.segmentIndicesBetween(start: 0, end: 2, count: 4)
-        #expect(indices.contains(0))
-        #expect(indices.contains(1))
-        #expect(!indices.contains(2)) // End index not included
-    }
-    
-    @Test @MainActor func segmentIndicesWraparound() throws {
-        // Test segment indices that wrap around
-        let indices = ShapePathBuilder.segmentIndicesBetween(start: 3, end: 1, count: 4)
-        // Should go 3 -> 0 (wrapping) or backward
-        #expect(!indices.isEmpty)
-    }
-    
-    @Test @MainActor func sameStartEndReturnsEmpty() throws {
-        let indices = ShapePathBuilder.segmentIndicesBetween(start: 2, end: 2, count: 4)
-        #expect(indices.isEmpty)
     }
 }
 

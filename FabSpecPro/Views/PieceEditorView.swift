@@ -1041,7 +1041,7 @@ struct PieceEditorView: View {
 
         let pieceSize = ShapePathBuilder.pieceSize(for: piece)
         for cutout in piece.cutouts where cutout.centerX >= 0 && cutout.centerY >= 0 {
-            let isNotchOrBoundary = cutout.isNotch || ShapePathBuilder.cutoutTouchesBoundary(cutout: cutout, size: pieceSize, shape: piece.shape)
+            let isNotchOrBoundary = cutout.isNotch || ShapePathBuilder.cutoutTouchesBoundary(cutout: cutout, piece: piece, size: pieceSize)
             for edge in edgesForCutout(cutout) {
                 // Use different logic for notches vs interior cutouts
                 let shouldApply: Bool

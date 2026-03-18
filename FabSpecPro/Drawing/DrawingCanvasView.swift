@@ -85,7 +85,7 @@ struct DrawingCanvasView: View {
                 if !isReadOnly {
                     EdgeTapGestureOverlay(
                         metrics: metrics,
-                        shape: piece.shape,
+                        piece: piece,
                         curves: piece.curvedEdges,
                         cutouts: piece.cutouts,
                         angleSegments: ShapePathBuilder.angleSegments(for: piece),
@@ -2599,12 +2599,14 @@ struct EdgeTapTarget {
 
 struct EdgeTapGestureOverlay: View {
     let metrics: DrawingMetrics
-    let shape: ShapeKind
+    let piece: Piece
     let curves: [CurvedEdge]
     let cutouts: [Cutout]
     let angleSegments: [AngleSegment]
     let boundarySegments: [BoundarySegment]
     let edgeTapped: (EdgeTapTarget) -> Void
+
+    var shape: ShapeKind { piece.shape }
     let cutoutEdgeTapped: (UUID, EdgePosition) -> Void
     let angleEdgeTapped: (UUID) -> Void
 
@@ -2671,7 +2673,7 @@ private extension EdgeTapGestureOverlay {
         var best: (UUID, EdgePosition, CGFloat)?
 
         for cutout in cutouts where cutout.centerX >= 0 && cutout.centerY >= 0 {
-            if cutout.isNotch || (cutout.kind != .circle && ShapePathBuilder.cutoutTouchesBoundary(cutout: cutout, size: metrics.pieceSize, shape: shape)) {
+            if cutout.isNotch || (cutout.kind != .circle && ShapePathBuilder.cutoutTouchesBoundary(cutout: cutout, piece: piece, size: metrics.pieceSize)) {
                 continue
             }
             let displayCutout = rotatedCutout(cutout)
@@ -2725,7 +2727,7 @@ private extension EdgeTapGestureOverlay {
 
         for cutout in cutouts where cutout.centerX >= 0 && cutout.centerY >= 0 {
             // Only process notches and boundary-touching cutouts
-            let isNotchOrBoundary = cutout.isNotch || (cutout.kind != .circle && ShapePathBuilder.cutoutTouchesBoundary(cutout: cutout, size: metrics.pieceSize, shape: shape))
+            let isNotchOrBoundary = cutout.isNotch || (cutout.kind != .circle && ShapePathBuilder.cutoutTouchesBoundary(cutout: cutout, piece: piece, size: metrics.pieceSize))
             guard isNotchOrBoundary else { continue }
             guard cutout.kind != .circle else { continue }
             
@@ -3082,7 +3084,7 @@ private extension EdgeTapGestureOverlay {
         let pieceWidth = metrics.pieceSize.width * metrics.scale
         let pieceHeight = metrics.pieceSize.height * metrics.scale
 
-        for cutout in cutouts where (cutout.isNotch || ShapePathBuilder.cutoutTouchesBoundary(cutout: cutout, size: metrics.pieceSize, shape: shape)) && cutout.centerX >= 0 && cutout.centerY >= 0 {
+        for cutout in cutouts where (cutout.isNotch || ShapePathBuilder.cutoutTouchesBoundary(cutout: cutout, piece: piece, size: metrics.pieceSize)) && cutout.centerX >= 0 && cutout.centerY >= 0 {
             let displayCutout = rotatedCutout(cutout)
             let corners = GeometryHelpers.cutoutCornerPoints(cutout: displayCutout, size: metrics.pieceSize, shape: shape)
             let bounds = GeometryHelpers.bounds(for: corners)
@@ -3149,7 +3151,7 @@ private func rotatedPointToRaw(_ point: CGPoint) -> CGPoint {
 private func isEffectiveNotch(_ cutout: Cutout, piece: Piece, pieceSize: CGSize) -> Bool {
     if cutout.isNotch { return true }
     guard cutout.kind != .circle else { return false }
-    return ShapePathBuilder.cutoutTouchesBoundary(cutout: cutout, size: pieceSize, shape: piece.shape)
+    return ShapePathBuilder.cutoutTouchesBoundary(cutout: cutout, piece: piece, size: pieceSize)
 }
 
 private func isInteriorNotchEdge(cutout: Cutout, edge: EdgePosition, pieceSize: CGSize, shape: ShapeKind) -> Bool {

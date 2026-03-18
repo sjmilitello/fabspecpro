@@ -11,24 +11,14 @@ import SwiftData
 @main
 struct FabSpecProApp: App {
     var sharedModelContainer: ModelContainer = {
-        let schema = Schema([
-            Project.self,
-            Piece.self,
-            EdgeTreatment.self,
-            EdgeAssignment.self,
-            Cutout.self,
-            CurvedEdge.self,
-            AngleCut.self,
-            CornerRadius.self,
-            BusinessHeader.self,
-            MaterialOption.self,
-            PieceDefaults.self
-        ])
+        // Use the versioned schema from the migration plan
+        let schema = Schema(versionedSchema: FabSpecProSchemaV14.self)
         let modelConfiguration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
 
         do {
             return try ModelContainer(
                 for: schema,
+                migrationPlan: FabSpecProMigrationPlan.self,
                 configurations: [modelConfiguration]
             )
         } catch {
@@ -40,6 +30,7 @@ struct FabSpecProApp: App {
             do {
                 return try ModelContainer(
                     for: schema,
+                    migrationPlan: FabSpecProMigrationPlan.self,
                     configurations: [modelConfiguration]
                 )
             } catch {

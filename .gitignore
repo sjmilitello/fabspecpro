@@ -1,2 +1,6 @@
 .DS_Store
+*.xcuserstate
+xcuserdata/
 FabSpecPro.xcodeproj/xcuserdata/
+FabSpecPro.xcodeproj/project.xcworkspace/xcuserdata/
+DerivedData/
