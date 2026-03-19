@@ -241,7 +241,7 @@ struct ShapePathBuilderCutoutTests {
         let container = try createTestContainer()
         let piece = createTestPiece(container: container, shape: .rectangle, width: "10", height: "10")
         let cutout = Cutout(kind: .rectangle, width: 2, height: 2, centerX: 5, centerY: 1)
-        let size = ShapePathBuilder.displaySize(for: piece)
+        let size = ShapePathBuilder.pieceSize(for: piece)
 
         let touches = ShapePathBuilder.cutoutTouchesBoundary(cutout: cutout, piece: piece, size: size)
         #expect(touches == true)
@@ -251,7 +251,7 @@ struct ShapePathBuilderCutoutTests {
         let container = try createTestContainer()
         let piece = createTestPiece(container: container, shape: .rectangle, width: "10", height: "10")
         let cutout = Cutout(kind: .rectangle, width: 2, height: 2, centerX: 5, centerY: 5)
-        let size = ShapePathBuilder.displaySize(for: piece)
+        let size = ShapePathBuilder.pieceSize(for: piece)
 
         let touches = ShapePathBuilder.cutoutTouchesBoundary(cutout: cutout, piece: piece, size: size)
         #expect(touches == false)

@@ -10,7 +10,7 @@ final class AngleCut {
     var secondaryOffset: Double
     var usesSecondPoint: Bool
     var angleDegrees: Double
-    var piece: Piece?
+    @Relationship(inverse: \Piece.angleCuts) var piece: Piece?
 
     init(anchorCornerIndex: Int = 0,
          anchorOffset: Double = 2,

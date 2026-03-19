@@ -12,7 +12,7 @@ final class PieceDefaults {
 
     // Basic defaults
     var defaultMaterialName: String = ""
-    var defaultThickness: String = "3cm"
+    var defaultThickness: String = "3 cm"
     var defaultShape: String = "Rectangle"
     var defaultWidth: String = "24"
     var defaultHeight: String = "18"

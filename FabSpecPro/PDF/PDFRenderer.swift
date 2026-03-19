@@ -994,6 +994,8 @@ enum PDFRenderer {
         for notch in notches {
             let dispCutout = displayCutout(for: notch)
             let metricsInfo = notchInteriorEdgeMetrics(cutout: notch, size: size, polygon: outerPolygon)
+            let rawSize = ShapePathBuilder.pieceSize(for: piece)
+            let notchInfo = ShapePathBuilder.notchMeasurementInfo(cutout: notch, piece: piece, size: rawSize, tolerance: 0.01)
 
             let center = CGPoint(x: dispCutout.centerX, y: dispCutout.centerY)
             let halfWidth = dispCutout.width / 2
@@ -1188,51 +1190,53 @@ enum PDFRenderer {
             }
 
             if piece.shape == .rightTriangle {
-                if touchesDisplayTop, let curve = piece.curve(for: .legA), curve.radius > 0 {
-                    widthCurveDepth = curve.isConcave ? -CGFloat(curve.radius) : CGFloat(curve.radius)
-                    widthFromApex = true
-                }
-                if touchesDisplayLeft, let curve = piece.curve(for: .legB), curve.radius > 0 {
-                    lengthCurveDepth = curve.isConcave ? -CGFloat(curve.radius) : CGFloat(curve.radius)
+                if touchesDisplayLeft, notchInfo.lengthIsCurved {
                     lengthFromApex = true
+                    lengthCurveDepth = 1
                 }
-                if (isNotchOnHypotenuse(cutout: dispCutout, pieceSize: displaySize) || notch.isRotated),
-                   let hypCurve = piece.curve(for: .hypotenuse), hypCurve.radius > 0 {
-                    let hypStart = CGPoint(x: displaySize.width, y: 0)
-                    let hypEnd = CGPoint(x: 0, y: displaySize.height)
-                    let distWidth = pointLineDistance(point: widthEdgeMid, a: hypStart, b: hypEnd)
-                    let distLength = pointLineDistance(point: lengthEdgeMid, a: hypStart, b: hypEnd)
-                    let hypDepth = hypCurve.isConcave ? -CGFloat(hypCurve.radius) : CGFloat(hypCurve.radius)
-                    let tolerance = max(0.05, max(displaySize.width, displaySize.height) * 0.002)
-                    if distWidth <= distLength {
-                        if distWidth <= tolerance || distLength > tolerance {
-                            widthCurveDepth = hypDepth
-                            widthFromApex = true
-                        }
-                    } else if distLength <= tolerance || distWidth > tolerance {
-                        lengthCurveDepth = hypDepth
-                        lengthFromApex = true
-                    }
+                if touchesDisplayTop, notchInfo.widthIsCurved {
+                    widthFromApex = true
+                    widthCurveDepth = 1
                 }
             } else {
-                if touchesDisplayLeft, let curve = piece.curve(for: .left), curve.radius > 0 {
-                    lengthCurveDepth = curve.isConcave ? -CGFloat(curve.radius) : CGFloat(curve.radius)
-                    lengthFromApex = true
-                } else if touchesDisplayRight, let curve = piece.curve(for: .right), curve.radius > 0 {
-                    lengthCurveDepth = curve.isConcave ? -CGFloat(curve.radius) : CGFloat(curve.radius)
-                    lengthFromApex = true
+                if touchesDisplayLeft || touchesDisplayRight {
+                    if notchInfo.lengthIsCurved {
+                        lengthFromApex = true
+                        lengthCurveDepth = 1
+                    }
                 }
-                if touchesDisplayTop, let curve = piece.curve(for: .top), curve.radius > 0 {
-                    widthCurveDepth = curve.isConcave ? -CGFloat(curve.radius) : CGFloat(curve.radius)
-                    widthFromApex = true
-                } else if touchesDisplayBottom, let curve = piece.curve(for: .bottom), curve.radius > 0 {
-                    widthCurveDepth = curve.isConcave ? -CGFloat(curve.radius) : CGFloat(curve.radius)
-                    widthFromApex = true
+                if touchesDisplayTop || touchesDisplayBottom {
+                    if notchInfo.widthIsCurved {
+                        widthFromApex = true
+                        widthCurveDepth = 1
+                    }
                 }
             }
 
-            widthValue += widthCurveDepth
-            lengthValue += lengthCurveDepth
+            if piece.shape == .rightTriangle,
+               isNotchOnHypotenuse(cutout: dispCutout, pieceSize: displaySize),
+               let hypDistance = notchInfo.hypotenuseDistance,
+               notchInfo.hypotenuseIsCurved {
+                let hypStart = CGPoint(x: displaySize.width, y: 0)
+                let hypEnd = CGPoint(x: 0, y: displaySize.height)
+                let distWidth = pointLineDistance(point: widthEdgeMid, a: hypStart, b: hypEnd)
+                let distLength = pointLineDistance(point: lengthEdgeMid, a: hypStart, b: hypEnd)
+                let tolerance = max(0.05, max(displaySize.width, displaySize.height) * 0.002)
+                if distWidth <= distLength, distWidth <= tolerance {
+                    widthValue = hypDistance
+                    widthFromApex = true
+                } else if distLength <= tolerance {
+                    lengthValue = hypDistance
+                    lengthFromApex = true
+                }
+            }
+
+            if widthFromApex, let widthDistance = notchInfo.widthDistance {
+                widthValue = widthDistance
+            }
+            if lengthFromApex, let lengthDistance = notchInfo.lengthDistance {
+                lengthValue = lengthDistance
+            }
 
             let widthText = MeasurementParser.formatInches(Double(widthValue))
             let heightText = MeasurementParser.formatInches(Double(lengthValue))
@@ -1685,11 +1689,8 @@ enum PDFRenderer {
     }
 
     private static func isEffectiveNotch(cutout: Cutout, piece: Piece, size: CGSize) -> Bool {
-        if cutout.isNotch { return true }
-        guard cutout.kind != .circle else { return false }
-        // Use display-transformed coordinates (swap x/y to match display size)
-        let displayCutout = displayCutout(for: cutout)
-        return ShapePathBuilder.cutoutTouchesBoundary(cutout: displayCutout, piece: piece, size: size)
+        let rawSize = ShapePathBuilder.pieceSize(for: piece)
+        return ShapePathBuilder.cutoutIsNotch(cutout: cutout, piece: piece, size: rawSize, tolerance: 0.01)
     }
     
     /// Checks if a notch cutout is on the hypotenuse of a right triangle

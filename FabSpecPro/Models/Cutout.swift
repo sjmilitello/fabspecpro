@@ -21,7 +21,7 @@ final class Cutout {
     var isNotch: Bool
     var isApplied: Bool = true
     var createdAt: Date
-    var piece: Piece?
+    @Relationship(inverse: \Piece.cutouts) var piece: Piece?
     var orientationRaw: String = "legs"
     var customAngleDegrees: Double = 0
 
@@ -64,7 +64,7 @@ final class CurvedEdge {
     var edgeRaw: String
     var radius: Double
     var isConcave: Bool
-    var piece: Piece?
+    @Relationship(inverse: \Piece.curvedEdges) var piece: Piece?
     
     /// Start corner index for corner-based curve selection (-1 means use legacy edge-based)
     var startCornerIndex: Int = -1

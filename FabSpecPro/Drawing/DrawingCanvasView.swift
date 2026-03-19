@@ -20,6 +20,8 @@ struct DrawingCanvasView: View {
         GeometryReader { proxy in
             let metrics = DrawingMetrics(piece: piece, in: proxy.size)
             let rawPieceSize = ShapePathBuilder.pieceSize(for: piece)
+            // Capture cutouts snapshot before Canvas to avoid accessing SwiftData models during render
+            let cutoutsSnapshot = piece.cutouts
 
             ZStack {
                 Canvas { context, _ in
@@ -32,7 +34,7 @@ struct DrawingCanvasView: View {
                         let strokeWidth = 1.5 / metrics.scale
                         layerContext.stroke(path, with: .color(Theme.primaryText), lineWidth: strokeWidth)
 
-                    for cutout in piece.cutouts where cutout.centerX >= 0 && cutout.centerY >= 0 && !isEffectiveNotch(cutout, piece: piece, pieceSize: rawPieceSize) {
+                    for cutout in cutoutsSnapshot where cutout.centerX >= 0 && cutout.centerY >= 0 && !isEffectiveNotch(cutout, piece: piece, pieceSize: rawPieceSize) {
                         let displayCutout = rotatedCutout(cutout)
                         let angleCuts = localAngleCuts(for: cutout)
                         let cornerRadii = localCornerRadii(for: cutout)
@@ -50,7 +52,7 @@ struct DrawingCanvasView: View {
                     }
                 }
 
-                for cutout in piece.cutouts where cutout.centerX >= 0 && cutout.centerY >= 0 {
+                for cutout in cutoutsSnapshot where cutout.centerX >= 0 && cutout.centerY >= 0 {
                     if isEffectiveNotch(cutout, piece: piece, pieceSize: rawPieceSize) {
                         drawNotchDimensionLabels(in: &context, cutout: cutout, metrics: metrics)
                     } else {
@@ -87,7 +89,7 @@ struct DrawingCanvasView: View {
                         metrics: metrics,
                         piece: piece,
                         curves: piece.curvedEdges,
-                        cutouts: piece.cutouts,
+                        cutouts: cutoutsSnapshot,
                         angleSegments: ShapePathBuilder.angleSegments(for: piece),
                         boundarySegments: ShapePathBuilder.boundarySegments(for: piece)
                     ) { target in
@@ -982,6 +984,8 @@ struct DrawingCanvasView: View {
         let displayCutout = rotatedCutout(cutout)
         let outerPolygon = ShapePathBuilder.displayPolygonPoints(for: piece, includeAngles: true, includeNotches: false)
         let metricsInfo = notchInteriorEdgeMetrics(cutout: cutout, metrics: metrics, polygon: outerPolygon)
+        let rawSize = ShapePathBuilder.pieceSize(for: piece)
+        let notchInfo = ShapePathBuilder.notchMeasurementInfo(cutout: cutout, piece: piece, size: rawSize, tolerance: 0.01)
 
         let center = CGPoint(x: displayCutout.centerX, y: displayCutout.centerY)
         let halfWidth = displayCutout.width / 2
@@ -1020,44 +1024,44 @@ struct DrawingCanvasView: View {
         if piece.shape == .rightTriangle {
             if touchesDisplayLeft {
                 // Leg B notch - check for curve on leg B
-                if let curve = piece.curve(for: .legB), curve.radius > 0 {
-                    lengthCurveDepth = curve.isConcave ? -CGFloat(curve.radius) : CGFloat(curve.radius)
+                if notchInfo.lengthIsCurved {
                     lengthFromApex = true
+                    lengthCurveDepth = 1
                 }
             }
             if touchesDisplayTop {
                 // Leg A notch - check for curve on leg A
-                if let curve = piece.curve(for: .legA), curve.radius > 0 {
-                    widthCurveDepth = curve.isConcave ? -CGFloat(curve.radius) : CGFloat(curve.radius)
+                if notchInfo.widthIsCurved {
                     widthFromApex = true
+                    widthCurveDepth = 1
                 }
             }
         } else {
             if touchesDisplayLeft {
                 // Left edge notch - check for curve on left edge
-                if let curve = piece.curve(for: .left), curve.radius > 0 {
-                    lengthCurveDepth = curve.isConcave ? -CGFloat(curve.radius) : CGFloat(curve.radius)
+                if notchInfo.lengthIsCurved {
                     lengthFromApex = true
+                    lengthCurveDepth = 1
                 }
             } else if touchesDisplayRight {
                 // Right edge notch - check for curve on right edge
-                if let curve = piece.curve(for: .right), curve.radius > 0 {
-                    lengthCurveDepth = curve.isConcave ? -CGFloat(curve.radius) : CGFloat(curve.radius)
+                if notchInfo.lengthIsCurved {
                     lengthFromApex = true
+                    lengthCurveDepth = 1
                 }
             }
 
             if touchesDisplayTop {
                 // Top edge notch - check for curve on top edge
-                if let curve = piece.curve(for: .top), curve.radius > 0 {
-                    widthCurveDepth = curve.isConcave ? -CGFloat(curve.radius) : CGFloat(curve.radius)
+                if notchInfo.widthIsCurved {
                     widthFromApex = true
+                    widthCurveDepth = 1
                 }
             } else if touchesDisplayBottom {
                 // Bottom edge notch - check for curve on bottom edge
-                if let curve = piece.curve(for: .bottom), curve.radius > 0 {
-                    widthCurveDepth = curve.isConcave ? -CGFloat(curve.radius) : CGFloat(curve.radius)
+                if notchInfo.widthIsCurved {
                     widthFromApex = true
+                    widthCurveDepth = 1
                 }
             }
         }
@@ -1254,25 +1258,28 @@ struct DrawingCanvasView: View {
             }
         }
         if piece.shape == .rightTriangle,
-           let hypCurve = piece.curve(for: .hypotenuse),
-           hypCurve.radius > 0,
-           isNotchOnHypotenuse(cutout: displayCutout, pieceSize: displaySize) {
+           isNotchOnHypotenuse(cutout: displayCutout, pieceSize: displaySize),
+           let hypDistance = notchInfo.hypotenuseDistance,
+           notchInfo.hypotenuseIsCurved {
             let hypStart = CGPoint(x: displaySize.width, y: 0)
             let hypEnd = CGPoint(x: 0, y: displaySize.height)
             let distWidth = GeometryHelpers.pointLineDistance(point: widthEdgeMid, a: hypStart, b: hypEnd)
             let distLength = GeometryHelpers.pointLineDistance(point: lengthEdgeMid, a: hypStart, b: hypEnd)
-            let hypDepth = hypCurve.isConcave ? -CGFloat(hypCurve.radius) : CGFloat(hypCurve.radius)
             let tolerance = max(0.05, max(displaySize.width, displaySize.height) * 0.002)
             if distWidth <= distLength, distWidth <= tolerance {
-                widthCurveDepth = hypDepth
+                widthValue = hypDistance
                 widthFromApex = true
             } else if distLength <= tolerance {
-                lengthCurveDepth = hypDepth
+                lengthValue = hypDistance
                 lengthFromApex = true
             }
         }
-        widthValue += widthCurveDepth
-        lengthValue += lengthCurveDepth
+        if widthFromApex, let widthDistance = notchInfo.widthDistance {
+            widthValue = widthDistance
+        }
+        if lengthFromApex, let lengthDistance = notchInfo.lengthDistance {
+            lengthValue = lengthDistance
+        }
 
         let widthText = MeasurementParser.formatInches(Double(widthValue))
         let heightText = MeasurementParser.formatInches(Double(lengthValue))
@@ -3149,9 +3156,7 @@ private func rotatedPointToRaw(_ point: CGPoint) -> CGPoint {
 }
 
 private func isEffectiveNotch(_ cutout: Cutout, piece: Piece, pieceSize: CGSize) -> Bool {
-    if cutout.isNotch { return true }
-    guard cutout.kind != .circle else { return false }
-    return ShapePathBuilder.cutoutTouchesBoundary(cutout: cutout, piece: piece, size: pieceSize)
+    ShapePathBuilder.cutoutIsNotch(cutout: cutout, piece: piece, size: pieceSize, tolerance: 0.01)
 }
 
 private func isInteriorNotchEdge(cutout: Cutout, edge: EdgePosition, pieceSize: CGSize, shape: ShapeKind) -> Bool {

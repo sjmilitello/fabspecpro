@@ -218,6 +218,10 @@ struct ProjectDetailView: View {
             // Apply other basic defaults
             if let thickness = MaterialThickness(rawValue: defaults.defaultThickness) {
                 piece.thickness = thickness
+            } else if defaults.defaultThickness.contains("cm"),
+                      !defaults.defaultThickness.contains(" cm"),
+                      let thickness = MaterialThickness(rawValue: defaults.defaultThickness.replacingOccurrences(of: "cm", with: " cm")) {
+                piece.thickness = thickness
             }
             if let shape = ShapeKind(rawValue: defaults.defaultShape) {
                 piece.shape = shape

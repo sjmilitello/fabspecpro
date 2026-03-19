@@ -1566,6 +1566,7 @@ private struct CutoutRow: View {
     @Bindable var piece: Piece
     @Environment(\.modelContext) private var modelContext
     @State private var selectedCorner: NotchCorner?
+    @State private var localKindRaw: String = ""
 
     private enum NotchCorner: String, CaseIterable {
         case topLeft = "Top Left"
@@ -1596,6 +1597,7 @@ private struct CutoutRow: View {
                     shapeButton(for: .circle)
                     shapeButton(for: .rectangle)
                 }
+                .onAppear { localKindRaw = cutout.kindRaw }
 
                 HStack(spacing: 12) {
                     labeledField("Width (in)", value: $cutout.width)
@@ -1735,20 +1737,29 @@ private struct CutoutRow: View {
 
     @ViewBuilder
     private func shapeButton(for shape: HoleShape) -> some View {
-        let currentKind = cutout.kind
-        let isSelected = (currentKind == .circle && shape == .circle) || (currentKind != .circle && shape == .rectangle)
+        // Use local state for selection to avoid reading model during view evaluation
+        let isCircle = localKindRaw == CutoutKind.circle.rawValue
+        let isSelected = (isCircle && shape == .circle) || (!isCircle && shape == .rectangle)
         Button(shape.rawValue) {
-            let newKind: CutoutKind = (shape == .circle) ? .circle : .rectangle
-            guard cutout.kind != newKind else { return }
-            cutout.kindRaw = newKind.rawValue
+            let newKindRaw = (shape == .circle) ? CutoutKind.circle.rawValue : CutoutKind.rectangle.rawValue
+            guard localKindRaw != newKindRaw else { return }
+            
+            // Update local state first to prevent re-render race
+            localKindRaw = newKindRaw
+            
+            // Then update the model
             if shape == .circle {
-                selectedCorner = nil
+                cutout.kindRaw = newKindRaw
                 cutout.isNotch = false
                 cutout.cornerIndex = -1
                 cutout.cornerAnchorX = -1
                 cutout.cornerAnchorY = -1
-            } else if selectedCorner != nil {
-                updateNotchCorner()
+                selectedCorner = nil
+            } else {
+                cutout.kindRaw = newKindRaw
+                if selectedCorner != nil {
+                    updateNotchCorner()
+                }
             }
         }
         .buttonStyle(PillButtonStyle(isProminent: isSelected))

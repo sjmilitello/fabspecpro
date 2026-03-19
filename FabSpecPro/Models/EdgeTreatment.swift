@@ -21,7 +21,7 @@ final class EdgeAssignment {
     @Relationship(deleteRule: .nullify) var treatment: EdgeTreatment?
     var treatmentAbbreviation: String
     var treatmentName: String
-    var piece: Piece?
+    @Relationship(inverse: \Piece.edgeAssignments) var piece: Piece?
 
     init(edge: EdgePosition, treatment: EdgeTreatment?) {
         self.id = UUID()

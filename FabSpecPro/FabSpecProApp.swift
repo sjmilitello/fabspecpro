@@ -24,8 +24,17 @@ struct FabSpecProApp: App {
         } catch {
             // If the store is incompatible or corrupted, delete and recreate.
             let storeURL = modelConfiguration.url
-            if FileManager.default.fileExists(atPath: storeURL.path) {
-                try? FileManager.default.removeItem(at: storeURL)
+            let storeDirectory = storeURL.deletingLastPathComponent()
+            try? FileManager.default.createDirectory(at: storeDirectory, withIntermediateDirectories: true)
+            let basePath = storeURL.path
+            let sidecarPaths = [
+                basePath,
+                basePath + "-shm",
+                basePath + "-wal",
+                basePath + "-journal"
+            ]
+            for path in sidecarPaths where FileManager.default.fileExists(atPath: path) {
+                try? FileManager.default.removeItem(atPath: path)
             }
             do {
                 return try ModelContainer(

@@ -39,6 +39,390 @@ enum CutoutCornerPosition: Int {
 }
 
 enum ShapePathBuilder {
+    struct NotchMeasurementInfo {
+        let widthDistance: CGFloat?
+        let lengthDistance: CGFloat?
+        let widthIsCurved: Bool
+        let lengthIsCurved: Bool
+        let hypotenuseDistance: CGFloat?
+        let hypotenuseIsCurved: Bool
+    }
+
+    private struct BoundaryContact {
+        let edge: EdgePosition
+        let isCurved: Bool
+        let apexPoint: CGPoint?
+        let boundaryPoint: CGPoint
+        let normal: CGPoint
+        let segmentIndex: Int?
+    }
+
+    private struct CurveSpanInfo {
+        let curve: CurvedEdge
+        let edge: EdgePosition
+        let spanStart: CGPoint
+        let spanEnd: CGPoint
+        let control: CGPoint
+        let normal: CGPoint
+        let sMin: CGFloat
+        let sMax: CGFloat
+    }
+
+    static func notchMeasurementInfo(cutout: Cutout, piece: Piece, size: CGSize, tolerance: CGFloat = 0.01) -> NotchMeasurementInfo {
+        let contacts = cutoutBoundaryContacts(cutout: cutout, piece: piece, size: size, tolerance: tolerance)
+        guard !contacts.isEmpty else {
+            return NotchMeasurementInfo(widthDistance: nil, lengthDistance: nil, widthIsCurved: false, lengthIsCurved: false, hypotenuseDistance: nil, hypotenuseIsCurved: false)
+        }
+
+        let displayCutout = cutoutDisplayPolygon(cutout: cutout, size: size, shape: piece.shape)
+        let insideProjection = projectionRange(points: displayCutout)
+
+        var widthDistance: CGFloat?
+        var lengthDistance: CGFloat?
+        var widthIsCurved = false
+        var lengthIsCurved = false
+        var hypotenuseDistance: CGFloat?
+        var hypotenuseIsCurved = false
+
+        for contact in contacts {
+            let boundaryProjection = dot(contact.boundaryPoint, contact.normal)
+            let insideMin = insideProjection.min(for: contact.normal)
+            let distance = abs(boundaryProjection - insideMin)
+
+            switch contact.edge {
+            case .top, .bottom, .legA:
+                if widthDistance == nil || distance < (widthDistance ?? .greatestFiniteMagnitude) {
+                    widthDistance = distance
+                    widthIsCurved = contact.isCurved
+                }
+            case .left, .right, .legB:
+                if lengthDistance == nil || distance < (lengthDistance ?? .greatestFiniteMagnitude) {
+                    lengthDistance = distance
+                    lengthIsCurved = contact.isCurved
+                }
+            case .hypotenuse:
+                if hypotenuseDistance == nil || distance < (hypotenuseDistance ?? .greatestFiniteMagnitude) {
+                    hypotenuseDistance = distance
+                    hypotenuseIsCurved = contact.isCurved
+                }
+            }
+        }
+
+        return NotchMeasurementInfo(
+            widthDistance: widthDistance,
+            lengthDistance: lengthDistance,
+            widthIsCurved: widthIsCurved,
+            lengthIsCurved: lengthIsCurved,
+            hypotenuseDistance: hypotenuseDistance,
+            hypotenuseIsCurved: hypotenuseIsCurved
+        )
+    }
+
+    static func cutoutIsNotch(cutout: Cutout, piece: Piece, size: CGSize, tolerance: CGFloat = 0.01) -> Bool {
+        if cutout.isNotch { return true }
+        guard cutout.kind != .circle else { return false }
+        let rawSize = pieceSize(for: piece)
+        let angleCuts = boundaryAngleCuts(for: piece)
+        let baseBoundary = boundaryPointsFor(piece: piece, size: rawSize, notches: [], angleCuts: angleCuts)
+        if cutoutIsClearlyInteriorToBoundary(
+            cutout: cutout,
+            piece: piece,
+            size: size,
+            tolerance: tolerance,
+            boundaryPoints: baseBoundary
+        ) {
+            return false
+        }
+        return !cutoutBoundaryContacts(cutout: cutout, piece: piece, size: size, tolerance: tolerance).isEmpty
+    }
+
+    private static func cutoutBoundaryContacts(cutout: Cutout, piece: Piece, size: CGSize, tolerance: CGFloat) -> [BoundaryContact] {
+        guard cutout.kind != .circle else { return [] }
+
+        let rawSize = pieceSize(for: piece)
+        let angleCuts = boundaryAngleCuts(for: piece)
+        let baseBoundary = boundaryPointsFor(piece: piece, size: rawSize, notches: [], angleCuts: angleCuts)
+        let derivedNotches = notchCandidatesUsingBoundary(piece: piece, size: rawSize, tolerance: tolerance, boundaryPoints: baseBoundary)
+        let boundaryPoints = boundaryPointsFor(piece: piece, size: rawSize, notches: derivedNotches, angleCuts: angleCuts)
+
+        return cutoutBoundaryContacts(cutout: cutout, piece: piece, size: size, tolerance: tolerance, boundaryPoints: boundaryPoints)
+    }
+
+    private static func cutoutBoundaryContacts(cutout: Cutout, piece: Piece, size: CGSize, tolerance: CGFloat, boundaryPoints: [CGPoint]) -> [BoundaryContact] {
+        guard cutout.kind != .circle else { return [] }
+        let cutoutPolygon = cutoutDisplayPolygon(cutout: cutout, size: size, shape: piece.shape)
+        guard cutoutPolygon.count >= 3 else { return [] }
+        guard boundaryPoints.count >= 2 else { return [] }
+
+        let bounds = polygonBounds(boundaryPoints)
+        let hypotenuseBounds = bounds
+        let mappedCurves = piece.curvedEdges
+        let boundarySegments = boundarySegments(
+            for: boundaryPoints,
+            shape: piece.shape,
+            bounds: bounds,
+            hypotenuseBounds: piece.shape == .rightTriangle ? hypotenuseBounds : nil
+        )
+        let curveSpans = curveSpanInfos(curves: mappedCurves, shape: piece.shape, boundaryPoints: boundaryPoints, bounds: bounds, hypotenuseBounds: hypotenuseBounds)
+
+        if cutoutIsClearlyInterior(
+            cutoutPolygon: cutoutPolygon,
+            boundaryPolygon: boundaryPoints,
+            boundarySegments: boundarySegments,
+            curveSpans: curveSpans,
+            tolerance: tolerance
+        ) {
+            return []
+        }
+
+        var contacts: [BoundaryContact] = []
+        contacts.reserveCapacity(boundarySegments.count)
+
+        for span in curveSpans {
+            let polyline = sampleCurve(span: span, steps: 40)
+            if polylineIntersectsPolygon(polyline: polyline, polygon: cutoutPolygon, tolerance: tolerance) {
+                let apex = quadPoint(start: span.spanStart, control: span.control, end: span.spanEnd, t: 0.5)
+                contacts.append(BoundaryContact(edge: span.edge, isCurved: true, apexPoint: apex, boundaryPoint: apex, normal: span.normal, segmentIndex: nil))
+            }
+        }
+
+        for segment in boundarySegments {
+            let edge = segment.edge
+            guard let geometry = fullEdgeGeometry(edge: edge, bounds: bounds, hypotenuseBounds: hypotenuseBounds, shape: piece.shape) else { continue }
+            let segT0 = tForEdge(point: segment.start, geometry: geometry, edge: edge)
+            let segT1 = tForEdge(point: segment.end, geometry: geometry, edge: edge)
+            let segMin = min(segT0, segT1)
+            let segMax = max(segT0, segT1)
+
+            let coveredByCurve = curveSpans.contains { span in
+                guard span.edge == edge else { return false }
+                return !(segMax < span.sMin || segMin > span.sMax)
+            }
+            if coveredByCurve {
+                continue
+            }
+
+            if polygonIntersectsSegment(polygon: cutoutPolygon, start: segment.start, end: segment.end, tolerance: tolerance) {
+                let mid = CGPoint(x: (segment.start.x + segment.end.x) / 2, y: (segment.start.y + segment.end.y) / 2)
+                contacts.append(BoundaryContact(edge: edge, isCurved: false, apexPoint: nil, boundaryPoint: mid, normal: geometry.normal, segmentIndex: segment.index))
+            }
+        }
+
+        return contacts
+    }
+
+    private static func cutoutIsClearlyInterior(
+        cutoutPolygon: [CGPoint],
+        boundaryPolygon: [CGPoint],
+        boundarySegments: [BoundarySegment],
+        curveSpans: [CurveSpanInfo],
+        tolerance: CGFloat
+    ) -> Bool {
+        for point in cutoutPolygon {
+            let inside = GeometryHelpers.pointIsInsidePolygon(point, polygon: boundaryPolygon)
+            let onEdge = GeometryHelpers.pointIsOnPolygonEdge(point, polygon: boundaryPolygon, tolerance: tolerance)
+            if !inside && !onEdge { return false }
+        }
+
+        var minDistance = CGFloat.greatestFiniteMagnitude
+        for segment in boundarySegments {
+            let distance = minDistanceFromPoints(cutoutPolygon, toSegmentStart: segment.start, segmentEnd: segment.end)
+            minDistance = min(minDistance, distance)
+            if minDistance <= tolerance { return false }
+        }
+
+        if !curveSpans.isEmpty {
+            for span in curveSpans {
+                let polyline = sampleCurve(span: span, steps: 24)
+                let distance = minDistanceFromPointsToPolyline(cutoutPolygon, polyline: polyline)
+                minDistance = min(minDistance, distance)
+                if minDistance <= tolerance { return false }
+            }
+        }
+
+        return true
+    }
+
+    private static func cutoutIsClearlyInteriorToBoundary(
+        cutout: Cutout,
+        piece: Piece,
+        size: CGSize,
+        tolerance: CGFloat,
+        boundaryPoints: [CGPoint]
+    ) -> Bool {
+        guard cutout.kind != .circle else { return false }
+        let cutoutPolygon = cutoutDisplayPolygon(cutout: cutout, size: size, shape: piece.shape)
+        guard cutoutPolygon.count >= 3 else { return false }
+        guard boundaryPoints.count >= 2 else { return false }
+        let bounds = polygonBounds(boundaryPoints)
+        let hypotenuseBounds = bounds
+        let mappedCurves = piece.curvedEdges
+        let boundarySegments = boundarySegments(
+            for: boundaryPoints,
+            shape: piece.shape,
+            bounds: bounds,
+            hypotenuseBounds: piece.shape == .rightTriangle ? hypotenuseBounds : nil
+        )
+        let curveSpans = curveSpanInfos(curves: mappedCurves, shape: piece.shape, boundaryPoints: boundaryPoints, bounds: bounds, hypotenuseBounds: hypotenuseBounds)
+        return cutoutIsClearlyInterior(
+            cutoutPolygon: cutoutPolygon,
+            boundaryPolygon: boundaryPoints,
+            boundarySegments: boundarySegments,
+            curveSpans: curveSpans,
+            tolerance: tolerance
+        )
+    }
+
+    private static func minDistanceFromPoints(_ points: [CGPoint], toSegmentStart start: CGPoint, segmentEnd end: CGPoint) -> CGFloat {
+        var minDistance = CGFloat.greatestFiniteMagnitude
+        for point in points {
+            let distance = GeometryHelpers.pointSegmentDistance(point: point, a: start, b: end)
+            minDistance = min(minDistance, distance)
+        }
+        return minDistance
+    }
+
+    private static func minDistanceFromPointsToPolyline(_ points: [CGPoint], polyline: [CGPoint]) -> CGFloat {
+        guard polyline.count >= 2 else { return CGFloat.greatestFiniteMagnitude }
+        var minDistance = CGFloat.greatestFiniteMagnitude
+        for index in 0..<(polyline.count - 1) {
+            let start = polyline[index]
+            let end = polyline[index + 1]
+            let distance = minDistanceFromPoints(points, toSegmentStart: start, segmentEnd: end)
+            minDistance = min(minDistance, distance)
+        }
+        return minDistance
+    }
+
+    private static func notchCandidatesUsingBoundary(piece: Piece, size: CGSize, tolerance: CGFloat, boundaryPoints: [CGPoint]) -> [Cutout] {
+        piece.cutouts.filter { cutout in
+            guard cutout.kind != .circle else { return false }
+            guard cutout.centerX >= 0 && cutout.centerY >= 0 else { return false }
+            if cutout.isNotch { return true }
+            return !cutoutBoundaryContacts(cutout: cutout, piece: piece, size: size, tolerance: tolerance, boundaryPoints: boundaryPoints).isEmpty
+        }
+    }
+
+    private static func boundaryPointsFor(piece: Piece, size: CGSize, notches: [Cutout], angleCuts: [AngleCut]) -> [CGPoint] {
+        switch piece.shape {
+        case .rectangle:
+            let points = booleanBasePolygon(size: size, shape: .rectangle, curves: rawCurvesForGeometry(piece: piece), notches: notches, angleCuts: angleCuts)
+            let displayPoints = points.map { displayPoint(fromRaw: $0) }
+            return reorderCornersClockwise(displayPoints)
+        case .rightTriangle:
+            let points = booleanBasePolygon(size: size, shape: .rightTriangle, curves: rawCurvesForGeometry(piece: piece), notches: notches, angleCuts: angleCuts)
+            let displayPoints = points.map { displayPoint(fromRaw: $0) }
+            return reorderCornersClockwise(displayPoints)
+        default:
+            return []
+        }
+    }
+
+    private static func curveSpanInfos(curves: [CurvedEdge], shape: ShapeKind, boundaryPoints: [CGPoint], bounds: CGRect, hypotenuseBounds: CGRect) -> [CurveSpanInfo] {
+        let boundarySegments = boundarySegments(for: boundaryPoints, shape: shape, bounds: bounds, hypotenuseBounds: shape == .rightTriangle ? hypotenuseBounds : nil)
+        let pointCount = boundaryPoints.count
+        var spans: [CurveSpanInfo] = []
+        spans.reserveCapacity(curves.count)
+
+        for curve in curves where curve.radius > 0 {
+            let direction: CGFloat = curve.isConcave ? -1 : 1
+            let spanEdge: EdgePosition
+            let spanStart: CGPoint
+            let spanEnd: CGPoint
+
+            if curve.usesEdgeProgress {
+                spanEdge = curve.edge
+                guard let geometry = fullEdgeGeometry(edge: spanEdge, bounds: bounds, hypotenuseBounds: hypotenuseBounds, shape: shape) else { continue }
+                let t0 = CGFloat(min(curve.startEdgeProgress, curve.endEdgeProgress))
+                let t1 = CGFloat(max(curve.startEdgeProgress, curve.endEdgeProgress))
+                spanStart = lerp(geometry.start, geometry.end, t0)
+                spanEnd = lerp(geometry.start, geometry.end, t1)
+            } else if curve.hasSpan,
+                      let span = spanIndices(for: curve, boundarySegments: boundarySegments, pointCount: pointCount, bounds: bounds, shape: shape),
+                      span.start != span.end,
+                      let resolvedEdge = edgeForSpanPoints(start: boundaryPoints[span.start], end: boundaryPoints[span.end], points: boundaryPoints, bounds: bounds, hypotenuseBounds: hypotenuseBounds, shape: shape) {
+                spanEdge = resolvedEdge
+                spanStart = boundaryPoints[span.start]
+                spanEnd = boundaryPoints[span.end]
+            } else {
+                spanEdge = curve.edge
+                guard let geometry = fullEdgeGeometry(edge: spanEdge, bounds: bounds, hypotenuseBounds: hypotenuseBounds, shape: shape) else { continue }
+                spanStart = geometry.start
+                spanEnd = geometry.end
+            }
+
+            guard let geometry = fullEdgeGeometry(edge: spanEdge, bounds: bounds, hypotenuseBounds: hypotenuseBounds, shape: shape) else { continue }
+            let mid = CGPoint(x: (spanStart.x + spanEnd.x) / 2, y: (spanStart.y + spanEnd.y) / 2)
+            let control = CGPoint(
+                x: mid.x + geometry.normal.x * curve.radius * 2 * direction,
+                y: mid.y + geometry.normal.y * curve.radius * 2 * direction
+            )
+
+            let t0 = tForEdge(point: spanStart, geometry: geometry, edge: spanEdge)
+            let t1 = tForEdge(point: spanEnd, geometry: geometry, edge: spanEdge)
+            let sMin = min(t0, t1)
+            let sMax = max(t0, t1)
+
+            spans.append(CurveSpanInfo(curve: curve, edge: spanEdge, spanStart: spanStart, spanEnd: spanEnd, control: control, normal: geometry.normal, sMin: sMin, sMax: sMax))
+        }
+        return spans
+    }
+
+    private static func cutoutDisplayPolygon(cutout: Cutout, size: CGSize, shape: ShapeKind) -> [CGPoint] {
+        GeometryHelpers.cutoutCornerPoints(cutout: cutout, size: size, shape: shape).map { displayPoint(fromRaw: $0) }
+    }
+
+    private static func polygonIntersectsSegment(polygon: [CGPoint], start: CGPoint, end: CGPoint, tolerance: CGFloat) -> Bool {
+        guard polygon.count >= 2 else { return false }
+        for index in 0..<polygon.count {
+            let a = polygon[index]
+            let b = polygon[(index + 1) % polygon.count]
+            if GeometryHelpers.segmentSegmentIntersection(a1: start, a2: end, b1: a, b2: b) != nil {
+                return true
+            }
+            if GeometryHelpers.pointSegmentDistance(point: start, a: a, b: b) <= tolerance { return true }
+            if GeometryHelpers.pointSegmentDistance(point: end, a: a, b: b) <= tolerance { return true }
+            if GeometryHelpers.pointSegmentDistance(point: a, a: start, b: end) <= tolerance { return true }
+            if GeometryHelpers.pointSegmentDistance(point: b, a: start, b: end) <= tolerance { return true }
+        }
+        return false
+    }
+
+    private static func polylineIntersectsPolygon(polyline: [CGPoint], polygon: [CGPoint], tolerance: CGFloat) -> Bool {
+        guard polyline.count >= 2 else { return false }
+        for index in 0..<(polyline.count - 1) {
+            if polygonIntersectsSegment(polygon: polygon, start: polyline[index], end: polyline[index + 1], tolerance: tolerance) {
+                return true
+            }
+        }
+        return false
+    }
+
+    private static func sampleCurve(span: CurveSpanInfo, steps: Int) -> [CGPoint] {
+        let count = max(steps, 4)
+        var points: [CGPoint] = []
+        points.reserveCapacity(count + 1)
+        for i in 0...count {
+            let t = CGFloat(i) / CGFloat(count)
+            points.append(quadPoint(start: span.spanStart, control: span.control, end: span.spanEnd, t: t))
+        }
+        return points
+    }
+
+    private struct ProjectionRange {
+        let points: [CGPoint]
+        func min(for normal: CGPoint) -> CGFloat {
+            points.map { dot($0, normal) }.min() ?? 0
+        }
+    }
+
+    private static func projectionRange(points: [CGPoint]) -> ProjectionRange {
+        ProjectionRange(points: points)
+    }
+
+    private static func dot(_ point: CGPoint, _ normal: CGPoint) -> CGFloat {
+        point.x * normal.x + point.y * normal.y
+    }
     private static func spanIndices(for curve: CurvedEdge, boundarySegments: [BoundarySegment], pointCount: Int, bounds: CGRect, shape: ShapeKind) -> CurveSpanIndices? {
         if curve.usesEdgeProgress {
             let edgeSegments = boundarySegments.filter { $0.edge == curve.edge }
@@ -282,6 +666,69 @@ enum ShapePathBuilder {
         return segments
     }
 
+    private static func rawCurvesForGeometry(piece: Piece) -> [CurvedEdge] {
+        let curves = piece.curvedEdges.filter { $0.radius > 0 }
+        guard !curves.isEmpty else { return [] }
+        let rawSize = pieceSize(for: piece)
+        let rawBase = basePolygonForShape(shape: piece.shape, size: rawSize)
+        let rawBounds = polygonBounds(rawBase)
+        let displayPoints = displayPolygonPoints(for: piece, includeAngles: true)
+        let displayBounds = polygonBounds(displayPoints)
+        let displaySegments = boundarySegments(
+            for: displayPoints,
+            shape: piece.shape,
+            bounds: displayBounds,
+            hypotenuseBounds: piece.shape == .rightTriangle ? displayBounds : nil
+        )
+
+        func displayPointForProgress(edge: EdgePosition, progress: Double) -> CGPoint? {
+            guard let geometry = fullEdgeGeometry(edge: edge, bounds: displayBounds, hypotenuseBounds: displayBounds, shape: piece.shape) else { return nil }
+            return lerp(geometry.start, geometry.end, CGFloat(progress))
+        }
+
+        var mapped: [CurvedEdge] = []
+        mapped.reserveCapacity(curves.count)
+
+        for curve in curves {
+            let displayEdge = curve.edge
+            let rawEdge = rawEdgePosition(for: displayEdge, shape: piece.shape)
+
+            var startDisplay: CGPoint?
+            var endDisplay: CGPoint?
+
+            if curve.usesEdgeProgress {
+                startDisplay = displayPointForProgress(edge: displayEdge, progress: curve.startEdgeProgress)
+                endDisplay = displayPointForProgress(edge: displayEdge, progress: curve.endEdgeProgress)
+            } else if curve.usesBoundaryEndpoints {
+                if let segment = displaySegments.first(where: { $0.edge == displayEdge && $0.index == curve.startBoundarySegmentIndex }) {
+                    startDisplay = curve.startBoundaryIsEnd ? segment.end : segment.start
+                }
+                if let segment = displaySegments.first(where: { $0.edge == displayEdge && $0.index == curve.endBoundarySegmentIndex }) {
+                    endDisplay = curve.endBoundaryIsEnd ? segment.end : segment.start
+                }
+            }
+
+            if startDisplay == nil || endDisplay == nil {
+                if curve.startCornerIndex >= 0, curve.startCornerIndex < displayPoints.count {
+                    startDisplay = displayPoints[curve.startCornerIndex]
+                }
+                if curve.endCornerIndex >= 0, curve.endCornerIndex < displayPoints.count {
+                    endDisplay = displayPoints[curve.endCornerIndex]
+                }
+            }
+
+            let mappedCurve = CurvedEdge(edge: rawEdge, radius: curve.radius, isConcave: curve.isConcave)
+            if let startDisplay, let endDisplay {
+                let startRaw = rawPoint(fromDisplay: startDisplay)
+                let endRaw = rawPoint(fromDisplay: endDisplay)
+                mappedCurve.startEdgeProgress = Double(edgeProgress(for: startRaw, edge: rawEdge, shape: piece.shape, bounds: rawBounds))
+                mappedCurve.endEdgeProgress = Double(edgeProgress(for: endRaw, edge: rawEdge, shape: piece.shape, bounds: rawBounds))
+            }
+            mapped.append(mappedCurve)
+        }
+        return mapped
+    }
+
     private static func boundarySegments(for points: [CGPoint], shape: ShapeKind, bounds: CGRect, hypotenuseBounds: CGRect? = nil) -> [BoundarySegment] {
         guard points.count >= 2 else { return [] }
         let eps: CGFloat = 0.001
@@ -353,7 +800,8 @@ enum ShapePathBuilder {
         let allCornerRadii = pieceCornerRadii(for: piece)
         let notches = notchCandidates(for: piece, size: rawSize)
         let pieceAngleCuts = boundaryAngleCuts(for: piece)
-        let activeCurves = piece.curvedEdges.filter { $0.radius > 0 }
+        let activeCurves = rawCurvesForGeometry(piece: piece)
+        let displayCurves = piece.curvedEdges.filter { $0.radius > 0 }
         
         // Filter out corner radii that conflict with curved edges (based on current base-corner list)
         let baseCorners = cornerPoints(for: piece, includeAngles: false)
@@ -364,23 +812,16 @@ enum ShapePathBuilder {
         } else {
             baseTriangleCorners = []
         }
-        let curveOccupiedCorners = cornerIndicesOnCurvedEdges(points: baseCorners, shape: piece.shape, curves: activeCurves, requireConvex: true)
+        let curveOccupiedCorners = cornerIndicesOnCurvedEdges(points: baseCorners, shape: piece.shape, curves: displayCurves, requireConvex: true)
         let cornerRadii = allCornerRadii.filter { !curveOccupiedCorners.contains($0.cornerIndex) }
         
         if piece.shape == .rectangle, (!notches.isEmpty || !piece.angleCuts.isEmpty) {
-            let result = angledRectanglePoints(size: rawSize, notches: notches, angleCuts: pieceAngleCuts)
-            let displayPoints = result.points.map { displayPoint(fromRaw: $0) }
+            let points = booleanBasePolygon(size: rawSize, shape: .rectangle, curves: activeCurves, notches: notches, angleCuts: pieceAngleCuts)
+            let displayPoints = points.map { displayPoint(fromRaw: $0) }
             
             // Handle curves + radii together, or just one, or neither
             if !activeCurves.isEmpty {
-                // Always use the proven edge-based curvedPolygonPath
-                // Corner indices are used to set the edge property, but rendering uses edge-based approach
-                let mappedCurves = mapCurvesToDisplayPointsUsingBaseCorners(
-                    curves: activeCurves,
-                    displayPoints: displayPoints,
-                    baseCorners: baseTriangleCorners
-                )
-                let curvedPath = curvedPolygonPath(points: displayPoints, shape: .rectangle, curves: mappedCurves, baseBounds: nil)
+                let curvedPath = polygonPath(displayPoints)
                 if !cornerRadii.isEmpty {
                     return applyCornerRadiiToPath(curvedPath, cornerRadii: cornerRadii, piece: piece, displayPoints: displayPoints)
                 }
@@ -394,17 +835,12 @@ enum ShapePathBuilder {
             return polygonPath(displayPoints)
         }
         if piece.shape == .rightTriangle, (!notches.isEmpty || !piece.angleCuts.isEmpty) {
-            let result = angledRightTrianglePoints(size: rawSize, notches: notches, angleCuts: pieceAngleCuts)
-            let displayPoints = result.points.map { displayPoint(fromRaw: $0) }
-            let displaySize = CGSize(width: rawSize.height, height: rawSize.width)
-            let baseBounds = CGRect(origin: .zero, size: displaySize)
+            let points = booleanBasePolygon(size: rawSize, shape: .rightTriangle, curves: activeCurves, notches: notches, angleCuts: pieceAngleCuts)
+            let displayPoints = points.map { displayPoint(fromRaw: $0) }
             
             // Handle curves + radii together, or just one, or neither
             if !activeCurves.isEmpty {
-                // Always use the proven edge-based curvedPolygonPath
-                // Corner indices are used to set the edge property, but rendering uses edge-based approach
-                let mappedCurves = mapCurvesToRawDisplayPoints(curves: activeCurves, displayPoints: displayPoints)
-                let curvedPath = curvedPolygonPath(points: displayPoints, shape: .rightTriangle, curves: mappedCurves, baseBounds: baseBounds)
+                let curvedPath = polygonPath(displayPoints)
                 if !cornerRadii.isEmpty {
                     return applyCornerRadiiToPath(curvedPath, cornerRadii: cornerRadii, piece: piece, displayPoints: displayPoints)
                 }
@@ -428,7 +864,7 @@ enum ShapePathBuilder {
                 if !activeCurves.isEmpty {
                     // Always use the proven edge-based curvedRectanglePath
                     let size = displaySize(for: piece)
-                    let curvedPath = curvedRectanglePath(width: size.width, height: size.height, curves: activeCurves)
+                    let curvedPath = curvedRectanglePath(width: size.width, height: size.height, curves: displayCurves)
                     if !cornerRadii.isEmpty {
                         return applyCornerRadiiToPath(curvedPath, cornerRadii: cornerRadii, piece: piece, displayPoints: displayPoints)
                     }
@@ -463,7 +899,7 @@ enum ShapePathBuilder {
                     }
                     // No notches - use simple curvedRightTriangle
                     let size = displaySize(for: piece)
-                    let curvedPath = curvedRightTriangle(width: size.width, height: size.height, curves: activeCurves)
+                    let curvedPath = curvedRightTriangle(width: size.width, height: size.height, curves: displayCurves)
                     if !cornerRadii.isEmpty {
                         return applyCornerRadiiToPath(curvedPath, cornerRadii: cornerRadii, piece: piece, displayPoints: displayPoints)
                     }
@@ -688,176 +1124,7 @@ enum ShapePathBuilder {
     }
 
     static func cutoutTouchesBoundary(cutout: Cutout, piece: Piece, size: CGSize) -> Bool {
-        let shape = piece.shape
-        let displayCutoutCorners = GeometryHelpers.cutoutCornerPoints(
-            cutout: cutout,
-            size: size,
-            shape: shape
-        ).map { displayPoint(fromRaw: $0) }
-
-        let boundaryPoints = displayPolygonPoints(for: piece, includeAngles: true, includeNotches: false)
-        guard boundaryPoints.count >= 2 else { return false }
-        let bounds = polygonBounds(boundaryPoints)
-        let hypotenuseBounds = bounds
-        let boundarySegments = boundarySegments(
-            for: boundaryPoints,
-            shape: shape,
-            bounds: bounds,
-            hypotenuseBounds: shape == .rightTriangle ? hypotenuseBounds : nil
-        )
-
-        let tolerance: CGFloat = 0.01
-        let curves = piece.curvedEdges.filter { $0.radius > 0 }
-
-        let baseCorners = displayPolygonPoints(for: piece, includeAngles: false, includeNotches: false)
-
-        func curveSpanRange(_ curve: CurvedEdge) -> (edge: EdgePosition, sMin: CGFloat, sMax: CGFloat)? {
-            let edge = curve.edge
-            if curve.usesEdgeProgress {
-                let sMin = CGFloat(min(curve.startEdgeProgress, curve.endEdgeProgress))
-                let sMax = CGFloat(max(curve.startEdgeProgress, curve.endEdgeProgress))
-                return (edge, clamp01(sMin), clamp01(sMax))
-            }
-            if curve.usesBoundaryEndpoints {
-                guard let startSeg = boundarySegments.first(where: { $0.edge == edge && $0.index == curve.startBoundarySegmentIndex }),
-                      let endSeg = boundarySegments.first(where: { $0.edge == edge && $0.index == curve.endBoundarySegmentIndex }) else {
-                    return nil
-                }
-                let startPoint = curve.startBoundaryIsEnd ? startSeg.end : startSeg.start
-                let endPoint = curve.endBoundaryIsEnd ? endSeg.end : endSeg.start
-                let s0 = edgeProgress(for: startPoint, edge: edge, shape: shape, bounds: bounds)
-                let s1 = edgeProgress(for: endPoint, edge: edge, shape: shape, bounds: bounds)
-                return (edge, min(s0, s1), max(s0, s1))
-            }
-            if curve.usesCornerIndices, curve.startCornerIndex >= 0, curve.endCornerIndex >= 0,
-               curve.startCornerIndex < baseCorners.count, curve.endCornerIndex < baseCorners.count {
-                let startPoint = baseCorners[curve.startCornerIndex]
-                let endPoint = baseCorners[curve.endCornerIndex]
-                let s0 = edgeProgress(for: startPoint, edge: edge, shape: shape, bounds: bounds)
-                let s1 = edgeProgress(for: endPoint, edge: edge, shape: shape, bounds: bounds)
-                return (edge, min(s0, s1), max(s0, s1))
-            }
-            return (edge, 0, 1)
-        }
-
-        var curveSpansByEdge: [EdgePosition: [(sMin: CGFloat, sMax: CGFloat, curve: CurvedEdge)]] = [:]
-        for curve in curves {
-            if let span = curveSpanRange(curve) {
-                curveSpansByEdge[span.edge, default: []].append((span.sMin, span.sMax, curve))
-            }
-        }
-
-        func segmentRange(_ segment: BoundarySegment) -> (min: CGFloat, max: CGFloat) {
-            let s0 = edgeProgress(for: segment.start, edge: segment.edge, shape: shape, bounds: bounds)
-            let s1 = edgeProgress(for: segment.end, edge: segment.edge, shape: shape, bounds: bounds)
-            return (min(s0, s1), max(s0, s1))
-        }
-
-        func segmentIsCurved(_ segment: BoundarySegment) -> Bool {
-            guard let spans = curveSpansByEdge[segment.edge], !spans.isEmpty else { return false }
-            if spans.contains(where: { $0.sMin <= 0.001 && $0.sMax >= 0.999 }) {
-                return true
-            }
-            let segRange = segmentRange(segment)
-            for span in spans {
-                if segRange.max >= span.sMin - 0.0001 && segRange.min <= span.sMax + 0.0001 {
-                    return true
-                }
-            }
-            return false
-        }
-
-        func segmentDistance(_ a: CGPoint, _ b: CGPoint, _ c: CGPoint, _ d: CGPoint) -> CGFloat {
-            min(
-                GeometryHelpers.pointSegmentDistance(point: a, a: c, b: d),
-                GeometryHelpers.pointSegmentDistance(point: b, a: c, b: d),
-                GeometryHelpers.pointSegmentDistance(point: c, a: a, b: b),
-                GeometryHelpers.pointSegmentDistance(point: d, a: a, b: b)
-            )
-        }
-
-        func cutoutEdges() -> [(CGPoint, CGPoint)] {
-            guard displayCutoutCorners.count >= 2 else { return [] }
-            var edges: [(CGPoint, CGPoint)] = []
-            for i in 0..<displayCutoutCorners.count {
-                edges.append((displayCutoutCorners[i], displayCutoutCorners[(i + 1) % displayCutoutCorners.count]))
-            }
-            return edges
-        }
-
-        let edges = cutoutEdges()
-
-        for segment in boundarySegments where !segmentIsCurved(segment) {
-            for edge in edges {
-                if segmentDistance(edge.0, edge.1, segment.start, segment.end) <= tolerance {
-                    return true
-                }
-            }
-        }
-
-        func edgeLineEndpoints(edge: EdgePosition) -> (CGPoint, CGPoint)? {
-            switch shape {
-            case .rightTriangle:
-                switch edge {
-                case .legA:
-                    return (CGPoint(x: bounds.minX, y: bounds.minY), CGPoint(x: bounds.maxX, y: bounds.minY))
-                case .legB:
-                    return (CGPoint(x: bounds.minX, y: bounds.maxY), CGPoint(x: bounds.minX, y: bounds.minY))
-                case .hypotenuse:
-                    return (CGPoint(x: bounds.maxX, y: bounds.minY), CGPoint(x: bounds.minX, y: bounds.maxY))
-                default:
-                    return nil
-                }
-            default:
-                switch edge {
-                case .top:
-                    return (CGPoint(x: bounds.minX, y: bounds.minY), CGPoint(x: bounds.maxX, y: bounds.minY))
-                case .right:
-                    return (CGPoint(x: bounds.maxX, y: bounds.minY), CGPoint(x: bounds.maxX, y: bounds.maxY))
-                case .bottom:
-                    return (CGPoint(x: bounds.maxX, y: bounds.maxY), CGPoint(x: bounds.minX, y: bounds.maxY))
-                case .left:
-                    return (CGPoint(x: bounds.minX, y: bounds.maxY), CGPoint(x: bounds.minX, y: bounds.minY))
-                default:
-                    return nil
-                }
-            }
-        }
-
-        func minDistanceToCutoutEdges(_ point: CGPoint) -> CGFloat {
-            var best = CGFloat.greatestFiniteMagnitude
-            for edge in edges {
-                best = min(best, GeometryHelpers.pointSegmentDistance(point: point, a: edge.0, b: edge.1))
-            }
-            return best
-        }
-
-        let sampleCount = 60
-        for (edge, spans) in curveSpansByEdge {
-            guard let line = edgeLineEndpoints(edge: edge) else { continue }
-            let normal = edgeNormal(for: edge, start: line.0, end: line.1)
-            for span in spans {
-                let sMin = span.sMin
-                let sMax = span.sMax
-                let spanStart = lerp(line.0, line.1, sMin)
-                let spanEnd = lerp(line.0, line.1, sMax)
-                let mid = CGPoint(x: (spanStart.x + spanEnd.x) / 2, y: (spanStart.y + spanEnd.y) / 2)
-                let direction = span.curve.isConcave ? -1.0 : 1.0
-                let control = CGPoint(
-                    x: mid.x + normal.x * CGFloat(span.curve.radius) * 2 * direction,
-                    y: mid.y + normal.y * CGFloat(span.curve.radius) * 2 * direction
-                )
-                for i in 0...sampleCount {
-                    let t = CGFloat(i) / CGFloat(sampleCount)
-                    let point = quadPoint(start: spanStart, control: control, end: spanEnd, t: t)
-                    if minDistanceToCutoutEdges(point) <= tolerance {
-                        return true
-                    }
-                }
-            }
-        }
-
-        return false
+        !cutoutBoundaryContacts(cutout: cutout, piece: piece, size: size, tolerance: 0.01).isEmpty
     }
 
     private static func cutoutTouchesHypotenuse(corners: [CGPoint], size: CGSize, eps: CGFloat) -> Bool {
@@ -974,12 +1241,12 @@ enum ShapePathBuilder {
     }
 
     private static func boundaryAngleCuts(for piece: Piece) -> [AngleCut] {
-        let polygonCount = displayPolygonPoints(for: piece, includeAngles: false).count
+        let polygonCount = displayPolygonPoints(for: piece, includeAngles: false, includeNotches: false).count
         return piece.angleCuts.filter { $0.anchorCornerIndex >= 0 && $0.anchorCornerIndex < polygonCount }
     }
 
     private static func pieceCornerRadii(for piece: Piece) -> [CornerRadius] {
-        let cornerCount = displayPolygonPoints(for: piece, includeAngles: false).count
+        let cornerCount = displayPolygonPoints(for: piece, includeAngles: false, includeNotches: false).count
         return piece.cornerRadii.filter { $0.radius > 0 && $0.cornerIndex >= 0 && $0.cornerIndex < cornerCount }
     }
 
@@ -1229,6 +1496,17 @@ enum ShapePathBuilder {
         [CGPoint(x: 0, y: 0), CGPoint(x: size.width, y: 0), CGPoint(x: 0, y: size.height)]
     }
 
+    private static func basePolygonForShape(shape: ShapeKind, size: CGSize) -> [CGPoint] {
+        switch shape {
+        case .rectangle:
+            return rectanglePoints(size: size)
+        case .rightTriangle:
+            return rightTrianglePoints(size: size)
+        default:
+            return []
+        }
+    }
+
     private static func basePolygonAfterNotches(
         base: [CGPoint],
         size: CGSize,
@@ -1238,6 +1516,154 @@ enum ShapePathBuilder {
         let clipPolygons = notchClipPolygons(notches: notches, size: size, shape: shape)
         guard !clipPolygons.isEmpty else { return base }
         return booleanDifference(subject: base, clips: clipPolygons)
+    }
+
+    private static func curvedBasePolygon(
+        size: CGSize,
+        shape: ShapeKind,
+        curves: [CurvedEdge]
+    ) -> [CGPoint] {
+        let base: [CGPoint]
+        switch shape {
+        case .rectangle:
+            base = rectanglePoints(size: size)
+        case .rightTriangle:
+            base = rightTrianglePoints(size: size)
+        default:
+            return []
+        }
+        guard !curves.isEmpty else { return base }
+        guard !curves.isEmpty else { return base }
+        let bounds = polygonBounds(base)
+        let hypotenuseBounds = bounds
+        let curvesByEdge = Dictionary(grouping: curves, by: { $0.edge })
+        let boundarySegments = boundarySegments(for: base, shape: shape, bounds: bounds, hypotenuseBounds: shape == .rightTriangle ? hypotenuseBounds : nil)
+        let pointCount = base.count
+
+        func curveSpan(for edge: EdgePosition, curve: CurvedEdge, edgeStart: CGPoint, edgeEnd: CGPoint) -> (t0: CGFloat, t1: CGFloat, start: CGPoint, end: CGPoint, control: CGPoint)? {
+            guard let geometry = fullEdgeGeometry(edge: edge, bounds: bounds, hypotenuseBounds: hypotenuseBounds, shape: shape) else { return nil }
+            let direction: CGFloat = curve.isConcave ? -1 : 1
+            let mid = CGPoint(x: (geometry.start.x + geometry.end.x) / 2, y: (geometry.start.y + geometry.end.y) / 2)
+            let control = CGPoint(
+                x: mid.x + geometry.normal.x * curve.radius * 2 * direction,
+                y: mid.y + geometry.normal.y * curve.radius * 2 * direction
+            )
+            var t0: CGFloat = 0
+            var t1: CGFloat = 1
+            if curve.usesEdgeProgress {
+                t0 = CGFloat(min(curve.startEdgeProgress, curve.endEdgeProgress))
+                t1 = CGFloat(max(curve.startEdgeProgress, curve.endEdgeProgress))
+            } else if curve.hasSpan,
+                      let span = spanIndices(for: curve, boundarySegments: boundarySegments, pointCount: pointCount, bounds: bounds, shape: shape),
+                      span.start != span.end {
+                let spanStart = base[span.start]
+                let spanEnd = base[span.end]
+                let tStart = tForEdge(point: spanStart, geometry: geometry, edge: edge)
+                let tEnd = tForEdge(point: spanEnd, geometry: geometry, edge: edge)
+                t0 = min(tStart, tEnd)
+                t1 = max(tStart, tEnd)
+            }
+            t0 = max(0, min(1, t0))
+            t1 = max(0, min(1, t1))
+            if t1 - t0 < 0.0001 { return nil }
+            let sub = quadSubsegment(start: edgeStart, control: control, end: edgeEnd, t0: t0, t1: t1)
+            return (t0: t0, t1: t1, start: sub.start, end: sub.end, control: sub.control)
+        }
+
+        func sampleCurve(start: CGPoint, control: CGPoint, end: CGPoint, steps: Int) -> [CGPoint] {
+            let count = max(steps, 8)
+            return (0...count).map { index in
+                let t = CGFloat(index) / CGFloat(count)
+                return quadPoint(start: start, control: control, end: end, t: t)
+            }
+        }
+
+        var output: [CGPoint] = []
+        for index in 0..<base.count {
+            let start = base[index]
+            let end = base[(index + 1) % base.count]
+            guard let edge = edgeForSegment(start: start, end: end, bounds: bounds, shape: shape, hypotenuseBounds: hypotenuseBounds) else {
+                if output.last != start { output.append(start) }
+                continue
+            }
+            let curve = curvesByEdge[edge]?.first(where: { $0.radius > 0 })
+            if let curve,
+               let span = curveSpan(for: edge, curve: curve, edgeStart: start, edgeEnd: end) {
+                if output.last != start { output.append(start) }
+                if span.t0 > 0.0001 {
+                    let prePoint = CGPoint(x: start.x + (end.x - start.x) * span.t0, y: start.y + (end.y - start.y) * span.t0)
+                    output.append(prePoint)
+                }
+                let curvePoints = sampleCurve(start: span.start, control: span.control, end: span.end, steps: 24)
+                if let last = output.last, let firstCurve = curvePoints.first, distance(last, firstCurve) > 0.0001 {
+                    output.append(firstCurve)
+                }
+                output.append(contentsOf: curvePoints.dropFirst())
+                if span.t1 < 0.9999 {
+                    let postPoint = CGPoint(x: start.x + (end.x - start.x) * span.t1, y: start.y + (end.y - start.y) * span.t1)
+                    if output.last != postPoint { output.append(postPoint) }
+                    output.append(end)
+                }
+            } else {
+                if output.last != start { output.append(start) }
+                output.append(end)
+            }
+        }
+        return dedupePoints(output)
+    }
+
+    private static func mapCurvesToRawEdges(curves: [CurvedEdge], shape: ShapeKind, baseDisplay: [CGPoint]) -> [CurvedEdge] {
+        guard !curves.isEmpty else { return curves }
+        let mappedCornerCurves = mapCurvesToRawDisplayPoints(curves: curves, displayPoints: baseDisplay)
+        return mappedCornerCurves.map { curve in
+            let rawEdge = rawEdgePosition(for: curve.edge, shape: shape)
+            let mapped = CurvedEdge(
+                startCornerIndex: curve.startCornerIndex,
+                endCornerIndex: curve.endCornerIndex,
+                radius: curve.radius,
+                isConcave: curve.isConcave,
+                edge: rawEdge
+            )
+            mapped.startBoundarySegmentIndex = curve.startBoundarySegmentIndex
+            mapped.startBoundaryIsEnd = curve.startBoundaryIsEnd
+            mapped.endBoundarySegmentIndex = curve.endBoundarySegmentIndex
+            mapped.endBoundaryIsEnd = curve.endBoundaryIsEnd
+            mapped.startEdgeProgress = curve.startEdgeProgress
+            mapped.endEdgeProgress = curve.endEdgeProgress
+            return mapped
+        }
+    }
+
+    private static func rawEdgePosition(for edge: EdgePosition, shape: ShapeKind) -> EdgePosition {
+        switch shape {
+        case .rightTriangle:
+            switch edge {
+            case .legA: return .legB
+            case .legB: return .legA
+            case .hypotenuse: return .hypotenuse
+            default: return edge
+            }
+        default:
+            switch edge {
+            case .top: return .left
+            case .right: return .bottom
+            case .bottom: return .right
+            case .left: return .top
+            default: return edge
+            }
+        }
+    }
+
+    private static func booleanBasePolygon(
+        size: CGSize,
+        shape: ShapeKind,
+        curves: [CurvedEdge],
+        notches: [Cutout],
+        angleCuts: [AngleCut]
+    ) -> [CGPoint] {
+        let base = curvedBasePolygon(size: size, shape: shape, curves: curves)
+        let baseAfterNotches = basePolygonAfterNotches(base: base, size: size, shape: shape, notches: notches)
+        return applyAngleCutsToPolygon(polygon: baseAfterNotches, angleCuts: angleCuts)
     }
 
     private static func applyAngleCutsToPolygon(polygon: [CGPoint], angleCuts: [AngleCut]) -> [CGPoint] {
@@ -3014,7 +3440,21 @@ enum ShapePathBuilder {
                 let point = points[pointIndex]
                 let t = spanParam(point)
                 if t < sMin - 0.0001 || t > sMax + 0.0001 { continue }
-                drawPoints[pointIndex] = quadPoint(start: spanStart, control: control, end: spanEnd, t: t)
+                if let notchIntersection = notchEdgeIntersectionPoint(
+                    pointIndex: pointIndex,
+                    points: points,
+                    edge: spanEdge,
+                    bounds: hypotenuseBounds,
+                    shape: shape,
+                    tolerance: 0.5,
+                    curveStart: spanStart,
+                    curveControl: control,
+                    curveEnd: spanEnd
+                ) {
+                    drawPoints[pointIndex] = notchIntersection
+                } else {
+                    drawPoints[pointIndex] = quadPoint(start: spanStart, control: control, end: spanEnd, t: t)
+                }
             }
         }
 
@@ -3725,6 +4165,20 @@ enum ShapePathBuilder {
                     if !pointIsOnEdge(point, edge: edge, bounds: hypotenuseBounds, shape: shape, tolerance: tolerance) {
                         continue
                     }
+                    if let notchIntersection = notchEdgeIntersectionPoint(
+                        pointIndex: pointIndex,
+                        points: points,
+                        edge: edge,
+                        bounds: hypotenuseBounds,
+                        shape: shape,
+                        tolerance: tolerance,
+                        curveStart: geometry.start,
+                        curveControl: control,
+                        curveEnd: geometry.end
+                    ) {
+                        drawPoints[pointIndex] = notchIntersection
+                        continue
+                    }
                     let t = tForEdge(point: point, geometry: geometry, edge: edge)
                     if let spanRange, (t < spanRange.min - 0.0001 || t > spanRange.max + 0.0001) {
                         continue
@@ -4189,6 +4643,125 @@ enum ShapePathBuilder {
         let t = max(0, min(1, ((point.x - a.x) * dx + (point.y - a.y) * dy) / denom))
         let proj = CGPoint(x: a.x + t * dx, y: a.y + t * dy)
         return distance(point, proj)
+    }
+
+    private static func rayQuadIntersectionStatic(
+        linePoint: CGPoint,
+        direction: CGPoint,
+        curveStart: CGPoint,
+        curveControl: CGPoint,
+        curveEnd: CGPoint,
+        nearT: CGFloat
+    ) -> CGPoint? {
+        let ax = curveStart.x - 2 * curveControl.x + curveEnd.x
+        let bx = 2 * (curveControl.x - curveStart.x)
+        let cx = curveStart.x
+
+        let ay = curveStart.y - 2 * curveControl.y + curveEnd.y
+        let by = 2 * (curveControl.y - curveStart.y)
+        let cy = curveStart.y
+
+        let dx = direction.x
+        let dy = direction.y
+        let lx = linePoint.x
+        let ly = linePoint.y
+
+        let A = ax * dy - ay * dx
+        let B = bx * dy - by * dx
+        let C = (cx - lx) * dy - (cy - ly) * dx
+
+        var solutions: [CGFloat] = []
+        if abs(A) < 0.0001 {
+            if abs(B) > 0.0001 {
+                solutions.append(-C / B)
+            }
+        } else {
+            let discriminant = B * B - 4 * A * C
+            if discriminant >= 0 {
+                let sqrtD = sqrt(discriminant)
+                solutions.append((-B + sqrtD) / (2 * A))
+                solutions.append((-B - sqrtD) / (2 * A))
+            }
+        }
+
+        var validSolutions: [(t: CGFloat, s: CGFloat)] = []
+        for t in solutions {
+            guard t >= -0.01 && t <= 1.01 else { continue }
+            let clampedT = max(0, min(1, t))
+            let curvePoint = quadPoint(start: curveStart, control: curveControl, end: curveEnd, t: clampedT)
+
+            let s: CGFloat
+            if abs(dx) > abs(dy) {
+                s = (curvePoint.x - lx) / dx
+            } else if abs(dy) > 0.0001 {
+                s = (curvePoint.y - ly) / dy
+            } else {
+                continue
+            }
+
+            if s >= -0.01 {
+                validSolutions.append((clampedT, s))
+            }
+        }
+
+        guard let best = validSolutions.min(by: { abs($0.t - nearT) < abs($1.t - nearT) }) else {
+            return nil
+        }
+        return quadPoint(start: curveStart, control: curveControl, end: curveEnd, t: best.t)
+    }
+
+    private static func notchEdgeIntersectionPoint(
+        pointIndex: Int,
+        points: [CGPoint],
+        edge: EdgePosition,
+        bounds: CGRect,
+        shape: ShapeKind,
+        tolerance: CGFloat,
+        curveStart: CGPoint,
+        curveControl: CGPoint,
+        curveEnd: CGPoint
+    ) -> CGPoint? {
+        let count = points.count
+        guard count >= 3 else { return nil }
+        let point = points[pointIndex]
+        guard pointIsOnEdge(point, edge: edge, bounds: bounds, shape: shape, tolerance: tolerance) else { return nil }
+
+        let prevIndex = (pointIndex - 1 + count) % count
+        let nextIndex = (pointIndex + 1) % count
+        let prevPoint = points[prevIndex]
+        let nextPoint = points[nextIndex]
+
+        let prevOnEdge = pointIsOnEdge(prevPoint, edge: edge, bounds: bounds, shape: shape, tolerance: tolerance)
+        let nextOnEdge = pointIsOnEdge(nextPoint, edge: edge, bounds: bounds, shape: shape, tolerance: tolerance)
+
+        let eps: CGFloat = 0.0001
+        let nearT = tForEdge(point: point, geometry: (start: curveStart, end: curveEnd, normal: .zero), edge: edge)
+
+        if !prevOnEdge, distance(prevPoint, point) > eps {
+            let direction = unitVector(from: prevPoint, to: point)
+            return rayQuadIntersectionStatic(
+                linePoint: prevPoint,
+                direction: direction,
+                curveStart: curveStart,
+                curveControl: curveControl,
+                curveEnd: curveEnd,
+                nearT: nearT
+            )
+        }
+
+        if !nextOnEdge, distance(nextPoint, point) > eps {
+            let direction = unitVector(from: nextPoint, to: point)
+            return rayQuadIntersectionStatic(
+                linePoint: nextPoint,
+                direction: direction,
+                curveStart: curveStart,
+                curveControl: curveControl,
+                curveEnd: curveEnd,
+                nearT: nearT
+            )
+        }
+
+        return nil
     }
 
     private static func edgeSegmentsForPoints(
