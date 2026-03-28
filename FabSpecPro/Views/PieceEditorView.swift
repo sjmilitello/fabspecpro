@@ -526,7 +526,28 @@ struct PieceEditorView: View {
                 }
             }
         }
-        return allSegments.filter { !claimed.contains("\($0.edge.rawValue)_\($0.index)") }
+        let unclaimed = allSegments.filter { !claimed.contains("\($0.edge.rawValue)_\($0.index)") }
+        // Sort segments in clockwise walk order within each edge:
+        // top: left→right (ascending progress), right: top→bottom (ascending),
+        // bottom: right→left (descending progress), left: bottom→top (descending).
+        // Preserve the original edge ordering (top, right, bottom, left).
+        let b = bounds(for: points)
+        return unclaimed.sorted { a, aNext in
+            if a.edge != aNext.edge {
+                // Preserve original edge order from allSegments
+                let aEdgeOrder = allSegments.firstIndex(where: { $0.edge == a.edge }) ?? 0
+                let bEdgeOrder = allSegments.firstIndex(where: { $0.edge == aNext.edge }) ?? 0
+                return aEdgeOrder < bEdgeOrder
+            }
+            let aProgress = ShapePathBuilder.edgeProgress(for: a.start, edge: a.edge, shape: piece.shape, bounds: b)
+            let bProgress = ShapePathBuilder.edgeProgress(for: aNext.start, edge: aNext.edge, shape: piece.shape, bounds: b)
+            // Bottom and left edges walk in reverse direction (right→left, bottom→top)
+            // so sort descending to match clockwise walk order.
+            if a.edge == .bottom || a.edge == .left {
+                return aProgress > bProgress
+            }
+            return aProgress < bProgress
+        }
     }
 
     /// Checks if a curve's span covers a given boundary segment.
@@ -537,18 +558,15 @@ struct PieceEditorView: View {
             return true
         }
         guard curve.usesEdgeProgress else { return false }
-        // Determine the segment's progress range on the edge
-        let edgeSegments = ShapePathBuilder.boundarySegments(for: piece).filter { $0.edge == curve.edge }
-        guard !edgeSegments.isEmpty else { return false }
-        let edgeStart = edgeSegments.first!.start
-        let edgeLast = edgeSegments.last!.end
-        let edgeLength = sqrt(pow(edgeLast.x - edgeStart.x, 2) + pow(edgeLast.y - edgeStart.y, 2))
-        guard edgeLength > 0.001 else { return false }
-
-        let segStartDist = sqrt(pow(segment.start.x - edgeStart.x, 2) + pow(segment.start.y - edgeStart.y, 2))
-        let segEndDist = sqrt(pow(segment.end.x - edgeStart.x, 2) + pow(segment.end.y - edgeStart.y, 2))
-        let segP0 = min(segStartDist, segEndDist) / edgeLength
-        let segP1 = max(segStartDist, segEndDist) / edgeLength
+        // Use coordinate-based edgeProgress for both segment and curve,
+        // so they share the same reference frame (left→right for top/bottom,
+        // top→bottom for left/right). The previous distance-based calculation
+        // used polygon walk order which is opposite on bottom/left edges.
+        let b = bounds(for: points)
+        let segSP = ShapePathBuilder.edgeProgress(for: segment.start, edge: curve.edge, shape: piece.shape, bounds: b)
+        let segEP = ShapePathBuilder.edgeProgress(for: segment.end, edge: curve.edge, shape: piece.shape, bounds: b)
+        let segP0 = min(segSP, segEP)
+        let segP1 = max(segSP, segEP)
 
         let curveP0 = CGFloat(min(curve.startEdgeProgress, curve.endEdgeProgress))
         let curveP1 = CGFloat(max(curve.startEdgeProgress, curve.endEdgeProgress))
@@ -2152,10 +2170,34 @@ private struct CurveRow: View {
             curve.edgeRaw = edge.rawValue
             syncBoundaryEndpoint(for: curve.startCornerIndex, isStart: true)
             syncBoundaryEndpoint(for: curve.endCornerIndex, isStart: false)
-            // Note: overlap detection is handled by validCurves(for:) at render time.
-            // We no longer clear edge progress here because .onAppear fires on ALL
-            // CurveRows when ForEach rebuilds, which would destructively wipe
-            // edge progress on existing curves that don't actually overlap.
+
+            // Delete any other curves on the same edge whose span is entirely
+            // encompassed by this curve's new span. This lets the user expand a
+            // curve's start/end to cover multiple segments without the old
+            // per-segment curves blocking it.
+            deleteEncompassedCurves(edge: edge)
+        }
+    }
+
+    /// Deletes other curves on `edge` whose edge-progress range falls entirely
+    /// within this curve's range. Called after the user changes start/end points.
+    private func deleteEncompassedCurves(edge: EdgePosition) {
+        guard curve.usesEdgeProgress else { return }
+        let myP0 = min(curve.startEdgeProgress, curve.endEdgeProgress)
+        let myP1 = max(curve.startEdgeProgress, curve.endEdgeProgress)
+        // Need a meaningful range to encompass anything
+        guard myP1 - myP0 > 0.01 else { return }
+
+        let siblings = piece.curvedEdges.filter { $0.edge == edge && $0.id != curve.id && $0.radius > 0 }
+        for sibling in siblings {
+            guard sibling.usesEdgeProgress else { continue }
+            let sP0 = min(sibling.startEdgeProgress, sibling.endEdgeProgress)
+            let sP1 = max(sibling.startEdgeProgress, sibling.endEdgeProgress)
+            // Sibling is encompassed if its entire range is within this curve's range
+            let tol = 0.01
+            if sP0 >= myP0 - tol && sP1 <= myP1 + tol {
+                modelContext.delete(sibling)
+            }
         }
     }
 
@@ -2355,8 +2397,16 @@ private struct CurveRow: View {
     }
 
     private func spanCornerPolygonIndices() -> [Int] {
-        let polygonPoints = ShapePathBuilder.displayPolygonPoints(for: piece, includeAngles: true)
-        return Array(polygonPoints.indices)
+        // Only include polygon indices that are boundary segment endpoints.
+        // This excludes interior notch teeth and other vertices that don't
+        // correspond to labeled corners, preventing duplicate labels in the picker.
+        let segments = ShapePathBuilder.boundarySegments(for: piece)
+        var indexSet = Set<Int>()
+        for seg in segments {
+            indexSet.insert(seg.startIndex)
+            indexSet.insert(seg.endIndex)
+        }
+        return indexSet.sorted()
     }
 
     private func spanCornerPoints() -> [CGPoint] {

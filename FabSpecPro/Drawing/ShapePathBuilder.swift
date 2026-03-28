@@ -433,25 +433,83 @@ enum ShapePathBuilder {
         let curveOccupiedCorners = cornerIndicesOnCurvedEdges(points: baseCorners, shape: piece.shape, curves: activeCurves, requireConvex: true)
         let cornerRadii = allCornerRadii.filter { !curveOccupiedCorners.contains($0.cornerIndex) }
 
-        if piece.shape == .rectangle, (!notches.isEmpty || !piece.angleCuts.isEmpty) {
-            let result = angledRectanglePoints(size: rawSize, notches: notches, angleCuts: pieceAngleCuts, curves: activeCurves)
-            let displayPoints = result.points.map { displayPoint(fromRaw: $0) }
-
-            // Handle curves + radii together, or just one, or neither
+        // Curve-aware notch candidates for the curve-first pipeline subtraction step.
+        // Uses curve-aware detection so notches that extend past the straight edge
+        // but still touch the curved boundary are included in subtraction.
+        // This is safe because the curve-first pipeline builds curves on the clean
+        // base shape first (steps 1-2), so the notch list doesn't affect curve computation.
+        let stableNotches = notchCandidatesCurveAware(for: piece, size: rawSize)
+        if piece.shape == .rectangle, (!notches.isEmpty || !stableNotches.isEmpty || !piece.angleCuts.isEmpty) {
+            // When curves are active, use curve-first pipeline:
+            // 1. Build base shape with angle cuts (no notches)
+            // 2. Apply curves to the simple shape (full unfragmented edges)
+            // 3. Subtract notches from the curved path
+            // This ensures addEdge receives full edge endpoints so edge progress
+            // interpolates correctly, and avoids cross-edge instability from
+            // curvedBooleanDifference changing the polygon when curves are added.
             if !activeCurves.isEmpty {
-                // Always use the proven edge-based curvedPolygonPath
-                // Corner indices are used to set the edge property, but rendering uses edge-based approach
-                let mappedCurves = mapCurvesToDisplayPointsUsingBaseCorners(
-                    curves: activeCurves,
-                    displayPoints: displayPoints,
-                    baseCorners: baseTriangleCorners
-                )
-                let curvedPath = curvedPolygonPath(points: displayPoints, shape: .rectangle, curves: mappedCurves, baseBounds: nil)
+                // Step 1: Base shape with angle cuts only (no notches, no curves)
+                let baseResult = angledRectanglePoints(size: rawSize, notches: [], angleCuts: pieceAngleCuts)
+                let baseDisplayPoints = baseResult.points.map { displayPoint(fromRaw: $0) }
+
+                // Step 2: Apply curves to the simple polygon
+                let dispSize = displaySize(for: piece)
+                var curvedPath: Path
+                if baseDisplayPoints.count <= 4 && pieceAngleCuts.isEmpty {
+                    // Simple rectangle — use direct curvedRectanglePath
+                    curvedPath = curvedRectanglePath(width: dispSize.width, height: dispSize.height, curves: activeCurves)
+                } else {
+                    // Has angle cuts — use curvedPolygonPath on the base shape
+                    let mappedCurves = mapCurvesToDisplayPointsUsingBaseCorners(
+                        curves: activeCurves,
+                        displayPoints: baseDisplayPoints,
+                        baseCorners: baseTriangleCorners
+                    )
+                    curvedPath = curvedPolygonPath(points: baseDisplayPoints, shape: .rectangle, curves: mappedCurves, baseBounds: nil)
+                }
+
+                // Step 3: Apply corner radii before notch subtraction
                 if !cornerRadii.isEmpty {
-                    return applyCornerRadiiToPath(curvedPath, cornerRadii: cornerRadii, piece: piece, displayPoints: displayPoints)
+                    curvedPath = applyCornerRadiiToPath(curvedPath, cornerRadii: cornerRadii, piece: piece, displayPoints: baseDisplayPoints)
+                }
+
+                // Step 4: Subtract notches from the curved (and optionally rounded) path
+                // Uses stableNotches (curve-independent) so the notch list
+                // never changes when curves are added or removed.
+                if !stableNotches.isEmpty {
+                    let clipPolygons = notchClipPolygons(notches: stableNotches, size: rawSize, shape: .rectangle)
+                    if !clipPolygons.isEmpty {
+                        var clipPath = Path()
+                        for clip in clipPolygons {
+                            let displayClip = clip.map { displayPoint(fromRaw: $0) }
+                            guard displayClip.count >= 3 else { continue }
+                            clipPath.move(to: displayClip[0])
+                            for pt in displayClip.dropFirst() { clipPath.addLine(to: pt) }
+                            clipPath.closeSubpath()
+                        }
+                        let subtracted = curvedPath.subtracting(clipPath)
+                        // Fallback: if Path.subtracting produces empty result, use existing pipeline
+                        let subBounds = subtracted.boundingRect
+                        if subBounds.width >= 0.01 || subBounds.height >= 0.01 {
+                            return subtracted
+                        }
+                        // Fallback to old pipeline
+                        let fallbackResult = angledRectanglePoints(size: rawSize, notches: notches, angleCuts: pieceAngleCuts, curves: activeCurves)
+                        let fallbackPoints = fallbackResult.points.map { displayPoint(fromRaw: $0) }
+                        let fallbackMapped = mapCurvesToDisplayPointsUsingBaseCorners(
+                            curves: activeCurves,
+                            displayPoints: fallbackPoints,
+                            baseCorners: baseTriangleCorners
+                        )
+                        return curvedPolygonPath(points: fallbackPoints, shape: .rectangle, curves: fallbackMapped, baseBounds: nil)
+                    }
                 }
                 return curvedPath
             }
+
+            // No curves: use existing polygon-based pipeline
+            let result = angledRectanglePoints(size: rawSize, notches: notches, angleCuts: pieceAngleCuts)
+            let displayPoints = result.points.map { displayPoint(fromRaw: $0) }
             if !cornerRadii.isEmpty {
                 let ordered = reorderCornersClockwise(displayPoints)
                 let baseCorners = cornerPoints(for: piece, includeAngles: false)
@@ -459,23 +517,55 @@ enum ShapePathBuilder {
             }
             return polygonPath(displayPoints)
         }
-        if piece.shape == .rightTriangle, (!notches.isEmpty || !piece.angleCuts.isEmpty) {
-            let result = angledRightTrianglePoints(size: rawSize, notches: notches, angleCuts: pieceAngleCuts, curves: activeCurves)
-            let displayPoints = result.points.map { displayPoint(fromRaw: $0) }
-            let displaySize = CGSize(width: rawSize.height, height: rawSize.width)
-            let baseBounds = CGRect(origin: .zero, size: displaySize)
+        if piece.shape == .rightTriangle, (!notches.isEmpty || !stableNotches.isEmpty || !piece.angleCuts.isEmpty) {
+            let dispSize = displaySize(for: piece)
+            let baseBounds = CGRect(origin: .zero, size: dispSize)
 
-            // Handle curves + radii together, or just one, or neither
+            // Curve-first pipeline for right triangles (same approach as rectangle)
             if !activeCurves.isEmpty {
-                // Always use the proven edge-based curvedPolygonPath
-                // Corner indices are used to set the edge property, but rendering uses edge-based approach
-                let mappedCurves = mapCurvesToRawDisplayPoints(curves: activeCurves, displayPoints: displayPoints)
-                let curvedPath = curvedPolygonPath(points: displayPoints, shape: .rightTriangle, curves: mappedCurves, baseBounds: baseBounds)
+                // Step 1: Base shape with angle cuts only (no notches)
+                let baseResult = angledRightTrianglePoints(size: rawSize, notches: [], angleCuts: pieceAngleCuts)
+                let baseDisplayPoints = baseResult.points.map { displayPoint(fromRaw: $0) }
+
+                // Step 2: Apply curves to the simple polygon
+                let mappedCurves = mapCurvesToRawDisplayPoints(curves: activeCurves, displayPoints: baseDisplayPoints)
+                var curvedPath = curvedPolygonPath(points: baseDisplayPoints, shape: .rightTriangle, curves: mappedCurves, baseBounds: baseBounds)
+
+                // Step 3: Apply corner radii
                 if !cornerRadii.isEmpty {
-                    return applyCornerRadiiToPath(curvedPath, cornerRadii: cornerRadii, piece: piece, displayPoints: displayPoints)
+                    curvedPath = applyCornerRadiiToPath(curvedPath, cornerRadii: cornerRadii, piece: piece, displayPoints: baseDisplayPoints)
+                }
+
+                // Step 4: Subtract notches
+                if !stableNotches.isEmpty {
+                    let clipPolygons = notchClipPolygons(notches: stableNotches, size: rawSize, shape: .rightTriangle)
+                    if !clipPolygons.isEmpty {
+                        var clipPath = Path()
+                        for clip in clipPolygons {
+                            let displayClip = clip.map { displayPoint(fromRaw: $0) }
+                            guard displayClip.count >= 3 else { continue }
+                            clipPath.move(to: displayClip[0])
+                            for pt in displayClip.dropFirst() { clipPath.addLine(to: pt) }
+                            clipPath.closeSubpath()
+                        }
+                        let subtracted = curvedPath.subtracting(clipPath)
+                        let subBounds = subtracted.boundingRect
+                        if subBounds.width >= 0.01 || subBounds.height >= 0.01 {
+                            return subtracted
+                        }
+                        // Fallback to old pipeline
+                        let fallbackResult = angledRightTrianglePoints(size: rawSize, notches: notches, angleCuts: pieceAngleCuts, curves: activeCurves)
+                        let fallbackPoints = fallbackResult.points.map { displayPoint(fromRaw: $0) }
+                        let fallbackMapped = mapCurvesToRawDisplayPoints(curves: activeCurves, displayPoints: fallbackPoints)
+                        return curvedPolygonPath(points: fallbackPoints, shape: .rightTriangle, curves: fallbackMapped, baseBounds: baseBounds)
+                    }
                 }
                 return curvedPath
             }
+
+            // No curves: use existing polygon-based pipeline
+            let result = angledRightTrianglePoints(size: rawSize, notches: notches, angleCuts: pieceAngleCuts)
+            let displayPoints = result.points.map { displayPoint(fromRaw: $0) }
             if !cornerRadii.isEmpty {
                 let ordered = reorderCornersClockwise(displayPoints)
                 let baseCorners = cornerPoints(for: piece, includeAngles: false)
@@ -1655,28 +1745,38 @@ enum ShapePathBuilder {
         switch piece.shape {
         case .rectangle:
             let notches = notchCandidatesCurveAware(for: piece, size: rawSize)
+            let activeCurves = validCurves(for: piece)
             let angleCuts: [AngleCut]
             if includeAngles {
                 angleCuts = boundaryAngleCuts(for: piece)
             } else {
                 angleCuts = []
             }
-            // Use geometric polygon computation (same as displayPolygonPoints)
-            // but with curve-aware notch candidates. This avoids the fragile
-            // Path.subtracting + extractCornersFromPath pipeline that can
-            // collapse base corners when curves change the path topology.
-            let result = angledRectanglePoints(size: rawSize, notches: notches, angleCuts: angleCuts)
+            // Only use the curved labeling path when there are notches that need it:
+            // notches past the straight edge but within the curved boundary.
+            // The curved path (Path.subtracting) introduces extra curve-sample points
+            // that produce duplicate labels, so avoid it when straight-edge boolean suffices.
+            let straightNotches = notchCandidates(for: piece, size: rawSize)
+            let hasCurveOnlyNotches = !activeCurves.isEmpty && notches.count != straightNotches.count
+            let curves = hasCurveOnlyNotches ? activeCurves : []
+            let forLabeling = hasCurveOnlyNotches
+            let result = angledRectanglePoints(size: rawSize, notches: notches, angleCuts: angleCuts, curves: curves, forLabeling: forLabeling)
             let displayPoints = result.points.map { displayPoint(fromRaw: $0) }
             return reorderCornersClockwise(displayPoints)
         case .rightTriangle:
             let notches = notchCandidatesCurveAware(for: piece, size: rawSize)
+            let activeCurves = validCurves(for: piece)
             let angleCuts: [AngleCut]
             if includeAngles {
                 angleCuts = boundaryAngleCuts(for: piece)
             } else {
                 angleCuts = []
             }
-            let result = angledRightTrianglePoints(size: rawSize, notches: notches, angleCuts: angleCuts)
+            let straightNotches = notchCandidates(for: piece, size: rawSize)
+            let hasCurveOnlyNotches = !activeCurves.isEmpty && notches.count != straightNotches.count
+            let triCurves = hasCurveOnlyNotches ? activeCurves : []
+            let triForLabeling = hasCurveOnlyNotches
+            let result = angledRightTrianglePoints(size: rawSize, notches: notches, angleCuts: angleCuts, curves: triCurves, forLabeling: triForLabeling)
             let displayPoints = result.points.map { displayPoint(fromRaw: $0) }
             return reorderCornersClockwise(displayPoints)
         default:
@@ -4106,10 +4206,22 @@ enum ShapePathBuilder {
 
         // If there are segment curves, draw them in order along the edge.
         if !segmentCurves.isEmpty {
+            // Edge progress is stored as coordinate-based (left→right for top/bottom,
+            // top→bottom for left/right). But curvedRectanglePath walks bottom
+            // right→left and left bottom→top. Flip progress for those edges so
+            // interpolation between from→to produces correct physical positions.
+            let needsFlip = (edge == .bottom || edge == .left)
+
             // Build sorted list of (startProgress, endProgress, curve)
             let segments: [(p0: CGFloat, p1: CGFloat, curve: CurvedEdge)] = segmentCurves.map { curve in
-                let p0 = CGFloat(min(curve.startEdgeProgress, curve.endEdgeProgress))
-                let p1 = CGFloat(max(curve.startEdgeProgress, curve.endEdgeProgress))
+                var p0 = CGFloat(min(curve.startEdgeProgress, curve.endEdgeProgress))
+                var p1 = CGFloat(max(curve.startEdgeProgress, curve.endEdgeProgress))
+                if needsFlip {
+                    let flippedP0 = 1.0 - p1
+                    let flippedP1 = 1.0 - p0
+                    p0 = flippedP0
+                    p1 = flippedP1
+                }
                 return (p0, p1, curve)
             }.sorted { $0.p0 < $1.p0 }
 
