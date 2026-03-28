@@ -136,7 +136,9 @@ final class CurvedEdge {
         startEdgeProgress >= 0 && endEdgeProgress >= 0
     }
     
-    /// Returns true if this curve has a valid span
+    /// Returns true if this curve is a segment curve (spans only part of an edge).
+    /// Full-edge curves have corner indices set but are NOT considered spans.
+    /// Only curves with edge progress or boundary endpoint data are true segments.
     var hasSpan: Bool {
         if usesEdgeProgress {
             return startEdgeProgress != endEdgeProgress
@@ -144,6 +146,6 @@ final class CurvedEdge {
         if usesBoundaryEndpoints {
             return startBoundarySegmentIndex != endBoundarySegmentIndex || startBoundaryIsEnd != endBoundaryIsEnd
         }
-        return startCornerIndex >= 0 && endCornerIndex >= 0 && startCornerIndex != endCornerIndex
+        return false
     }
 }

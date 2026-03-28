@@ -508,63 +508,182 @@ struct PieceEditorView: View {
         markUpdated()
     }
 
+    /// Returns all boundary segments not already covered by an existing curve.
+    private func unclaimedBoundarySegments() -> [BoundarySegment] {
+        let allSegments = ShapePathBuilder.boundarySegments(for: piece)
+        let existingCurves = piece.curvedEdges.filter { $0.radius > 0 }
+        guard !existingCurves.isEmpty else { return allSegments }
+
+        // Build a set of claimed (edge, segmentIndex) pairs
+        var claimed: Set<String> = []
+        let points = ShapePathBuilder.displayPolygonPoints(for: piece, includeAngles: true)
+        for curve in existingCurves {
+            let edge = curve.edge
+            let curveSegments = allSegments.filter { $0.edge == edge }
+            for seg in curveSegments {
+                if curveClaimsSegment(curve: curve, segment: seg, points: points) {
+                    claimed.insert("\(edge.rawValue)_\(seg.index)")
+                }
+            }
+        }
+        return allSegments.filter { !claimed.contains("\($0.edge.rawValue)_\($0.index)") }
+    }
+
+    /// Checks if a curve's span covers a given boundary segment.
+    private func curveClaimsSegment(curve: CurvedEdge, segment: BoundarySegment, points: [CGPoint]) -> Bool {
+        guard curve.edge == segment.edge else { return false }
+        // A full-edge curve (no span) claims all segments on that edge
+        if !curve.hasSpan {
+            return true
+        }
+        guard curve.usesEdgeProgress else { return false }
+        // Determine the segment's progress range on the edge
+        let edgeSegments = ShapePathBuilder.boundarySegments(for: piece).filter { $0.edge == curve.edge }
+        guard !edgeSegments.isEmpty else { return false }
+        let edgeStart = edgeSegments.first!.start
+        let edgeLast = edgeSegments.last!.end
+        let edgeLength = sqrt(pow(edgeLast.x - edgeStart.x, 2) + pow(edgeLast.y - edgeStart.y, 2))
+        guard edgeLength > 0.001 else { return false }
+
+        let segStartDist = sqrt(pow(segment.start.x - edgeStart.x, 2) + pow(segment.start.y - edgeStart.y, 2))
+        let segEndDist = sqrt(pow(segment.end.x - edgeStart.x, 2) + pow(segment.end.y - edgeStart.y, 2))
+        let segP0 = min(segStartDist, segEndDist) / edgeLength
+        let segP1 = max(segStartDist, segEndDist) / edgeLength
+
+        let curveP0 = CGFloat(min(curve.startEdgeProgress, curve.endEdgeProgress))
+        let curveP1 = CGFloat(max(curve.startEdgeProgress, curve.endEdgeProgress))
+
+        // Overlap check with tolerance
+        let overlap = min(curveP1, segP1) - max(curveP0, segP0)
+        return overlap > 0.01
+    }
+
+    /// Finds the next unclaimed boundary segment to use as default for a new curve.
+    private func nextUnclaimedSegment() -> (edge: EdgePosition, start: Int, end: Int)? {
+        let unclaimed = unclaimedBoundarySegments()
+        guard let seg = unclaimed.first else { return nil }
+        return (edge: seg.edge, start: seg.startIndex, end: seg.endIndex)
+    }
+
+    /// Checks whether the given curve's span overlaps any other curve on the same edge.
+    private func curveOverlapsExisting(curve: CurvedEdge) -> Bool {
+        let otherCurves = piece.curvedEdges.filter { $0.id != curve.id && $0.radius > 0 && $0.edge == curve.edge }
+        guard !otherCurves.isEmpty else { return false }
+
+        // Resolve this curve's progress range — if not available, can't determine overlap
+        guard let myRange = resolvedCurveProgressPiece(curve) else { return false }
+
+        for other in otherCurves {
+            // Skip curves still being set up (no progress data yet)
+            guard let otherRange = resolvedCurveProgressPiece(other) else { continue }
+
+            let overlap = min(myRange.p1, otherRange.p1) - max(myRange.p0, otherRange.p0)
+            if overlap > 0.01 { return true }
+        }
+        return false
+    }
+
+    /// Resolve edge progress for a curve, computing from corner indices if needed.
+    private func resolvedCurveProgressPiece(_ c: CurvedEdge) -> (p0: CGFloat, p1: CGFloat)? {
+        if c.usesEdgeProgress {
+            let p0 = CGFloat(min(c.startEdgeProgress, c.endEdgeProgress))
+            let p1 = CGFloat(max(c.startEdgeProgress, c.endEdgeProgress))
+            if p1 - p0 > 0.001 { return (p0, p1) }
+        }
+        let points = ShapePathBuilder.displayPolygonPoints(for: piece, includeAngles: true)
+        if c.usesCornerIndices &&
+           c.startCornerIndex != c.endCornerIndex &&
+           c.startCornerIndex >= 0 && c.startCornerIndex < points.count &&
+           c.endCornerIndex >= 0 && c.endCornerIndex < points.count {
+            let startPt = points[c.startCornerIndex]
+            let endPt = points[c.endCornerIndex]
+            let b = bounds(for: points)
+            let sp = ShapePathBuilder.edgeProgress(for: startPt, edge: c.edge, shape: piece.shape, bounds: b)
+            let ep = ShapePathBuilder.edgeProgress(for: endPt, edge: c.edge, shape: piece.shape, bounds: b)
+            let p0 = min(sp, ep)
+            let p1 = max(sp, ep)
+            if p1 - p0 > 0.001 { return (p0, p1) }
+        }
+        return nil
+    }
+
     private func addCurve() {
         // Determine radius - use defaults if enabled, otherwise use shape-based default
         var curveRadius: Double = piece.shape == .rightTriangle ? triangleQuarterCircleRadius() : 2
         var curveIsConcave: Bool = false
         var defaultStartCorner: Int = -1
         var defaultEndCorner: Int = -1
-        
+
         if let defaults = pieceDefaults.first {
             curveRadius = defaults.defaultCurveRadius
             curveIsConcave = defaults.defaultCurveIsConcave
             defaultStartCorner = defaults.defaultCurveStartCorner
             defaultEndCorner = defaults.defaultCurveEndCorner
         }
-        
-        let maxCurves = piece.shape == .rightTriangle ? 3 : 4
-        if piece.curvedEdges.count >= maxCurves {
-            return
-        }
-        let curveIndex = piece.curvedEdges.count
+
+        // Find the next unclaimed edge segment for the default
+        let unclaimed = unclaimedBoundarySegments()
+        guard !unclaimed.isEmpty else { return } // No segments left to curve
+
         let defaultEdge: EdgePosition
-        if piece.shape == .rightTriangle {
-            switch curveIndex % 3 {
-            case 1:
-                defaultEdge = .legB
-            case 2:
-                defaultEdge = .legA
-            default:
-                defaultEdge = .hypotenuse
-            }
-        } else {
-            switch curveIndex % 4 {
-            case 1:
-                defaultEdge = .right
-            case 2:
-                defaultEdge = .bottom
-            case 3:
-                defaultEdge = .left
-            default:
-                defaultEdge = .top
-            }
-        }
-        let curve = CurvedEdge(edge: defaultEdge, radius: curveRadius, isConcave: curveIsConcave)
-        
-        // Apply default corner selection if both start and end are set
+        let defaultSpanStart: Int
+        let defaultSpanEnd: Int
+
+        // If user-set defaults are valid and don't overlap, use them
         if defaultStartCorner >= 0 && defaultEndCorner >= 0 && defaultStartCorner != defaultEndCorner {
-            curve.startCornerIndex = defaultStartCorner
-            curve.endCornerIndex = defaultEndCorner
-        } else if curveIndex < maxCurves {
-            if let span = defaultSpanForEdge(edge: defaultEdge) {
-                curve.startCornerIndex = span.start
-                curve.endCornerIndex = span.end
+            defaultEdge = unclaimed.first?.edge ?? .top
+            defaultSpanStart = defaultStartCorner
+            defaultSpanEnd = defaultEndCorner
+        } else {
+            // Pick the first unclaimed segment
+            let seg = unclaimed[0]
+            defaultEdge = seg.edge
+            defaultSpanStart = seg.startIndex
+            defaultSpanEnd = seg.endIndex
+        }
+
+        let curve = CurvedEdge(edge: defaultEdge, radius: curveRadius, isConcave: curveIsConcave)
+        curve.startCornerIndex = defaultSpanStart
+        curve.endCornerIndex = defaultSpanEnd
+
+        // Compute and store edge progress immediately so the curve is fully
+        // initialized before SwiftUI re-renders and validCurves() runs.
+        // Without this, the new curve enters validCurves with hasSpan==false
+        // and usesEdgeProgress==false, causing it to be treated as a full-edge
+        // curve that knocks out other curves on the same edge.
+        let points = ShapePathBuilder.displayPolygonPoints(for: piece, includeAngles: true)
+        if defaultSpanStart >= 0 && defaultSpanStart < points.count &&
+           defaultSpanEnd >= 0 && defaultSpanEnd < points.count {
+            let startPt = points[defaultSpanStart]
+            let endPt = points[defaultSpanEnd]
+            let dispSize = ShapePathBuilder.displaySize(for: piece)
+            let polyBounds: CGRect
+            if piece.shape == .rightTriangle {
+                polyBounds = CGRect(origin: .zero, size: dispSize)
             } else {
-                curve.startCornerIndex = 0
-                curve.endCornerIndex = 1
+                let xs = points.map(\.x)
+                let ys = points.map(\.y)
+                polyBounds = CGRect(x: xs.min() ?? 0, y: ys.min() ?? 0,
+                                    width: (xs.max() ?? 0) - (xs.min() ?? 0),
+                                    height: (ys.max() ?? 0) - (ys.min() ?? 0))
+            }
+            let sp = ShapePathBuilder.edgeProgress(for: startPt, edge: defaultEdge, shape: piece.shape, bounds: polyBounds)
+            let ep = ShapePathBuilder.edgeProgress(for: endPt, edge: defaultEdge, shape: piece.shape, bounds: polyBounds)
+            curve.startEdgeProgress = Double(sp)
+            curve.endEdgeProgress = Double(ep)
+
+            // Also set boundary segment info
+            let segments = ShapePathBuilder.boundarySegments(for: piece)
+            if let startSeg = segments.first(where: { $0.startIndex == defaultSpanStart || $0.endIndex == defaultSpanStart }) {
+                curve.startBoundarySegmentIndex = startSeg.index
+                curve.startBoundaryIsEnd = startSeg.endIndex == defaultSpanStart
+            }
+            if let endSeg = segments.first(where: { $0.startIndex == defaultSpanEnd || $0.endIndex == defaultSpanEnd }) {
+                curve.endBoundarySegmentIndex = endSeg.index
+                curve.endBoundaryIsEnd = endSeg.endIndex == defaultSpanEnd
             }
         }
-        
+
         curve.piece = piece
         modelContext.insert(curve)
         if curve.radius > 0 {
@@ -768,7 +887,7 @@ struct PieceEditorView: View {
     private func cornerIndices(on edge: EdgePosition, requireConvex: Bool) -> Set<Int> {
         let baseCount = ShapePathBuilder.pieceCornerCount(for: piece)
         guard baseCount > 0 else { return [] }
-        let points = ShapePathBuilder.cornerPoints(for: piece, includeAngles: false)
+        let points = ShapePathBuilder.displayPolygonPointsForLabeling(for: piece, includeAngles: false)
         guard baseCount <= points.count else { return [] }
         let bounds = bounds(for: points)
         let clockwise = polygonIsClockwise(points)
@@ -787,7 +906,7 @@ struct PieceEditorView: View {
     private func cornerIsOnCurvedEdge(_ cornerIndex: Int, requireConvex: Bool) -> Bool {
         let baseCount = ShapePathBuilder.pieceCornerCount(for: piece)
         guard cornerIndex >= 0, cornerIndex < baseCount else { return false }
-        let points = ShapePathBuilder.cornerPoints(for: piece, includeAngles: false)
+        let points = ShapePathBuilder.displayPolygonPointsForLabeling(for: piece, includeAngles: false)
         guard baseCount <= points.count else { return false }
         let bounds = bounds(for: points)
         let clockwise = polygonIsClockwise(points)
@@ -1902,7 +2021,8 @@ private struct CurveRow: View {
             let inferredEdge = inferredEdgeFromSpan()
             let isSamePoint = curve.startCornerIndex == curve.endCornerIndex
             let spanIsValid = inferredEdge.map { spanPathIsValid(edge: $0) } ?? false
-            if isSamePoint || (!isSamePoint && inferredEdge != nil && !spanIsValid) {
+            let overlaps = spanIsValid && curveOverlapsExisting()
+            if isSamePoint || (!isSamePoint && inferredEdge != nil && !spanIsValid) || overlaps {
                 Text("Select a Different Start or End Point")
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(Color.red)
@@ -1916,7 +2036,7 @@ private struct CurveRow: View {
 
     private func spanCornerLabels() -> [String] {
         let polygonPoints = ShapePathBuilder.displayPolygonPoints(for: piece, includeAngles: true)
-        let baseCorners = ShapePathBuilder.cornerPoints(for: piece, includeAngles: false)
+        let baseCorners = ShapePathBuilder.displayPolygonPointsForLabeling(for: piece, includeAngles: false)
         
         // Map each polygon point to its nearest base corner label
         return polygonPoints.indices.map { polygonIndex in
@@ -1954,7 +2074,17 @@ private struct CurveRow: View {
         return result
     }
 
+    private var polygonPointCount: Int {
+        ShapePathBuilder.displayPolygonPoints(for: piece, includeAngles: true).count
+    }
+
     private func normalizeSpanSelection() {
+        // Use the stable polygon (displayPolygonPoints) instead of the curve-aware
+        // labeling polygon. This ensures corner indices are consistent with
+        // validCurves() and syncBoundaryEndpoint(), both of which use
+        // displayPolygonPoints. Using displayPolygonPointsForLabeling here causes
+        // a mismatch when curves reclassify cutouts, shifting indices and producing
+        // wrong edge progress values that trigger false overlap detection.
         let points = ShapePathBuilder.displayPolygonPoints(for: piece, includeAngles: true)
         let count = points.count
         if count <= 1 {
@@ -2022,6 +2152,10 @@ private struct CurveRow: View {
             curve.edgeRaw = edge.rawValue
             syncBoundaryEndpoint(for: curve.startCornerIndex, isStart: true)
             syncBoundaryEndpoint(for: curve.endCornerIndex, isStart: false)
+            // Note: overlap detection is handled by validCurves(for:) at render time.
+            // We no longer clear edge progress here because .onAppear fires on ALL
+            // CurveRows when ForEach rebuilds, which would destructively wipe
+            // edge progress on existing curves that don't actually overlap.
         }
     }
 
@@ -2097,6 +2231,49 @@ private struct CurveRow: View {
             hypotenuseBounds: hypotenuseBounds,
             bounds: bounds
         )
+    }
+
+    /// Checks whether this curve's span overlaps any other curve on the same edge.
+    private func curveOverlapsExisting() -> Bool {
+        let otherCurves = piece.curvedEdges.filter { $0.id != curve.id && $0.radius > 0 && $0.edge == curve.edge }
+        guard !otherCurves.isEmpty else { return false }
+
+        // Resolve this curve's progress range — if not available, can't determine overlap
+        guard let myRange = resolvedCurveProgress(curve) else { return false }
+
+        for other in otherCurves {
+            // Skip curves that are still being set up (no progress data yet)
+            guard let otherRange = resolvedCurveProgress(other) else { continue }
+
+            let overlap = min(myRange.p1, otherRange.p1) - max(myRange.p0, otherRange.p0)
+            if overlap > 0.01 { return true }
+        }
+        return false
+    }
+
+    /// Resolve edge progress for a curve, computing from corner indices if needed.
+    private func resolvedCurveProgress(_ c: CurvedEdge) -> (p0: CGFloat, p1: CGFloat)? {
+        if c.usesEdgeProgress {
+            let p0 = CGFloat(min(c.startEdgeProgress, c.endEdgeProgress))
+            let p1 = CGFloat(max(c.startEdgeProgress, c.endEdgeProgress))
+            if p1 - p0 > 0.001 { return (p0, p1) }
+        }
+        // Compute from corner indices on the fly
+        let points = ShapePathBuilder.displayPolygonPoints(for: piece, includeAngles: true)
+        if c.usesCornerIndices &&
+           c.startCornerIndex != c.endCornerIndex &&
+           c.startCornerIndex >= 0 && c.startCornerIndex < points.count &&
+           c.endCornerIndex >= 0 && c.endCornerIndex < points.count {
+            let startPt = points[c.startCornerIndex]
+            let endPt = points[c.endCornerIndex]
+            let b = bounds(for: points)
+            let sp = ShapePathBuilder.edgeProgress(for: startPt, edge: c.edge, shape: piece.shape, bounds: b)
+            let ep = ShapePathBuilder.edgeProgress(for: endPt, edge: c.edge, shape: piece.shape, bounds: b)
+            let p0 = min(sp, ep)
+            let p1 = max(sp, ep)
+            if p1 - p0 > 0.001 { return (p0, p1) }
+        }
+        return nil
     }
 
     private func edgeForSpanPoints(start: CGPoint, end: CGPoint, polygon: [CGPoint], baseBounds: CGRect?) -> EdgePosition? {
@@ -2537,8 +2714,8 @@ private struct CornerRadiusRow: View {
     
     private func curveOccupiedBaseCorners() -> Set<Int> {
         // Map polygon indices back to base corner indices
-        let baseCorners = ShapePathBuilder.cornerPoints(for: piece, includeAngles: false)
-        let polygonPoints = ShapePathBuilder.displayPolygonPoints(for: piece, includeAngles: true)
+        let baseCorners = ShapePathBuilder.displayPolygonPointsForLabeling(for: piece, includeAngles: false)
+        let polygonPoints = ShapePathBuilder.displayPolygonPointsForLabeling(for: piece, includeAngles: true)
         guard !baseCorners.isEmpty, !polygonPoints.isEmpty else { return [] }
         
         // Build reverse mapping: polygon index -> base corner index (if it's a base corner)

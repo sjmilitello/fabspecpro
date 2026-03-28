@@ -24,6 +24,7 @@ struct DrawingCanvasView: View {
             ZStack {
                 Canvas { context, _ in
                     let path = ShapePathBuilder.path(for: piece)
+                    let activeCurvesForOverlap = ShapePathBuilder.validCurves(for: piece)
 
                     context.drawLayer { layerContext in
                         layerContext.translateBy(x: metrics.origin.x, y: metrics.origin.y)
@@ -32,31 +33,39 @@ struct DrawingCanvasView: View {
                         let strokeWidth = 1.5 / metrics.scale
                         layerContext.stroke(path, with: .color(Theme.primaryText), lineWidth: strokeWidth)
 
-                    for cutout in piece.cutouts where cutout.centerX >= 0 && cutout.centerY >= 0 && !isEffectiveNotch(cutout, piece: piece, pieceSize: rawPieceSize) {
-                        let displayCutout = rotatedCutout(cutout)
-                        let angleCuts = localAngleCuts(for: cutout)
-                        let cornerRadii = localCornerRadii(for: cutout)
-                        // Use rawPieceSize for rotation angle calculation to match notch rendering
-                        // The displayCutout has swapped coordinates, and rawPieceSize ensures
-                        // the rotation angle is computed consistently with how notches are rendered
-                        let cutoutPath = ShapePathBuilder.cutoutPath(
-                            displayCutout,
-                            angleCuts: angleCuts,
-                            cornerRadii: cornerRadii,
-                            size: rawPieceSize,
-                            shape: piece.shape
-                        )
-                        layerContext.stroke(cutoutPath, with: .color(Theme.accent), lineWidth: strokeWidth)
+                        for cutout in piece.cutouts where cutout.centerX >= 0 && cutout.centerY >= 0 && !isEffectiveNotch(cutout, piece: piece, pieceSize: rawPieceSize) {
+                            // Skip cutouts entirely outside the piece boundary
+                            if !ShapePathBuilder.cutoutOverlapsPiece(cutout: cutout, size: rawPieceSize, shape: piece.shape, curves: activeCurvesForOverlap) {
+                                continue
+                            }
+                            let displayCutout = rotatedCutout(cutout)
+                            let angleCuts = localAngleCuts(for: cutout)
+                            let cornerRadii = localCornerRadii(for: cutout)
+                            // Use rawPieceSize for rotation angle calculation to match notch rendering
+                            // The displayCutout has swapped coordinates, and rawPieceSize ensures
+                            // the rotation angle is computed consistently with how notches are rendered
+                            let cutoutPath = ShapePathBuilder.cutoutPath(
+                                displayCutout,
+                                angleCuts: angleCuts,
+                                cornerRadii: cornerRadii,
+                                size: rawPieceSize,
+                                shape: piece.shape
+                            )
+                            layerContext.stroke(cutoutPath, with: .color(Theme.accent), lineWidth: strokeWidth)
+                        }
                     }
-                }
 
-                for cutout in piece.cutouts where cutout.centerX >= 0 && cutout.centerY >= 0 {
-                    if isEffectiveNotch(cutout, piece: piece, pieceSize: rawPieceSize) {
-                        drawNotchDimensionLabels(in: &context, cutout: cutout, metrics: metrics)
-                    } else {
-                        drawCutoutDimensionLabels(in: &context, cutout: cutout, metrics: metrics)
+                    for cutout in piece.cutouts where cutout.centerX >= 0 && cutout.centerY >= 0 {
+                        // Skip cutouts entirely outside the piece boundary
+                        if !ShapePathBuilder.cutoutOverlapsPiece(cutout: cutout, size: rawPieceSize, shape: piece.shape, curves: activeCurvesForOverlap) {
+                            continue
+                        }
+                        if isEffectiveNotch(cutout, piece: piece, pieceSize: rawPieceSize) {
+                            drawNotchDimensionLabels(in: &context, cutout: cutout, metrics: metrics)
+                        } else {
+                            drawCutoutDimensionLabels(in: &context, cutout: cutout, metrics: metrics)
+                        }
                     }
-                }
 
                     drawDimensionLabels(in: &context, metrics: metrics)
                     drawEdgeLabels(in: &context, metrics: metrics, refreshToken: lastEdgeTapId)
@@ -288,7 +297,7 @@ struct DrawingCanvasView: View {
         let polygon = ShapePathBuilder.displayPolygonPoints(for: piece, includeAngles: true)
         guard !polygon.isEmpty else { return .zero }
         var bounds = bounds(for: polygon)
-        let convexCurves = piece.curvedEdges.filter { $0.radius > 0 && !$0.isConcave }
+        let convexCurves = ShapePathBuilder.validCurves(for: piece).filter { !$0.isConcave }
         if convexCurves.isEmpty { return bounds }
         let baseBounds = piece.shape == .rightTriangle ? CGRect(origin: .zero, size: ShapePathBuilder.displaySize(for: piece)) : nil
         for curve in convexCurves {
@@ -311,7 +320,7 @@ struct DrawingCanvasView: View {
     }
 
     private func drawCornerLabels(in context: inout GraphicsContext, metrics: DrawingMetrics) {
-        let pieceCorners = ShapePathBuilder.cornerPoints(for: piece, includeAngles: false)
+        let pieceCorners = ShapePathBuilder.displayPolygonPointsForLabeling(for: piece, includeAngles: false)
         guard !pieceCorners.isEmpty else { return }
         let origin = metrics.origin
         let scale = metrics.scale
@@ -412,6 +421,10 @@ struct DrawingCanvasView: View {
             let center = CGPoint(x: (bounds.minX + bounds.maxX) / 2, y: (bounds.minY + bounds.maxY) / 2)
             _ = polygonIsClockwise(corners)
             for (localIndex, point) in corners.enumerated() {
+                // Skip corners that are outside the piece boundary (including curves)
+                if !pointIsInsidePiecePath(point) {
+                    continue
+                }
                 let labelIndex = entry.range.lowerBound + localIndex
                 let label = Text(cornerLabel(for: labelIndex))
                     .font(.system(size: labelFontSize, weight: .semibold))
@@ -918,7 +931,13 @@ struct DrawingCanvasView: View {
     }
 
     private func drawCutoutNotes(in context: inout GraphicsContext, metrics: DrawingMetrics) {
-        let visibleCutouts = piece.cutouts.filter { $0.centerX >= 0 && $0.centerY >= 0 && !isEffectiveNotch($0, piece: piece, pieceSize: ShapePathBuilder.pieceSize(for: piece)) }
+        let rawSize = ShapePathBuilder.pieceSize(for: piece)
+        let noteActiveCurves = ShapePathBuilder.validCurves(for: piece)
+        let visibleCutouts = piece.cutouts.filter {
+            $0.centerX >= 0 && $0.centerY >= 0
+            && !isEffectiveNotch($0, piece: piece, pieceSize: rawSize)
+            && ShapePathBuilder.cutoutOverlapsPiece(cutout: $0, size: rawSize, shape: piece.shape, curves: noteActiveCurves)
+        }
         guard !visibleCutouts.isEmpty else { return }
         let origin = metrics.origin
         let height = metrics.pieceSize.height * metrics.scale
@@ -1017,6 +1036,7 @@ struct DrawingCanvasView: View {
         var widthCurveDepth: CGFloat = 0
         var lengthCurveDepth: CGFloat = 0
 
+
         if piece.shape == .rightTriangle {
             if touchesDisplayLeft {
                 // Leg B notch - check for curve on leg B
@@ -1093,6 +1113,26 @@ struct DrawingCanvasView: View {
             }
             if secondary.info.length > 0 && primary.info.length == 0 {
                 return secondary.info
+            }
+            // When both edges have the same visibility status (both inside or both
+            // outside the straight polygon), prefer the edge whose midpoint is further
+            // from the piece boundary in the direction of the piece center — this
+            // ensures labels land on the interior edge, not the boundary edge.
+            // Use the curved piece path for this check when both edges are outside
+            // the straight polygon (i.e., in the curve bulge).
+            if primary.info.length == 0 && secondary.info.length == 0 {
+                let primaryInsideCurve = pointIsInsidePiecePath(primary.info.mid)
+                let secondaryInsideCurve = pointIsInsidePiecePath(secondary.info.mid)
+                if primaryInsideCurve != secondaryInsideCurve {
+                    return primaryInsideCurve ? primary.info : secondary.info
+                }
+                // Both inside curved path — pick the one closer to the piece center
+                // (the interior edge) to keep labels inside
+                let displaySize = ShapePathBuilder.displaySize(for: piece)
+                let pieceCenter = CGPoint(x: displaySize.width / 2, y: displaySize.height / 2)
+                let primaryDist = GeometryHelpers.distance(primary.info.mid, pieceCenter)
+                let secondaryDist = GeometryHelpers.distance(secondary.info.mid, pieceCenter)
+                return primaryDist <= secondaryDist ? primary.info : secondary.info
             }
             return primary.distance >= secondary.distance ? primary.info : secondary.info
         }
@@ -1271,20 +1311,53 @@ struct DrawingCanvasView: View {
                 lengthFromApex = true
             }
         }
-        widthValue += widthCurveDepth
-        lengthValue += lengthCurveDepth
+        // "to Apex" = distance from the notch's far edge to the curve's apex point.
+        // For a notch touching the right edge with a convex curve (depth=2") and
+        // notch far edge at 20", apex at 26": toApex = 26 - 20 = 6".
+        if widthFromApex {
+            if touchesDisplayBottom {
+                widthValue = abs(pieceHeight + widthCurveDepth - minY)
+            } else if touchesDisplayTop {
+                widthValue = abs(maxY + widthCurveDepth)
+            } else {
+                // Fallback for hypotenuse or other non-axis-aligned edges
+                widthValue = abs(widthCurveDepth)
+            }
+        }
+        if lengthFromApex {
+            if touchesDisplayRight {
+                lengthValue = abs(pieceWidth + lengthCurveDepth - minX)
+            } else if touchesDisplayLeft {
+                lengthValue = abs(maxX + lengthCurveDepth)
+            } else {
+                // Fallback for hypotenuse or other non-axis-aligned edges
+                lengthValue = abs(lengthCurveDepth)
+            }
+        }
+
+        // Don't draw labels for a notch with no visible depth on a curved edge.
+        // This handles cutouts that are beyond the curve boundary — the "to Apex"
+        // value is 0 or negligible, meaning nothing is visually rendered.
+        let apexThreshold: CGFloat = 0.0625  // 1/16" minimum visible depth
+        if (widthFromApex && widthValue < apexThreshold) || (lengthFromApex && lengthValue < apexThreshold) {
+            return
+        }
 
         let widthText = MeasurementParser.formatInches(Double(widthValue))
         let heightText = MeasurementParser.formatInches(Double(lengthValue))
 
         let cutoutCorners = cutoutCornerPoints(for: displayCutout, displaySize: displaySize)
-        func apexLabelPoint(edgeMid: CGPoint, offset: CGFloat) -> (point: CGPoint, angle: CGFloat)? {
+        // allowedEdgeIndices constrains which cutout edges the label can snap to,
+        // preventing the label from jumping to the wrong edge as the notch moves
+        // through a curve. Edges: 0=top(0→1), 1=right(1→2), 2=bottom(2→3), 3=left(3→0).
+        func apexLabelPoint(edgeMid: CGPoint, offset: CGFloat, allowedEdgeIndices: Set<Int>? = nil) -> (point: CGPoint, angle: CGFloat)? {
             guard cutoutCorners.count == 4 else { return nil }
             var closestMid = edgeMid
             var closestStart = cutoutCorners[0]
             var closestEnd = cutoutCorners[1]
             var bestDistance = CGFloat.greatestFiniteMagnitude
             for index in 0..<cutoutCorners.count {
+                if let allowed = allowedEdgeIndices, !allowed.contains(index) { continue }
                 let start = cutoutCorners[index]
                 let end = cutoutCorners[(index + 1) % cutoutCorners.count]
                 let mid = CGPoint(x: (start.x + end.x) / 2, y: (start.y + end.y) / 2)
@@ -1301,7 +1374,16 @@ struct DrawingCanvasView: View {
             let centerVector = CGPoint(x: closestMid.x - center.x, y: closestMid.y - center.y)
             let dot = normal.x * centerVector.x + normal.y * centerVector.y
             let outward = dot < 0 ? CGPoint(x: -normal.x, y: -normal.y) : normal
-            let point = CGPoint(x: closestMid.x + outward.x * offset, y: closestMid.y + outward.y * offset)
+            var point = CGPoint(x: closestMid.x + outward.x * offset, y: closestMid.y + outward.y * offset)
+            // Ensure the label stays inside the piece (including curves).
+            // If the outward position is outside, flip to the inward side.
+            if !pointIsInsidePiecePath(point) {
+                let inward = CGPoint(x: -outward.x, y: -outward.y)
+                let flipped = CGPoint(x: closestMid.x + inward.x * offset, y: closestMid.y + inward.y * offset)
+                if pointIsInsidePiecePath(flipped) {
+                    point = flipped
+                }
+            }
             let angle = atan2(edgeVector.y, edgeVector.x)
             return (point, angle)
         }
@@ -1328,7 +1410,9 @@ struct DrawingCanvasView: View {
             // Two-line label: "X\" from" on top, "Apex" below
             // Position along the notch interior edge
             let shouldAlignToEdge = abs(widthCurveDepth) > 0.0001
-            let apexInfo = shouldAlignToEdge ? (apexLabelPoint(edgeMid: widthEdgeMid, offset: apexWidthLabelPadding)) : nil
+            // Width label → constrain to vertical edges (right=1, left=3) so it stays
+            // on the correct edge as the notch moves through the curve
+            let apexInfo = shouldAlignToEdge ? (apexLabelPoint(edgeMid: widthEdgeMid, offset: apexWidthLabelPadding, allowedEdgeIndices: [1, 3])) : nil
             let apexPoint = apexInfo?.point ?? widthPoint
             let line1 = Text("\(widthText)\" to")
                 .font(.system(size: labelFontSize, weight: .semibold))
@@ -1366,7 +1450,9 @@ struct DrawingCanvasView: View {
             // Two-line label: "X\" from" on top, "Apex" below
             // Position along the notch interior edge
             let shouldAlignToEdge = abs(lengthCurveDepth) > 0.0001
-            let apexInfo = shouldAlignToEdge ? apexLabelPoint(edgeMid: lengthEdgeMid, offset: apexLengthLabelPadding) : nil
+            // Length label → constrain to horizontal edges (top=0, bottom=2) so it stays
+            // on the correct edge as the notch moves through the curve
+            let apexInfo = shouldAlignToEdge ? apexLabelPoint(edgeMid: lengthEdgeMid, offset: apexLengthLabelPadding, allowedEdgeIndices: [0, 2]) : nil
             let apexPoint = apexInfo?.point ?? lengthPoint
             let line1 = Text("\(heightText)\" to")
                 .font(.system(size: labelFontSize, weight: .semibold))
@@ -1425,8 +1511,13 @@ struct DrawingCanvasView: View {
             polygon: outerPolygon
         )
 
-        let widthEdgeMid = widthEdgeInfo?.mid ?? CGPoint(x: center.x, y: center.y - displayCutout.height / 2)
-        let lengthEdgeMid = lengthEdgeInfo?.mid ?? CGPoint(x: center.x - displayCutout.width / 2, y: center.y)
+        // Fallback positions when cutout is fully inside curved boundary:
+        // Width label goes on a left/right (vertical) edge — those edges span
+        // displayCutout.height which equals the user's WIDTH dimension.
+        // Length label goes on a top/bottom (horizontal) edge — those edges span
+        // displayCutout.width which equals the user's LENGTH dimension.
+        let widthEdgeMid = widthEdgeInfo?.mid ?? CGPoint(x: center.x - displayCutout.width / 2, y: center.y)
+        let lengthEdgeMid = lengthEdgeInfo?.mid ?? CGPoint(x: center.x, y: center.y - displayCutout.height / 2)
 
         let minClearance = 10 / max(metrics.scale, 0.01)
         let widthPoint = outsidePointWithClearance(
@@ -1665,7 +1756,7 @@ struct DrawingCanvasView: View {
         let width = metrics.pieceSize.width * metrics.scale
         let height = metrics.pieceSize.height * metrics.scale
         let origin = metrics.origin
-        let curveMap = Dictionary(grouping: curves, by: { $0.edge }).compactMapValues { $0.first }
+        let curveMap = Dictionary(grouping: curves.filter { $0.radius > 0 }, by: { $0.edge })
         let left = origin.x
         let right = origin.x + width
         let top = origin.y
@@ -1676,7 +1767,7 @@ struct DrawingCanvasView: View {
             return CGPoint(x: center.x, y: center.y - radiusY - 8)
         }
 
-        if shape == .rectangle, curveMap[edge]?.radius == nil {
+        if shape == .rectangle, curveMap[edge] == nil || curveMap[edge]!.isEmpty {
             if let sideMetric = rectangleSideMetrics()[edge] {
                 let centerX = origin.x + sideMetric.center.x * metrics.scale
                 let centerY = origin.y + sideMetric.center.y * metrics.scale
@@ -1702,7 +1793,7 @@ struct DrawingCanvasView: View {
             return CGPoint(x: center.x + direction.x * (radius + 8), y: center.y + direction.y * (radius + 8))
         }
 
-        if let curve = curveMap[edge], curve.radius > 0 {
+        if let edgeCurves = curveMap[edge], let curve = edgeCurves.first(where: { $0.radius > 0 }) {
             let polygon = ShapePathBuilder.displayPolygonPoints(for: piece, includeAngles: true)
             let baseBounds = shape == .rightTriangle ? CGRect(origin: .zero, size: ShapePathBuilder.displaySize(for: piece)) : nil
             let geometry: (start: CGPoint, end: CGPoint, normal: CGPoint)?
@@ -2110,11 +2201,36 @@ struct DrawingCanvasView: View {
     }
 
     private func outsidePointWithClearance(edgeMid: CGPoint, center: CGPoint, baseOffset: CGFloat, minClearance: CGFloat, polygon: [CGPoint]) -> CGPoint {
+        // Normal points outward from cutout center
         let normal = normalized(CGPoint(x: edgeMid.x - center.x, y: edgeMid.y - center.y))
+        // Default position: outside the cutout (away from cutout center)
         let point = CGPoint(
             x: edgeMid.x + normal.x * baseOffset,
             y: edgeMid.y + normal.y * baseOffset
         )
+
+        // If the outside position is not inside the piece (e.g., notch crossing curved boundary),
+        // flip to the opposite side (inside the cutout but still inside the piece)
+        if !pointIsInsidePiecePath(point) {
+            let oppositePoint = CGPoint(
+                x: edgeMid.x - normal.x * baseOffset,
+                y: edgeMid.y - normal.y * baseOffset
+            )
+            if pointIsInsidePiecePath(oppositePoint) {
+                return oppositePoint
+            }
+            // Neither direction works — try pushing toward the piece display center
+            let displaySize = ShapePathBuilder.displaySize(for: piece)
+            let pieceCenter = CGPoint(x: displaySize.width / 2, y: displaySize.height / 2)
+            let toCenterDir = normalized(CGPoint(x: pieceCenter.x - edgeMid.x, y: pieceCenter.y - edgeMid.y))
+            let centerPoint = CGPoint(
+                x: edgeMid.x + toCenterDir.x * baseOffset,
+                y: edgeMid.y + toCenterDir.y * baseOffset
+            )
+            if pointIsInsidePiecePath(centerPoint) {
+                return centerPoint
+            }
+        }
         return point
     }
 
@@ -2509,6 +2625,27 @@ struct DrawingCanvasView: View {
         return inside
     }
 
+    /// Check if a point is inside the piece path, including curved boundaries.
+    /// This uses the actual rendered piece path which accounts for curves.
+    private func pointIsInsidePiecePath(_ point: CGPoint) -> Bool {
+        let piecePath = ShapePathBuilder.path(for: piece)
+        let cgPath = piecePath.cgPath
+        // Use a small tolerance for points on the boundary
+        let tolerance: CGFloat = 0.5
+        if cgPath.contains(point) {
+            return true
+        }
+        // Check points slightly inside in all directions for boundary tolerance
+        let offsets: [(CGFloat, CGFloat)] = [(tolerance, 0), (-tolerance, 0), (0, tolerance), (0, -tolerance)]
+        for (dx, dy) in offsets {
+            let testPoint = CGPoint(x: point.x + dx, y: point.y + dy)
+            if cgPath.contains(testPoint) {
+                return true
+            }
+        }
+        return false
+    }
+
     private func edgeGeometry(for edge: EdgePosition, width: CGFloat, height: CGFloat, origin: CGPoint) -> (start: CGPoint, end: CGPoint, normal: CGPoint)? {
         switch edge {
         case .top:
@@ -2778,7 +2915,7 @@ private extension EdgeTapGestureOverlay {
         let height = metrics.pieceSize.height * metrics.scale
         let rect = CGRect(x: origin.x, y: origin.y, width: width, height: height)
         let threshold: CGFloat = 28
-        let curveMap = Dictionary(grouping: curves, by: { $0.edge }).compactMapValues { $0.first }
+        let curveMap = Dictionary(grouping: curves.filter { $0.radius > 0 }, by: { $0.edge })
 
         switch shape {
         case .rectangle:
@@ -2961,14 +3098,16 @@ private extension EdgeTapGestureOverlay {
         return candidates.min(by: { $0.1 < $1.1 })?.0
     }
 
-    func bestEdge(from distances: [(EdgePosition, CGFloat)], curveMap: [EdgePosition: CurvedEdge], point: CGPoint, rect: CGRect, threshold: CGFloat) -> EdgePosition? {
+    func bestEdge(from distances: [(EdgePosition, CGFloat)], curveMap: [EdgePosition: [CurvedEdge]], point: CGPoint, rect: CGRect, threshold: CGFloat) -> EdgePosition? {
         var candidates = distances.filter { $0.1 <= threshold }
         if !curveMap.isEmpty {
-            for (edge, curve) in curveMap {
-                guard curve.radius > 0, let geometry = edgeGeometry(for: edge, rect: rect) else { continue }
-                let control = controlPoint(for: geometry, curve: curve, scale: metrics.scale)
-                let curveDistance = distanceToCurve(point: point, start: geometry.start, control: control, end: geometry.end)
-                candidates.append((edge, curveDistance))
+            for (edge, edgeCurves) in curveMap {
+                for curve in edgeCurves {
+                    guard curve.radius > 0, let geometry = edgeGeometry(for: edge, rect: rect) else { continue }
+                    let control = controlPoint(for: geometry, curve: curve, scale: metrics.scale)
+                    let curveDistance = distanceToCurve(point: point, start: geometry.start, control: control, end: geometry.end)
+                    candidates.append((edge, curveDistance))
+                }
             }
         }
         return candidates.filter { $0.1 <= threshold }.min(by: { $0.1 < $1.1 })?.0
@@ -3147,9 +3286,25 @@ private func rotatedPointToRaw(_ point: CGPoint) -> CGPoint {
 }
 
 private func isEffectiveNotch(_ cutout: Cutout, piece: Piece, pieceSize: CGSize) -> Bool {
-    if cutout.isNotch { return true }
     guard cutout.kind != .circle else { return false }
-    return ShapePathBuilder.cutoutTouchesBoundary(cutout: cutout, size: pieceSize, shape: piece.shape)
+    let activeCurves = ShapePathBuilder.validCurves(for: piece)
+    if !activeCurves.isEmpty {
+        // With curves: purely geometric. The boundary is the curved path.
+        // If the cutout doesn't overlap the piece at all, it's fully outside → not a notch.
+        guard ShapePathBuilder.cutoutOverlapsPiece(cutout: cutout, size: pieceSize, shape: piece.shape, curves: activeCurves) else {
+            return false
+        }
+        // The cutout overlaps the piece. If any part extends beyond the curved
+        // boundary → notch. If fully inside → interior cutout (not a notch).
+        // cutoutFullyInsideBoundary is the sole authority for this classification.
+        return !ShapePathBuilder.cutoutFullyInsideBoundary(cutout: cutout, size: pieceSize, shape: piece.shape, curves: activeCurves)
+    }
+    // Without curves: straight edges are the boundary.
+    // Must overlap the piece — a cutout fully beyond the edge is not a notch.
+    guard ShapePathBuilder.cutoutOverlapsPiece(cutout: cutout, size: pieceSize, shape: piece.shape, curves: []) else {
+        return false
+    }
+    return cutout.isNotch || ShapePathBuilder.cutoutTouchesBoundary(cutout: cutout, size: pieceSize, shape: piece.shape)
 }
 
 private func isInteriorNotchEdge(cutout: Cutout, edge: EdgePosition, pieceSize: CGSize, shape: ShapeKind) -> Bool {

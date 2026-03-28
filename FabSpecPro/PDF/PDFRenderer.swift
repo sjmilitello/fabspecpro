@@ -956,7 +956,8 @@ enum PDFRenderer {
         context.strokePath()
 
         let rawSize = ShapePathBuilder.pieceSize(for: piece)
-        for cutout in piece.cutouts where cutout.centerX >= 0 && cutout.centerY >= 0 && !isEffectiveNotch(cutout: cutout, size: size, shape: piece.shape) && !isCornerCut(cutout: cutout, pieceSize: rawSize, shape: piece.shape) {
+        let activeCurvesForOverlap = ShapePathBuilder.validCurves(for: piece)
+        for cutout in piece.cutouts where cutout.centerX >= 0 && cutout.centerY >= 0 && !isEffectiveNotch(cutout: cutout, size: size, shape: piece.shape, curves: piece.curvedEdges) && !isCornerCut(cutout: cutout, pieceSize: rawSize, shape: piece.shape) && ShapePathBuilder.cutoutOverlapsPiece(cutout: cutout, size: rawSize, shape: piece.shape, curves: activeCurvesForOverlap) {
             let displayCutout = displayCutout(for: cutout)
             let angleCuts = localAngleCuts(for: cutout, piece: piece)
             let cornerRadii = localCornerRadii(for: cutout, piece: piece)
@@ -987,7 +988,7 @@ enum PDFRenderer {
     }
 
     private static func drawNotchDimensionLabels(in context: CGContext, piece: Piece, size: CGSize, scale: CGFloat, offsetX: CGFloat, offsetY: CGFloat) {
-        let notches = piece.cutouts.filter { isEffectiveNotch(cutout: $0, size: size, shape: piece.shape) && $0.centerX >= 0 && $0.centerY >= 0 }
+        let notches = piece.cutouts.filter { isEffectiveNotch(cutout: $0, size: size, shape: piece.shape, curves: piece.curvedEdges) && $0.centerX >= 0 && $0.centerY >= 0 }
         guard !notches.isEmpty else { return }
         let outerPolygon = ShapePathBuilder.displayPolygonPoints(for: piece, includeAngles: true, includeNotches: false)
 
@@ -1057,6 +1058,21 @@ enum PDFRenderer {
                 }
                 if secondary.info.length > 0 && primary.info.length == 0 {
                     return secondary.info
+                }
+                // When both edges have the same visibility status and length == 0
+                // (both in the curve bulge), prefer the edge closer to the piece
+                // center so labels stay on the interior edge.
+                if primary.info.length == 0 && secondary.info.length == 0 {
+                    let piecePath = ShapePathBuilder.path(for: piece)
+                    let primaryIn = piecePath.cgPath.contains(primary.info.mid)
+                    let secondaryIn = piecePath.cgPath.contains(secondary.info.mid)
+                    if primaryIn != secondaryIn {
+                        return primaryIn ? primary.info : secondary.info
+                    }
+                    let pieceCenter = CGPoint(x: displaySize.width / 2, y: displaySize.height / 2)
+                    let primaryDist = distance(primary.info.mid, pieceCenter)
+                    let secondaryDist = distance(secondary.info.mid, pieceCenter)
+                    return primaryDist <= secondaryDist ? primary.info : secondary.info
                 }
                 return primary.distance >= secondary.distance ? primary.info : secondary.info
             }
@@ -1234,6 +1250,12 @@ enum PDFRenderer {
             widthValue += widthCurveDepth
             lengthValue += lengthCurveDepth
 
+            // Don't draw labels for a notch with no visible depth on a curved edge.
+            let apexThreshold: CGFloat = 0.0625  // 1/16" minimum visible depth
+            if (widthFromApex && widthValue < apexThreshold) || (lengthFromApex && lengthValue < apexThreshold) {
+                continue
+            }
+
             let widthText = MeasurementParser.formatInches(Double(widthValue))
             let heightText = MeasurementParser.formatInches(Double(lengthValue))
 
@@ -1243,14 +1265,16 @@ enum PDFRenderer {
                 center: center,
                 baseOffset: widthFromApex ? apexWidthLabelPadding : labelPadding,
                 minClearance: minClearance,
-                polygon: outerPolygon
+                polygon: outerPolygon,
+                piece: piece
             )
             let lengthPoint = outsidePointWithClearance(
                 edgeMid: lengthEdgeMid,
                 center: center,
                 baseOffset: lengthFromApex ? apexLengthLabelPadding : labelPadding,
                 minClearance: minClearance,
-                polygon: outerPolygon
+                polygon: outerPolygon,
+                piece: piece
             )
 
             let cutoutCorners = GeometryHelpers.cutoutCornerPoints(cutout: dispCutout, size: displaySize, shape: piece.shape)
@@ -1277,7 +1301,16 @@ enum PDFRenderer {
                 let centerVector = CGPoint(x: closestMid.x - center.x, y: closestMid.y - center.y)
                 let dot = normal.x * centerVector.x + normal.y * centerVector.y
                 let outward = dot < 0 ? CGPoint(x: -normal.x, y: -normal.y) : normal
-                let point = CGPoint(x: closestMid.x + outward.x * offset, y: closestMid.y + outward.y * offset)
+                var point = CGPoint(x: closestMid.x + outward.x * offset, y: closestMid.y + outward.y * offset)
+                // Ensure the label stays inside the piece (including curves).
+                let piecePath = ShapePathBuilder.path(for: piece)
+                if !piecePath.cgPath.contains(point) {
+                    let inward = CGPoint(x: -outward.x, y: -outward.y)
+                    let flipped = CGPoint(x: closestMid.x + inward.x * offset, y: closestMid.y + inward.y * offset)
+                    if piecePath.cgPath.contains(flipped) {
+                        point = flipped
+                    }
+                }
                 let angle = atan2(edgeVector.y, edgeVector.x)
                 return (point, angle)
             }
@@ -1344,7 +1377,8 @@ enum PDFRenderer {
     private static func drawCutoutDimensionLabels(in context: CGContext, piece: Piece, size: CGSize, scale: CGFloat, offsetX: CGFloat, offsetY: CGFloat) {
         // Get cutouts that are NOT notches (interior holes) and NOT corner cuts
         let rawSize = ShapePathBuilder.pieceSize(for: piece)
-        let cutouts = piece.cutouts.filter { !isEffectiveNotch(cutout: $0, size: size, shape: piece.shape) && !isCornerCut(cutout: $0, pieceSize: rawSize, shape: piece.shape) && $0.centerX >= 0 && $0.centerY >= 0 && $0.kind != .circle }
+        let labelActiveCurves = ShapePathBuilder.validCurves(for: piece)
+        let cutouts = piece.cutouts.filter { !isEffectiveNotch(cutout: $0, size: size, shape: piece.shape, curves: piece.curvedEdges) && !isCornerCut(cutout: $0, pieceSize: rawSize, shape: piece.shape) && $0.centerX >= 0 && $0.centerY >= 0 && $0.kind != .circle && ShapePathBuilder.cutoutOverlapsPiece(cutout: $0, size: rawSize, shape: piece.shape, curves: labelActiveCurves) }
         guard !cutouts.isEmpty else { return }
 
         for cutout in cutouts {
@@ -1385,14 +1419,16 @@ enum PDFRenderer {
                 center: center,
                 baseOffset: padding,
                 minClearance: minClearance,
-                polygon: outerPolygon
+                polygon: outerPolygon,
+                piece: piece
             )
             let lengthPoint = outsidePointWithClearance(
                 edgeMid: lengthEdgeMid,
                 center: center,
                 baseOffset: padding,
                 minClearance: minClearance,
-                polygon: outerPolygon
+                polygon: outerPolygon,
+                piece: piece
             )
 
             let widthCanvas = CGPoint(x: offsetX + widthPoint.x * scale, y: offsetY + widthPoint.y * scale)
@@ -1684,12 +1720,29 @@ enum PDFRenderer {
         }
     }
 
-    private static func isEffectiveNotch(cutout: Cutout, size: CGSize, shape: ShapeKind) -> Bool {
-        if cutout.isNotch { return true }
+    private static func isEffectiveNotch(cutout: Cutout, size: CGSize, shape: ShapeKind, curves: [CurvedEdge] = []) -> Bool {
         guard cutout.kind != .circle else { return false }
-        // Use display-transformed coordinates (swap x/y to match display size)
-        let displayCutout = displayCutout(for: cutout)
-        return ShapePathBuilder.cutoutTouchesBoundary(cutout: displayCutout, size: size, shape: shape)
+        // ShapePathBuilder functions expect raw size (width=rawW, height=rawH).
+        // `size` here is display size (width=rawH, height=rawW), so reverse the swap:
+        let rawSize = CGSize(width: size.height, height: size.width)
+        let activeCurves = curves.filter { $0.radius > 0 }
+        if !activeCurves.isEmpty {
+            // With curves: purely geometric. The boundary is the curved path.
+            // If the cutout doesn't overlap the piece at all, it's fully outside → not a notch.
+            guard ShapePathBuilder.cutoutOverlapsPiece(cutout: cutout, size: rawSize, shape: shape, curves: activeCurves) else {
+                return false
+            }
+            // The cutout overlaps the piece. If any part extends beyond the curved
+            // boundary → notch. If fully inside → interior cutout (not a notch).
+            // cutoutFullyInsideBoundary is the sole authority for this classification.
+            return !ShapePathBuilder.cutoutFullyInsideBoundary(cutout: cutout, size: rawSize, shape: shape, curves: activeCurves)
+        }
+        // Without curves: straight edges are the boundary.
+        // Must overlap the piece — a cutout fully beyond the edge is not a notch.
+        guard ShapePathBuilder.cutoutOverlapsPiece(cutout: cutout, size: rawSize, shape: shape, curves: []) else {
+            return false
+        }
+        return cutout.isNotch || ShapePathBuilder.cutoutTouchesBoundary(cutout: cutout, size: rawSize, shape: shape)
     }
     
     /// Checks if a notch cutout is on the hypotenuse of a right triangle
@@ -1968,7 +2021,7 @@ enum PDFRenderer {
     private static func edgeLabelPoint(edge: EdgePosition, piece: Piece, shape: ShapeKind, curves: [CurvedEdge], size: CGSize, scale: CGFloat, offsetX: CGFloat, offsetY: CGFloat, cutouts: [Cutout] = []) -> CGPoint {
         let width = size.width * scale
         let height = size.height * scale
-        let curveMap = Dictionary(grouping: curves, by: { $0.edge }).compactMapValues { $0.first }
+        let curveMap = Dictionary(grouping: curves.filter { $0.radius > 0 }, by: { $0.edge })
 
         if shape == .circle {
             let center = CGPoint(x: offsetX + width / 2, y: offsetY + height / 2)
@@ -1976,7 +2029,7 @@ enum PDFRenderer {
             return CGPoint(x: center.x, y: center.y - radiusY - 6)
         }
 
-        if shape == .rectangle, curveMap[edge]?.radius == nil {
+        if shape == .rectangle, curveMap[edge] == nil || curveMap[edge]!.isEmpty {
             let sideMetrics = rectangleSideMetrics(for: piece)
             if let sideMetric = sideMetrics[edge] {
                 let centerX = offsetX + sideMetric.center.x * scale
@@ -2003,7 +2056,7 @@ enum PDFRenderer {
             return CGPoint(x: center.x + direction.x * (radius + 6), y: center.y + direction.y * (radius + 6))
         }
 
-        if let curve = curveMap[edge], curve.radius > 0 {
+        if let edgeCurves = curveMap[edge], let curve = edgeCurves.first(where: { $0.radius > 0 }) {
             let polygon = ShapePathBuilder.displayPolygonPoints(for: piece, includeAngles: true)
             let baseBounds = shape == .rightTriangle ? CGRect(origin: .zero, size: ShapePathBuilder.displaySize(for: piece)) : nil
             let geometry: (start: CGPoint, end: CGPoint, normal: CGPoint)?
@@ -2529,12 +2582,36 @@ enum PDFRenderer {
         return best == .greatestFiniteMagnitude ? 0 : best
     }
 
-    private static func outsidePointWithClearance(edgeMid: CGPoint, center: CGPoint, baseOffset: CGFloat, minClearance: CGFloat, polygon: [CGPoint]) -> CGPoint {
+    private static func outsidePointWithClearance(edgeMid: CGPoint, center: CGPoint, baseOffset: CGFloat, minClearance: CGFloat, polygon: [CGPoint], piece: Piece? = nil) -> CGPoint {
         let normal = normalizedPoint(CGPoint(x: edgeMid.x - center.x, y: edgeMid.y - center.y))
         let point = CGPoint(
             x: edgeMid.x + normal.x * baseOffset,
             y: edgeMid.y + normal.y * baseOffset
         )
+        // Ensure the label stays inside the piece (including curves)
+        if let piece = piece {
+            let piecePath = ShapePathBuilder.path(for: piece)
+            if !piecePath.cgPath.contains(point) {
+                let oppositePoint = CGPoint(
+                    x: edgeMid.x - normal.x * baseOffset,
+                    y: edgeMid.y - normal.y * baseOffset
+                )
+                if piecePath.cgPath.contains(oppositePoint) {
+                    return oppositePoint
+                }
+                // Neither direction works — try pushing toward the piece display center
+                let displaySize = ShapePathBuilder.displaySize(for: piece)
+                let pieceCenter = CGPoint(x: displaySize.width / 2, y: displaySize.height / 2)
+                let toCenterDir = normalizedPoint(CGPoint(x: pieceCenter.x - edgeMid.x, y: pieceCenter.y - edgeMid.y))
+                let centerPoint = CGPoint(
+                    x: edgeMid.x + toCenterDir.x * baseOffset,
+                    y: edgeMid.y + toCenterDir.y * baseOffset
+                )
+                if piecePath.cgPath.contains(centerPoint) {
+                    return centerPoint
+                }
+            }
+        }
         return point
     }
 
@@ -2743,7 +2820,7 @@ enum PDFRenderer {
             return CGRect(origin: .zero, size: size)
         }
         var bounds = bounds(for: polygon)
-        let convexCurves = piece.curvedEdges.filter { $0.radius > 0 && !$0.isConcave }
+        let convexCurves = ShapePathBuilder.validCurves(for: piece).filter { !$0.isConcave }
         if convexCurves.isEmpty { return bounds }
         let baseBounds = piece.shape == .rightTriangle ? CGRect(origin: .zero, size: ShapePathBuilder.displaySize(for: piece)) : nil
         for curve in convexCurves {
@@ -2942,7 +3019,7 @@ enum PDFRenderer {
         let eps: CGFloat = 0.01
         
         for cutout in piece.cutouts where cutout.centerX >= 0 && cutout.centerY >= 0 {
-            guard isEffectiveNotch(cutout: cutout, size: size, shape: piece.shape) else { continue }
+            guard isEffectiveNotch(cutout: cutout, size: size, shape: piece.shape, curves: piece.curvedEdges) else { continue }
             let displayCutout = displayCutout(for: cutout)
             let halfWidth = displayCutout.width / 2
             let halfHeight = displayCutout.height / 2
@@ -3051,8 +3128,10 @@ enum PDFRenderer {
 
     private static func cutoutNoteLines(for piece: Piece) -> [String] {
         let rawSize = ShapePathBuilder.pieceSize(for: piece)
+        let displaySize = ShapePathBuilder.displaySize(for: piece)
+        let noteActiveCurves = ShapePathBuilder.validCurves(for: piece)
         let visibleCutouts = piece.cutouts.filter { $0.centerX >= 0 && $0.centerY >= 0 }
-        let holes = visibleCutouts.filter { !isEffectiveNotch(cutout: $0, size: rawSize, shape: piece.shape) && !isCornerCut(cutout: $0, pieceSize: rawSize, shape: piece.shape) }
+        let holes = visibleCutouts.filter { !isEffectiveNotch(cutout: $0, size: displaySize, shape: piece.shape, curves: piece.curvedEdges) && !isCornerCut(cutout: $0, pieceSize: rawSize, shape: piece.shape) && ShapePathBuilder.cutoutOverlapsPiece(cutout: $0, size: rawSize, shape: piece.shape, curves: noteActiveCurves) }
         var lines: [String] = []
         // Curves are stored with display edge positions
         let displayLeftCurveOffset = curveEdgeOffset(piece: piece, edge: .left)
