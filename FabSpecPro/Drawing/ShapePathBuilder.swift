@@ -838,7 +838,7 @@ enum ShapePathBuilder {
     private static func notchCandidates(for piece: Piece, size: CGSize) -> [Cutout] {
         piece.cutouts.filter { cutout in
             guard cutout.kind != .circle else { return false }
-            guard cutout.centerX >= 0 && cutout.centerY >= 0 else { return false }
+            guard cutout.isPlaced else { return false }
             // Must actually overlap the piece — a cutout fully beyond the edge is not a notch
             guard cutoutOverlapsPiece(cutout: cutout, size: size, shape: piece.shape, curves: []) else { return false }
             return cutout.isNotch || cutoutTouchesBoundary(cutout: cutout, size: size, shape: piece.shape)
@@ -860,7 +860,7 @@ enum ShapePathBuilder {
         }
         return piece.cutouts.filter { cutout in
             guard cutout.kind != .circle else { return false }
-            guard cutout.centerX >= 0 && cutout.centerY >= 0 else { return false }
+            guard cutout.isPlaced else { return false }
             // Must overlap the piece — fully outside means not a notch
             guard cutoutOverlapsPiece(cutout: cutout, size: size, shape: piece.shape, curves: activeCurves) else {
                 return false
@@ -1541,7 +1541,7 @@ enum ShapePathBuilder {
     static func interiorCutouts(for piece: Piece) -> [Cutout] {
         let rawSize = pieceSize(for: piece)
         return piece.cutouts.filter { cutout in
-            guard cutout.centerX >= 0 && cutout.centerY >= 0 else { return false }
+            guard cutout.isPlaced else { return false }
             guard cutout.kind != .circle else { return false }
             guard !cutout.isNotch else { return false }
             // Skip cutouts entirely outside the piece boundary
@@ -1571,7 +1571,7 @@ enum ShapePathBuilder {
         let rawSize = pieceSize(for: piece)
         let curvedDisplayEdges = Set(activeCurves.filter { !$0.hasSpan }.map { $0.edge })
         return piece.cutouts.filter { cutout in
-            guard cutout.centerX >= 0 && cutout.centerY >= 0 else { return false }
+            guard cutout.isPlaced else { return false }
             guard cutout.kind != .circle else { return false }
             // Exclude cutouts entirely outside the piece (past the curve boundary)
             if !cutoutOverlapsPiece(cutout: cutout, size: rawSize, shape: piece.shape, curves: activeCurves) {
@@ -3192,7 +3192,7 @@ enum ShapePathBuilder {
         if notch.cornerIndex >= 0 && notch.cornerIndex < points.count {
             return notch.cornerIndex
         }
-        if notch.centerX >= 0 && notch.centerY >= 0 {
+        if notch.isPlaced {
             let center = displayPoint(fromRaw: CGPoint(x: notch.centerX, y: notch.centerY))
             return nearestPointIndex(to: center, points: points)
         }

@@ -1177,7 +1177,7 @@ struct PieceEditorView: View {
         }
 
         let pieceSize = ShapePathBuilder.pieceSize(for: piece)
-        for cutout in piece.cutouts where cutout.centerX >= 0 && cutout.centerY >= 0 {
+        for cutout in piece.cutouts where cutout.isPlaced {
             let isNotchOrBoundary = cutout.isNotch || ShapePathBuilder.cutoutTouchesBoundary(cutout: cutout, size: pieceSize, shape: piece.shape)
             for edge in edgesForCutout(cutout) {
                 // Use different logic for notches vs interior cutouts
@@ -1712,7 +1712,19 @@ private struct CutoutRow: View {
     @Bindable var cutout: Cutout
     let piece: Piece
     @Environment(\.modelContext) private var modelContext
+    @Query private var pieceDefaults: [PieceDefaults]
+    @State private var isLocked: Bool = false
+    @State private var hasInitializedLock: Bool = false
     @State private var selectedCorner: NotchCorner?
+
+    // Proxy state for locked editing — changes accumulate here without touching the model
+    @State private var proxyWidth: Double = 0
+    @State private var proxyHeight: Double = 0
+    @State private var proxyCenterX: Double = 0
+    @State private var proxyCenterY: Double = 0
+    @State private var proxyKindRaw: String = "Circle"
+    @State private var proxyOrientationRaw: String = "legs"
+    @State private var proxyCustomAngleDegrees: Double = 0
 
     private enum NotchCorner: String, CaseIterable {
         case topLeft = "Top Left"
@@ -1742,74 +1754,137 @@ private struct CutoutRow: View {
                     .foregroundStyle(Theme.secondaryText)
                 HStack(spacing: 8) {
                     ForEach(HoleShape.allCases, id: \.self) { shape in
-                        let isSelected = (cutout.kind == .circle && shape == .circle) || (cutout.kind != .circle && shape == .rectangle)
+                        let isSelected = (currentKind == .circle && shape == .circle) || (currentKind != .circle && shape == .rectangle)
                         Button(shape.rawValue) {
-                            cutout.kind = (shape == .circle) ? .circle : .rectangle
-                            if shape == .circle {
-                                selectedCorner = nil
-                                cutout.isNotch = false
-                                cutout.cornerIndex = -1
-                                cutout.cornerAnchorX = -1
-                                cutout.cornerAnchorY = -1
-                            } else if selectedCorner != nil {
-                                updateNotchCorner()
+                            let newKind: CutoutKind = (shape == .circle) ? .circle : .rectangle
+                            if isLocked {
+                                proxyKindRaw = newKind.rawValue
+                            } else {
+                                cutout.kind = newKind
+                                if shape == .circle {
+                                    selectedCorner = nil
+                                    cutout.isNotch = false
+                                    cutout.cornerIndex = -1
+                                    cutout.cornerAnchorX = -1
+                                    cutout.cornerAnchorY = -1
+                                } else if selectedCorner != nil {
+                                    updateNotchCorner()
+                                }
                             }
                         }
                         .buttonStyle(PillButtonStyle(isProminent: isSelected))
                     }
+
+                    Spacer()
+
+                    Image(systemName: isLocked ? "lock.fill" : "lock.open.fill")
+                        .font(.system(size: 18))
+                        .foregroundStyle(isLocked ? Theme.accent : Theme.secondaryText)
+                        .onTapGesture {
+                            if isLocked {
+                                // Unlocking — apply proxy values to cutout
+                                applyProxiesToCutout()
+                                isLocked = false
+                            } else {
+                                // Locking — capture current values into proxies
+                                syncProxiesFromCutout()
+                                isLocked = true
+                            }
+                        }
                 }
 
                 HStack(spacing: 12) {
-                    labeledField("Width (in)", value: $cutout.width)
-                        .frame(maxWidth: .infinity)
-                    labeledField("From Left to Center (in)", value: Binding(
-                        get: { cutout.centerY },
-                        set: { cutout.centerY = $0 }
+                    labeledField("Width (in)", value: lockedBinding(
+                        proxy: $proxyWidth,
+                        model: $cutout.width
+                    ))
+                    .frame(maxWidth: .infinity)
+                    labeledField(leftFieldLabel, value: Binding(
+                        get: {
+                            if isLocked { return proxyCenterY + leftApexOffset }
+                            return cutout.centerY + leftApexOffset
+                        },
+                        set: {
+                            if isLocked { proxyCenterY = $0 - leftApexOffset }
+                            else {
+                                cutout.centerY = $0 - leftApexOffset
+                                deselectCornerSnap()
+                            }
+                        }
                     ), denominator: 32)
                     .frame(maxWidth: .infinity)
                 }
 
                 HStack(spacing: 12) {
-                    labeledField("Length (in)", value: $cutout.height)
-                        .frame(maxWidth: .infinity)
-                    labeledField("From Top to Center (in)", value: Binding(
-                        get: { cutout.centerX },
-                        set: { cutout.centerX = $0 }
+                    labeledField("Length (in)", value: lockedBinding(
+                        proxy: $proxyHeight,
+                        model: $cutout.height
+                    ))
+                    .frame(maxWidth: .infinity)
+                    labeledField(topFieldLabel, value: Binding(
+                        get: {
+                            if isLocked { return proxyCenterX + topApexOffset }
+                            return cutout.centerX + topApexOffset
+                        },
+                        set: {
+                            if isLocked { proxyCenterX = $0 - topApexOffset }
+                            else {
+                                cutout.centerX = $0 - topApexOffset
+                                deselectCornerSnap()
+                            }
+                        }
                     ), denominator: 32)
                     .frame(maxWidth: .infinity)
                 }
 
-                if piece.shape == .rightTriangle, cutout.kind != .circle {
+                if piece.shape == .rightTriangle, currentKind != .circle {
                     Text("Orientation")
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(Theme.secondaryText)
                     HStack(spacing: 8) {
                         Button("Square to Legs") {
-                            cutout.orientation = .legs
-                            cutout.customAngleDegrees = 0
+                            if isLocked {
+                                proxyOrientationRaw = CutoutOrientation.legs.rawValue
+                                proxyCustomAngleDegrees = 0
+                            } else {
+                                cutout.orientation = .legs
+                                cutout.customAngleDegrees = 0
+                            }
                         }
-                        .buttonStyle(PillButtonStyle(isProminent: cutout.orientation == .legs))
+                        .buttonStyle(PillButtonStyle(isProminent: currentOrientation == .legs))
 
                         Button("Square to Hypotenuse") {
-                            cutout.orientation = .hypotenuse
-                            cutout.customAngleDegrees = 0
+                            if isLocked {
+                                proxyOrientationRaw = CutoutOrientation.hypotenuse.rawValue
+                                proxyCustomAngleDegrees = 0
+                            } else {
+                                cutout.orientation = .hypotenuse
+                                cutout.customAngleDegrees = 0
+                            }
                         }
-                        .buttonStyle(PillButtonStyle(isProminent: cutout.orientation == .hypotenuse))
+                        .buttonStyle(PillButtonStyle(isProminent: currentOrientation == .hypotenuse))
 
                         Button("Custom Angle") {
-                            cutout.orientation = .custom
+                            if isLocked {
+                                proxyOrientationRaw = CutoutOrientation.custom.rawValue
+                            } else {
+                                cutout.orientation = .custom
+                            }
                         }
-                        .buttonStyle(PillButtonStyle(isProminent: cutout.orientation == .custom))
+                        .buttonStyle(PillButtonStyle(isProminent: currentOrientation == .custom))
                     }
 
-                    if cutout.orientation == .custom {
+                    if currentOrientation == .custom {
                         HStack {
                             Text("Angle:")
                                 .font(.system(size: 11, weight: .semibold))
                                 .foregroundStyle(Theme.secondaryText)
-                            TextField("0", value: Binding(
-                                get: { cutout.customAngleDegrees },
-                                set: { cutout.customAngleDegrees = $0 }
+                            TextField("0", value: lockedBinding(
+                                proxy: $proxyCustomAngleDegrees,
+                                model: Binding(
+                                    get: { cutout.customAngleDegrees },
+                                    set: { cutout.customAngleDegrees = $0 }
+                                )
                             ), format: .number)
                             .textFieldStyle(.roundedBorder)
                             .frame(width: 80)
@@ -1820,7 +1895,7 @@ private struct CutoutRow: View {
                     }
                 }
 
-                if cutout.kind != .circle {
+                if currentKind != .circle {
                     // Snap to Corner - only for non-triangle shapes
                     if piece.shape != .rightTriangle {
                         Text("Snap to Corner")
@@ -1831,6 +1906,7 @@ private struct CutoutRow: View {
                         LazyVGrid(columns: columns, spacing: 8) {
                             ForEach(availableCorners, id: \.self) { corner in
                                 sideButton(title: corner.rawValue, isSelected: selectedCorner == corner) {
+                                    if isLocked { return }
                                     if selectedCorner == corner {
                                         selectedCorner = nil
                                         cutout.isNotch = false
@@ -1860,6 +1936,18 @@ private struct CutoutRow: View {
                     selectedCorner = inferred
                 }
             }
+            // Always sync proxies from cutout on appear
+            syncProxiesFromCutout()
+            if !hasInitializedLock {
+                isLocked = pieceDefaults.first?.defaultCutoutLocked ?? false
+                hasInitializedLock = true
+            }
+        }
+        .onDisappear {
+            // If still locked on navigate away, discard proxy changes (cutout is unchanged)
+            // Reset lock to default for next appearance
+            isLocked = pieceDefaults.first?.defaultCutoutLocked ?? false
+            hasInitializedLock = false
         }
         .onChange(of: cutout.width) { _, _ in
             syncSquareSizesIfNeeded()
@@ -1876,6 +1964,12 @@ private struct CutoutRow: View {
             if cutout.isNotch {
                 updateNotchCorner()
             }
+        }
+        .onChange(of: cutout.centerY) { _, _ in
+            autoTrimAtLeftBoundary()
+        }
+        .onChange(of: cutout.centerX) { _, _ in
+            autoTrimAtTopBoundary()
         }
     }
 
@@ -1897,6 +1991,180 @@ private struct CutoutRow: View {
 
     private func labeledField(_ title: String, value: Binding<Double>, allowNegative: Bool = false, showSignToggle: Bool = false, denominator: Int = 16) -> some View {
         FractionNumberField(title: title, value: value, allowNegative: allowNegative, showSignToggle: showSignToggle, denominator: denominator)
+    }
+
+    // MARK: - Lock proxy helpers
+
+    /// Reads from proxy when locked, from cutout model when unlocked
+    private var currentKind: CutoutKind {
+        isLocked ? (CutoutKind(rawValue: proxyKindRaw) ?? .circle) : cutout.kind
+    }
+
+    /// Reads from proxy when locked, from cutout model when unlocked
+    private var currentOrientation: CutoutOrientation {
+        isLocked ? (CutoutOrientation(rawValue: proxyOrientationRaw) ?? .legs) : cutout.orientation
+    }
+
+    /// Creates a binding that routes to proxy when locked, to model when unlocked
+    private func lockedBinding(proxy: Binding<Double>, model: Binding<Double>) -> Binding<Double> {
+        Binding<Double>(
+            get: { isLocked ? proxy.wrappedValue : model.wrappedValue },
+            set: { newValue in
+                if isLocked { proxy.wrappedValue = newValue }
+                else { model.wrappedValue = newValue }
+            }
+        )
+    }
+
+    /// Copy current cutout values into proxy state
+    private func syncProxiesFromCutout() {
+        proxyWidth = cutout.width
+        proxyHeight = cutout.height
+        proxyCenterX = cutout.centerX
+        proxyCenterY = cutout.centerY
+        proxyKindRaw = cutout.kindRaw
+        proxyOrientationRaw = cutout.orientationRaw
+        proxyCustomAngleDegrees = cutout.customAngleDegrees
+    }
+
+    /// Apply proxy values to the actual cutout model (on unlock)
+    private func applyProxiesToCutout() {
+        cutout.width = proxyWidth
+        cutout.height = proxyHeight
+        cutout.centerX = proxyCenterX
+        cutout.centerY = proxyCenterY
+        cutout.kindRaw = proxyKindRaw
+        cutout.orientationRaw = proxyOrientationRaw
+        cutout.customAngleDegrees = proxyCustomAngleDegrees
+        // Re-run shape-change side effects if kind changed
+        if cutout.kind == .circle {
+            selectedCorner = nil
+            cutout.isNotch = false
+            cutout.cornerIndex = -1
+            cutout.cornerAnchorX = -1
+            cutout.cornerAnchorY = -1
+        } else if selectedCorner != nil {
+            updateNotchCorner()
+        }
+    }
+
+    /// Deselect snap-to-corner when user manually changes position fields
+    private func deselectCornerSnap() {
+        guard selectedCorner != nil else { return }
+        selectedCorner = nil
+        cutout.isNotch = false
+        cutout.cornerIndex = -1
+        cutout.cornerAnchorX = -1
+        cutout.cornerAnchorY = -1
+    }
+
+    // MARK: - Apex offset for curved edges
+
+    /// Maximum arc depth of convex curves on the display left edge.
+    /// Display left = raw top (y=0). A convex curve here bulges to negative raw Y.
+    /// The apex offset shifts the "From Left to Center" reference point outward.
+    private var leftApexOffset: Double {
+        let curves = ShapePathBuilder.validCurves(for: piece)
+        return curves
+            .filter { $0.edge == .left && !$0.isConcave && $0.radius > 0 }
+            .map(\.radius)
+            .max() ?? 0
+    }
+
+    /// Maximum arc depth of convex curves on the display top edge.
+    /// Display top = raw left (x=0). A convex curve here bulges to negative raw X.
+    private var topApexOffset: Double {
+        let curves = ShapePathBuilder.validCurves(for: piece)
+        return curves
+            .filter { $0.edge == .top && !$0.isConcave && $0.radius > 0 }
+            .map(\.radius)
+            .max() ?? 0
+    }
+
+    /// Field label for the horizontal position field.
+    private var leftFieldLabel: String {
+        leftApexOffset > 0 ? "From Left Apex to Center (in)" : "From Left to Center (in)"
+    }
+
+    /// Field label for the vertical position field.
+    private var topFieldLabel: String {
+        topApexOffset > 0 ? "From Top Apex to Center (in)" : "From Top to Center (in)"
+    }
+
+    // MARK: - Auto-trim cutout past boundary
+
+    /// Trims the cutout if it extends past the display left boundary (apex for curved, straight edge otherwise).
+    /// Adjusts cutout.height (the raw Y dimension = display left-right extent) and cutout.centerY.
+    private func autoTrimAtLeftBoundary() {
+        let boundary = -leftApexOffset  // raw Y of the left boundary
+        let rawSize = ShapePathBuilder.pieceSize(for: piece)
+        let halfH = cutout.height / 2
+
+        // Trim left side (extends past display left / raw Y min)
+        if cutout.centerY - halfH < boundary {
+            let rightEdge = cutout.centerY + halfH
+            let newHeight = rightEdge - boundary
+            guard newHeight > 0.01 else { return } // Don't trim to nothing
+            cutout.height = newHeight
+            cutout.centerY = boundary + newHeight / 2
+        }
+
+        // Also trim right side (extends past display right / raw Y max)
+        let rightBoundary = rawSize.height + rightApexOffset
+        let halfH2 = cutout.height / 2
+        if cutout.centerY + halfH2 > rightBoundary {
+            let leftEdge = cutout.centerY - halfH2
+            let newHeight = rightBoundary - leftEdge
+            guard newHeight > 0.01 else { return }
+            cutout.height = newHeight
+            cutout.centerY = leftEdge + newHeight / 2
+        }
+    }
+
+    /// Trims the cutout if it extends past the display top boundary (apex for curved, straight edge otherwise).
+    /// Adjusts cutout.width (the raw X dimension = display top-bottom extent) and cutout.centerX.
+    private func autoTrimAtTopBoundary() {
+        let boundary = -topApexOffset  // raw X of the top boundary
+        let rawSize = ShapePathBuilder.pieceSize(for: piece)
+        let halfW = cutout.width / 2
+
+        // Trim top side (extends past display top / raw X min)
+        if cutout.centerX - halfW < boundary {
+            let bottomEdge = cutout.centerX + halfW
+            let newWidth = bottomEdge - boundary
+            guard newWidth > 0.01 else { return }
+            cutout.width = newWidth
+            cutout.centerX = boundary + newWidth / 2
+        }
+
+        // Also trim bottom side (extends past display bottom / raw X max)
+        let bottomBoundary = rawSize.width + bottomApexOffset
+        let halfW2 = cutout.width / 2
+        if cutout.centerX + halfW2 > bottomBoundary {
+            let topEdge = cutout.centerX - halfW2
+            let newWidth = bottomBoundary - topEdge
+            guard newWidth > 0.01 else { return }
+            cutout.width = newWidth
+            cutout.centerX = topEdge + newWidth / 2
+        }
+    }
+
+    /// Maximum arc depth of convex curves on the display right edge.
+    private var rightApexOffset: Double {
+        let curves = ShapePathBuilder.validCurves(for: piece)
+        return curves
+            .filter { $0.edge == .right && !$0.isConcave && $0.radius > 0 }
+            .map(\.radius)
+            .max() ?? 0
+    }
+
+    /// Maximum arc depth of convex curves on the display bottom edge.
+    private var bottomApexOffset: Double {
+        let curves = ShapePathBuilder.validCurves(for: piece)
+        return curves
+            .filter { $0.edge == .bottom && !$0.isConcave && $0.radius > 0 }
+            .map(\.radius)
+            .max() ?? 0
     }
 
     private func updateNotchCorner() {
@@ -2540,8 +2808,11 @@ private struct AngleCutRow: View {
     let piece: Piece
     let angleIndex: Int
     @Environment(\.modelContext) private var modelContext
+    @Query private var pieceDefaults: [PieceDefaults]
     @State private var isUpdatingFromDistance = false
     @State private var isUpdatingFromAngle = false
+    @State private var isAngleLocked: Bool = true
+    @State private var hasInitializedAngleLock: Bool = false
 
     var body: some View {
         let labels = cornerLabels()
@@ -2551,15 +2822,29 @@ private struct AngleCutRow: View {
             edgeDistancesRow
             angleDegreesRow
         }
-        .onAppear { normalizeCornerSelection(count: labels.count) }
+        .onAppear {
+            normalizeCornerSelection(count: labels.count)
+            if !hasInitializedAngleLock {
+                isAngleLocked = pieceDefaults.first?.defaultAngleLocked ?? true
+                hasInitializedAngleLock = true
+            }
+        }
         .onChange(of: labels.count) { _, newValue in
             normalizeCornerSelection(count: newValue)
         }
         .onChange(of: angleCut.anchorOffset) { _, _ in
-            updateAngleFromDistances()
+            if isAngleLocked {
+                updateOtherEdgeFromEdge1()
+            } else {
+                updateAngleFromDistances()
+            }
         }
         .onChange(of: angleCut.secondaryOffset) { _, _ in
-            updateAngleFromDistances()
+            if isAngleLocked {
+                updateOtherEdgeFromEdge2()
+            } else {
+                updateAngleFromDistances()
+            }
         }
         .padding(10)
         .background(Theme.surface)
@@ -2586,7 +2871,7 @@ private struct AngleCutRow: View {
             cornerPickerField(title: "Corner", selection: $angleCut.anchorCornerIndex, labels: labels, dimmedIndices: disabledCorners)
         }
     }
-    
+
     private var edgeDistancesRow: some View {
         HStack(spacing: 12) {
             labeledField("Along Edge 1 (in)", value: $angleCut.anchorOffset)
@@ -2616,52 +2901,82 @@ private struct AngleCutRow: View {
                 .keyboardType(.decimalPad)
                 #endif
             }
-            Spacer()
+
+            Image(systemName: isAngleLocked ? "lock.fill" : "lock.open.fill")
+                .font(.system(size: 18))
+                .foregroundStyle(isAngleLocked ? Theme.accent : Theme.secondaryText)
+                .onTapGesture {
+                    isAngleLocked.toggle()
+                }
         }
     }
 
-    private func updateAngleFromDistances() {
-        guard !isUpdatingFromAngle else { return }
+    // MARK: - Locked: edge change adjusts the OTHER edge to maintain the angle
+
+    private func updateOtherEdgeFromEdge1() {
+        guard !isUpdatingFromAngle, !isUpdatingFromDistance else { return }
         isUpdatingFromDistance = true
-        
+
+        let angleRadians = angleCut.angleDegrees * .pi / 180
+        let edge1 = angleCut.anchorOffset
+        if edge1 > 0 && angleRadians > 0 && angleRadians < .pi / 2 {
+            angleCut.secondaryOffset = edge1 * tan(angleRadians)
+        }
+
+        DispatchQueue.main.async {
+            self.isUpdatingFromDistance = false
+        }
+    }
+
+    private func updateOtherEdgeFromEdge2() {
+        guard !isUpdatingFromAngle, !isUpdatingFromDistance else { return }
+        isUpdatingFromDistance = true
+
+        let angleRadians = angleCut.angleDegrees * .pi / 180
+        let edge2 = angleCut.secondaryOffset
+        if edge2 > 0 && angleRadians > 0 && angleRadians < .pi / 2 {
+            angleCut.anchorOffset = edge2 / tan(angleRadians)
+        }
+
+        DispatchQueue.main.async {
+            self.isUpdatingFromDistance = false
+        }
+    }
+
+    // MARK: - Unlocked: edge changes determine angle
+
+    private func updateAngleFromDistances() {
+        guard !isUpdatingFromAngle, !isUpdatingFromDistance else { return }
+        isUpdatingFromDistance = true
+
         let edge1 = angleCut.anchorOffset
         let edge2 = angleCut.secondaryOffset
-        
-        // Calculate angle using arctangent
-        // The angle is formed by the cut line relative to edge 1
+
         if edge1 > 0 {
             let angleRadians = atan(edge2 / edge1)
             angleCut.angleDegrees = angleRadians * 180 / .pi
         }
-        
-        isUpdatingFromDistance = false
+
+        DispatchQueue.main.async {
+            self.isUpdatingFromDistance = false
+        }
     }
+
+    // MARK: - Angle field changed: keep Edge 1 fixed, adjust Edge 2 to nearest 1/16"
 
     private func updateDistancesFromAngle() {
         guard !isUpdatingFromDistance else { return }
-        
-        // Set flag BEFORE modifying distances to prevent .onChange from recalculating angle
+
         isUpdatingFromAngle = true
-        
+
         let angleRadians = angleCut.angleDegrees * .pi / 180
-        
-        // Keep the hypotenuse length the same, adjust both edges
-        let currentHypotenuse = sqrt(pow(angleCut.anchorOffset, 2) + pow(angleCut.secondaryOffset, 2))
-        
-        // Use a minimum hypotenuse if both are zero
-        let hypotenuse = currentHypotenuse > 0 ? currentHypotenuse : 2.0
-        
-        // Calculate new edge distances based on angle
-        let newEdge1 = hypotenuse * cos(angleRadians)
-        let newEdge2 = hypotenuse * sin(angleRadians)
-        
-        // Only update if values are valid (positive)
-        if newEdge1 > 0 && newEdge2 > 0 {
-            angleCut.anchorOffset = newEdge1
-            angleCut.secondaryOffset = newEdge2
+        let edge1 = angleCut.anchorOffset > 0 ? angleCut.anchorOffset : 2.0
+
+        if angleRadians > 0 && angleRadians < .pi / 2 {
+            let rawEdge2 = edge1 * tan(angleRadians)
+            angleCut.secondaryOffset = (rawEdge2 * 16).rounded() / 16
         }
-        
-        // Reset flag after a short delay to allow .onChange to complete
+
         DispatchQueue.main.async {
             self.isUpdatingFromAngle = false
         }

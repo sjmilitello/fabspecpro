@@ -371,6 +371,23 @@ struct SettingsView: View {
                                     .keyboardType(.decimalPad)
                                     #endif
                                 }
+
+                                HStack {
+                                    Text("Default Lock State")
+                                        .foregroundStyle(Theme.primaryText)
+                                    Spacer()
+                                    HStack(spacing: 8) {
+                                        Button("Locked") {
+                                            defaults.defaultCutoutLocked = true
+                                        }
+                                        .buttonStyle(PillButtonStyle(isProminent: defaults.defaultCutoutLocked == true))
+
+                                        Button("Unlocked") {
+                                            defaults.defaultCutoutLocked = false
+                                        }
+                                        .buttonStyle(PillButtonStyle(isProminent: defaults.defaultCutoutLocked == false))
+                                    }
+                                }
                             }
                         }
 
@@ -514,6 +531,23 @@ struct SettingsView: View {
                                     }
                                     .pickerStyle(.menu)
                                     .tint(Theme.accent)
+                                }
+
+                                HStack {
+                                    Text("Default Angle Lock")
+                                        .foregroundStyle(Theme.primaryText)
+                                    Spacer()
+                                    HStack(spacing: 8) {
+                                        Button("Locked") {
+                                            defaults.defaultAngleLocked = true
+                                        }
+                                        .buttonStyle(PillButtonStyle(isProminent: defaults.defaultAngleLocked == true))
+
+                                        Button("Unlocked") {
+                                            defaults.defaultAngleLocked = false
+                                        }
+                                        .buttonStyle(PillButtonStyle(isProminent: defaults.defaultAngleLocked == false))
+                                    }
                                 }
                             }
                         }

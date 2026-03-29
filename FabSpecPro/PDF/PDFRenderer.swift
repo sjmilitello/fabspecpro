@@ -957,7 +957,7 @@ enum PDFRenderer {
 
         let rawSize = ShapePathBuilder.pieceSize(for: piece)
         let activeCurvesForOverlap = ShapePathBuilder.validCurves(for: piece)
-        for cutout in piece.cutouts where cutout.centerX >= 0 && cutout.centerY >= 0 && !isEffectiveNotch(cutout: cutout, size: size, shape: piece.shape, curves: piece.curvedEdges) && !isCornerCut(cutout: cutout, pieceSize: rawSize, shape: piece.shape) && ShapePathBuilder.cutoutOverlapsPiece(cutout: cutout, size: rawSize, shape: piece.shape, curves: activeCurvesForOverlap) {
+        for cutout in piece.cutouts where cutout.isPlaced && !isEffectiveNotch(cutout: cutout, size: size, shape: piece.shape, curves: piece.curvedEdges) && !isCornerCut(cutout: cutout, pieceSize: rawSize, shape: piece.shape) && ShapePathBuilder.cutoutOverlapsPiece(cutout: cutout, size: rawSize, shape: piece.shape, curves: activeCurvesForOverlap) {
             let displayCutout = displayCutout(for: cutout)
             let angleCuts = localAngleCuts(for: cutout, piece: piece)
             let cornerRadii = localCornerRadii(for: cutout, piece: piece)
@@ -988,7 +988,7 @@ enum PDFRenderer {
     }
 
     private static func drawNotchDimensionLabels(in context: CGContext, piece: Piece, size: CGSize, scale: CGFloat, offsetX: CGFloat, offsetY: CGFloat) {
-        let notches = piece.cutouts.filter { isEffectiveNotch(cutout: $0, size: size, shape: piece.shape, curves: piece.curvedEdges) && $0.centerX >= 0 && $0.centerY >= 0 }
+        let notches = piece.cutouts.filter { isEffectiveNotch(cutout: $0, size: size, shape: piece.shape, curves: piece.curvedEdges) && $0.isPlaced }
         guard !notches.isEmpty else { return }
         let outerPolygon = ShapePathBuilder.displayPolygonPoints(for: piece, includeAngles: true, includeNotches: false)
 
@@ -1378,7 +1378,7 @@ enum PDFRenderer {
         // Get cutouts that are NOT notches (interior holes) and NOT corner cuts
         let rawSize = ShapePathBuilder.pieceSize(for: piece)
         let labelActiveCurves = ShapePathBuilder.validCurves(for: piece)
-        let cutouts = piece.cutouts.filter { !isEffectiveNotch(cutout: $0, size: size, shape: piece.shape, curves: piece.curvedEdges) && !isCornerCut(cutout: $0, pieceSize: rawSize, shape: piece.shape) && $0.centerX >= 0 && $0.centerY >= 0 && $0.kind != .circle && ShapePathBuilder.cutoutOverlapsPiece(cutout: $0, size: rawSize, shape: piece.shape, curves: labelActiveCurves) }
+        let cutouts = piece.cutouts.filter { !isEffectiveNotch(cutout: $0, size: size, shape: piece.shape, curves: piece.curvedEdges) && !isCornerCut(cutout: $0, pieceSize: rawSize, shape: piece.shape) && $0.isPlaced && $0.kind != .circle && ShapePathBuilder.cutoutOverlapsPiece(cutout: $0, size: rawSize, shape: piece.shape, curves: labelActiveCurves) }
         guard !cutouts.isEmpty else { return }
 
         for cutout in cutouts {
@@ -1635,7 +1635,7 @@ enum PDFRenderer {
             guard !code.isEmpty else { continue }
             guard let cutoutEdge = assignment.cutoutEdge else { continue }
             guard let cutout = piece.cutouts.first(where: { $0.id == cutoutEdge.id }) else { continue }
-            guard cutout.centerX >= 0 && cutout.centerY >= 0 else { continue }
+            guard cutout.isPlaced else { continue }
             let displayCutout = displayCutout(for: cutout)
             let edgeInfo = visibleCutoutEdgeInfo(
                 displayCutout: displayCutout,
@@ -3018,7 +3018,7 @@ enum PDFRenderer {
         var edges = Set<EdgePosition>()
         let eps: CGFloat = 0.01
         
-        for cutout in piece.cutouts where cutout.centerX >= 0 && cutout.centerY >= 0 {
+        for cutout in piece.cutouts where cutout.isPlaced {
             guard isEffectiveNotch(cutout: cutout, size: size, shape: piece.shape, curves: piece.curvedEdges) else { continue }
             let displayCutout = displayCutout(for: cutout)
             let halfWidth = displayCutout.width / 2
@@ -3130,7 +3130,7 @@ enum PDFRenderer {
         let rawSize = ShapePathBuilder.pieceSize(for: piece)
         let displaySize = ShapePathBuilder.displaySize(for: piece)
         let noteActiveCurves = ShapePathBuilder.validCurves(for: piece)
-        let visibleCutouts = piece.cutouts.filter { $0.centerX >= 0 && $0.centerY >= 0 }
+        let visibleCutouts = piece.cutouts.filter { $0.isPlaced }
         let holes = visibleCutouts.filter { !isEffectiveNotch(cutout: $0, size: displaySize, shape: piece.shape, curves: piece.curvedEdges) && !isCornerCut(cutout: $0, pieceSize: rawSize, shape: piece.shape) && ShapePathBuilder.cutoutOverlapsPiece(cutout: $0, size: rawSize, shape: piece.shape, curves: noteActiveCurves) }
         var lines: [String] = []
         // Curves are stored with display edge positions

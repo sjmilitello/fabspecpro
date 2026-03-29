@@ -23,6 +23,7 @@ final class PieceDefaults {
     var defaultCutoutShape: String = "Circle"  // Circle or Rectangle
     var defaultCutoutWidth: Double = 2.0
     var defaultCutoutHeight: Double = 2.0
+    var defaultCutoutLocked: Bool = false
 
     // Curve defaults (optional - applied when adding curve)
     var enableDefaultCurve: Bool = false
@@ -37,6 +38,7 @@ final class PieceDefaults {
     var defaultAngleEdge1: Double = 2.0
     var defaultAngleEdge2: Double = 2.0
     var defaultAngleCorner: Int = -1  // -1 means "None"
+    var defaultAngleLocked: Bool = true  // true = angle locked (edges adjust), false = unlocked (angle adjusts)
 
     // Corner radius defaults (optional - applied when adding corner radius)
     var enableDefaultCornerRadius: Bool = false

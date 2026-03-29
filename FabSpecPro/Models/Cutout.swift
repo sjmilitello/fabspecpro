@@ -56,6 +56,14 @@ final class Cutout {
     var isRotated: Bool {
         orientation == .hypotenuse || (orientation == .custom && abs(customAngleDegrees) > 0.001)
     }
+
+    /// Returns true if this cutout has been placed on the piece.
+    /// Cutouts with very large negative coordinates are considered unplaced/invalid.
+    /// Allows slightly negative coordinates for cutouts positioned past the straight
+    /// edge into a curved boundary area.
+    var isPlaced: Bool {
+        centerX > -9999 && centerY > -9999
+    }
 }
 
 @Model
