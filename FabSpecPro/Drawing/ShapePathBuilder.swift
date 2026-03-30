@@ -421,8 +421,10 @@ enum ShapePathBuilder {
         let notches = notchCandidatesCurveAware(for: piece, size: rawSize)
         let pieceAngleCuts = boundaryAngleCuts(for: piece)
 
-        // Filter out corner radii that conflict with curved edges (based on current base-corner list)
+        // Corner point arrays for classification and filtering
         let baseCorners = cornerPoints(for: piece, includeAngles: false)
+        // Labeling polygon includes curve-aware notches (matches the UI's index space)
+        let labelingCorners = displayPolygonPointsForLabeling(for: piece, includeAngles: false)
         let baseTriangleCorners: [CGPoint]
         if piece.shape == .rightTriangle {
             let base = rightTrianglePoints(size: rawSize)
@@ -430,7 +432,8 @@ enum ShapePathBuilder {
         } else {
             baseTriangleCorners = []
         }
-        let curveOccupiedCorners = cornerIndicesOnCurvedEdges(points: baseCorners, shape: piece.shape, curves: activeCurves, requireConvex: true)
+        // Filter corner radii on curved edges using the labeling polygon (which has curve-aware notches)
+        let curveOccupiedCorners = cornerIndicesOnCurvedEdges(points: labelingCorners, shape: piece.shape, curves: activeCurves, requireConvex: true)
         let cornerRadii = allCornerRadii.filter { !curveOccupiedCorners.contains($0.cornerIndex) }
 
         // Curve-aware notch candidates for the curve-first pipeline subtraction step.
@@ -439,6 +442,7 @@ enum ShapePathBuilder {
         // This is safe because the curve-first pipeline builds curves on the clean
         // base shape first (steps 1-2), so the notch list doesn't affect curve computation.
         let stableNotches = notchCandidatesCurveAware(for: piece, size: rawSize)
+
         if piece.shape == .rectangle, (!notches.isEmpty || !stableNotches.isEmpty || !piece.angleCuts.isEmpty) {
             // When curves are active, use curve-first pipeline:
             // 1. Build base shape with angle cuts (no notches)
@@ -448,14 +452,51 @@ enum ShapePathBuilder {
             // interpolates correctly, and avoids cross-edge instability from
             // curvedBooleanDifference changing the polygon when curves are added.
             if !activeCurves.isEmpty {
-                // Step 1: Base shape with angle cuts only (no notches, no curves)
-                let baseResult = angledRectanglePoints(size: rawSize, notches: [], angleCuts: pieceAngleCuts)
+                // Classify angle cuts: base-corner cuts (safe for Step 1) vs
+                // notch-interior cuts (must be handled via chamfered clips in Step 4).
+                // baseCorners uses notchCandidates (same polygon that boundaryAngleCuts validated against).
+                let cleanRectDisplay = reorderCornersClockwise(rectanglePoints(size: rawSize).map { displayPoint(fromRaw: $0) })
+                var baseCornerCuts: [AngleCut] = []
+                var notchInteriorCuts: [AngleCut] = []
+                for cut in pieceAngleCuts {
+                    let idx = normalizedIndex(cut.anchorCornerIndex, count: baseCorners.count)
+                    guard idx < baseCorners.count else { continue }
+                    let vertex = baseCorners[idx]
+                    if cleanRectDisplay.contains(where: { distance($0, vertex) < 0.5 }) {
+                        baseCornerCuts.append(cut)
+                    } else {
+                        notchInteriorCuts.append(cut)
+                    }
+                }
+
+                // Classify corner radii: base-corner radii (Step 3) vs notch-interior radii (after Step 4).
+                // Corner radii indices come from the labeling polygon (curve-aware notches).
+                // Base-corner radii target the clean rectangle corners; notch-interior radii
+                // target notch corners that only exist after Step 4 subtraction.
+                var baseCornerRadii: [CornerRadius] = []
+                var notchInteriorRadii: [CornerRadius] = []
+                for radius in cornerRadii {
+                    guard radius.cornerIndex >= 0, radius.cornerIndex < labelingCorners.count else { continue }
+                    let vertex = labelingCorners[radius.cornerIndex]
+                    if cleanRectDisplay.contains(where: { distance($0, vertex) < 0.5 }) {
+                        baseCornerRadii.append(radius)
+                    } else {
+                        notchInteriorRadii.append(radius)
+                    }
+                }
+
+                // Step 1: Base shape with base-corner angle cuts only (no notches).
+                // Notch-interior cuts are excluded because without notches in the polygon,
+                // their anchorCornerIndex wraps via normalizedIndex to a wrong base corner.
+                // Also exclude angle cuts on curved corners — they distort the curve.
+                let safeBaseCornerCuts = baseCornerCuts.filter { !curveOccupiedCorners.contains($0.anchorCornerIndex) }
+                let baseResult = angledRectanglePoints(size: rawSize, notches: [], angleCuts: safeBaseCornerCuts)
                 let baseDisplayPoints = baseResult.points.map { displayPoint(fromRaw: $0) }
 
                 // Step 2: Apply curves to the simple polygon
                 let dispSize = displaySize(for: piece)
                 var curvedPath: Path
-                if baseDisplayPoints.count <= 4 && pieceAngleCuts.isEmpty {
+                if baseDisplayPoints.count <= 4 && safeBaseCornerCuts.isEmpty {
                     // Simple rectangle — use direct curvedRectanglePath
                     curvedPath = curvedRectanglePath(width: dispSize.width, height: dispSize.height, curves: activeCurves)
                 } else {
@@ -468,27 +509,115 @@ enum ShapePathBuilder {
                     curvedPath = curvedPolygonPath(points: baseDisplayPoints, shape: .rectangle, curves: mappedCurves, baseBounds: nil)
                 }
 
-                // Step 3: Apply corner radii before notch subtraction
-                if !cornerRadii.isEmpty {
-                    curvedPath = applyCornerRadiiToPath(curvedPath, cornerRadii: cornerRadii, piece: piece, displayPoints: baseDisplayPoints)
-                }
+                // Step 3: (Base-corner radii are currently only possible on non-curved corners.
+                // Since all 4 base rectangle corners have curves in typical usage, this is a no-op.
+                // If needed in the future, base-corner radii can be handled here.)
 
-                // Step 4: Subtract notches from the curved (and optionally rounded) path
-                // Uses stableNotches (curve-independent) so the notch list
-                // never changes when curves are added or removed.
+                // Step 4: Subtract notches (with chamfered angle cuts and rounded corner radii).
+                // Notch clip polygons are built with rounded corners using roundedPolygonPath —
+                // the same proven function used for interior cutout corner radii.
+                // Chamfered corners for notch-interior angle cuts are also applied to the clips.
                 if !stableNotches.isEmpty {
-                    let clipPolygons = notchClipPolygons(notches: stableNotches, size: rawSize, shape: .rectangle)
+                    var clipPolygons = notchClipPolygons(notches: stableNotches, size: rawSize, shape: .rectangle)
+
+                    // Chamfer clip polygon corners for notch-interior angle cuts
+                    if !notchInteriorCuts.isEmpty {
+                        let notchedForChamfer = angledRectanglePoints(size: rawSize, notches: stableNotches, angleCuts: [])
+                        let notchedChamferDisplay = reorderCornersClockwise(notchedForChamfer.points.map { displayPoint(fromRaw: $0) })
+
+                        for cut in notchInteriorCuts {
+                            let classIdx = normalizedIndex(cut.anchorCornerIndex, count: baseCorners.count)
+                            guard classIdx < baseCorners.count else { continue }
+                            let anchorPosition = baseCorners[classIdx]
+
+                            guard let chamferIdx = notchedChamferDisplay.enumerated().min(by: {
+                                distance($0.element, anchorPosition) < distance($1.element, anchorPosition)
+                            })?.offset, distance(notchedChamferDisplay[chamferIdx], anchorPosition) < 1.0 else { continue }
+
+                            let anchor = notchedChamferDisplay[chamferIdx]
+                            let chamferCount = notchedChamferDisplay.count
+                            let outlinePrev = notchedChamferDisplay[(chamferIdx - 1 + chamferCount) % chamferCount]
+                            let outlineNext = notchedChamferDisplay[(chamferIdx + 1) % chamferCount]
+
+                            let alongEdge1 = abs(cut.anchorOffset)
+                            let alongEdge2 = abs(cut.secondaryOffset)
+                            let toOutlineNext = unitVector(from: anchor, to: outlineNext)
+                            let toOutlinePrev = unitVector(from: anchor, to: outlinePrev)
+                            let lenNext = distance(anchor, outlineNext)
+                            let lenPrev = distance(anchor, outlinePrev)
+                            guard alongEdge1 <= lenNext, alongEdge2 <= lenPrev else { continue }
+
+                            let p1 = CGPoint(x: anchor.x + toOutlineNext.x * alongEdge1, y: anchor.y + toOutlineNext.y * alongEdge1)
+                            let p2 = CGPoint(x: anchor.x + toOutlinePrev.x * alongEdge2, y: anchor.y + toOutlinePrev.y * alongEdge2)
+
+                            for clipIdx in clipPolygons.indices {
+                                let clipDisplay = clipPolygons[clipIdx].map { displayPoint(fromRaw: $0) }
+                                guard let cornerIdx = clipDisplay.enumerated().min(by: {
+                                    distance($0.element, anchor) < distance($1.element, anchor)
+                                })?.offset, distance(clipDisplay[cornerIdx], anchor) < 1.0 else { continue }
+
+                                let clipCount = clipDisplay.count
+                                let prevClip = clipDisplay[(cornerIdx - 1 + clipCount) % clipCount]
+                                let nextClip = clipDisplay[(cornerIdx + 1) % clipCount]
+
+                                let p1OnPrevEdge = abs(distance(prevClip, p1) + distance(p1, anchor) - distance(prevClip, anchor))
+                                let p1OnNextEdge = abs(distance(anchor, p1) + distance(p1, nextClip) - distance(anchor, nextClip))
+
+                                var newClip: [CGPoint] = []
+                                for (i, pt) in clipDisplay.enumerated() {
+                                    if i == cornerIdx {
+                                        if p1OnPrevEdge < p1OnNextEdge {
+                                            newClip.append(p1)
+                                            newClip.append(p2)
+                                        } else {
+                                            newClip.append(p2)
+                                            newClip.append(p1)
+                                        }
+                                    } else {
+                                        newClip.append(pt)
+                                    }
+                                }
+                                clipPolygons[clipIdx] = newClip.map { rawPoint(fromDisplay: $0) }
+                                break
+                            }
+                        }
+                    }
+
+                    // Build clip paths — use roundedPolygonPath for clips with corner radii
+                    // (same approach as interior cutout rendering in cutoutPath)
                     if !clipPolygons.isEmpty {
                         var clipPath = Path()
                         for clip in clipPolygons {
-                            let displayClip = clip.map { displayPoint(fromRaw: $0) }
+                            let displayClip = reorderCornersClockwise(clip.map { displayPoint(fromRaw: $0) })
                             guard displayClip.count >= 3 else { continue }
-                            clipPath.move(to: displayClip[0])
-                            for pt in displayClip.dropFirst() { clipPath.addLine(to: pt) }
-                            clipPath.closeSubpath()
+
+                            // Map notch-interior corner radii to this clip's corners
+                            var localRadii: [CornerRadius] = []
+                            if !notchInteriorRadii.isEmpty {
+                                for radius in notchInteriorRadii {
+                                    guard radius.cornerIndex >= 0, radius.cornerIndex < labelingCorners.count else { continue }
+                                    let radiusVertex = labelingCorners[radius.cornerIndex]
+                                    // Find matching corner in this clip polygon
+                                    if let matchIdx = displayClip.enumerated().min(by: {
+                                        distance($0.element, radiusVertex) < distance($1.element, radiusVertex)
+                                    })?.offset, distance(displayClip[matchIdx], radiusVertex) < 1.0 {
+                                        localRadii.append(CornerRadius(cornerIndex: matchIdx, radius: radius.radius, isInside: radius.isInside))
+                                    }
+                                }
+                            }
+
+                            if !localRadii.isEmpty {
+                                // Build rounded clip using roundedPolygonPath (proven approach)
+                                let roundedClip = roundedPolygonPath(points: displayClip, cornerRadii: localRadii)
+                                clipPath.addPath(roundedClip)
+                            } else {
+                                // Standard straight-edged clip
+                                clipPath.move(to: displayClip[0])
+                                for pt in displayClip.dropFirst() { clipPath.addLine(to: pt) }
+                                clipPath.closeSubpath()
+                            }
                         }
                         let subtracted = curvedPath.subtracting(clipPath)
-                        // Fallback: if Path.subtracting produces empty result, use existing pipeline
                         let subBounds = subtracted.boundingRect
                         if subBounds.width >= 0.01 || subBounds.height >= 0.01 {
                             return subtracted
@@ -523,30 +652,140 @@ enum ShapePathBuilder {
 
             // Curve-first pipeline for right triangles (same approach as rectangle)
             if !activeCurves.isEmpty {
-                // Step 1: Base shape with angle cuts only (no notches)
-                let baseResult = angledRightTrianglePoints(size: rawSize, notches: [], angleCuts: pieceAngleCuts)
+                // Classify angle cuts for right triangle (base has 3 corners)
+                let cleanTriDisplay = reorderCornersClockwise(rightTrianglePoints(size: rawSize).map { displayPoint(fromRaw: $0) })
+                var triBaseCornerCuts: [AngleCut] = []
+                var triNotchInteriorCuts: [AngleCut] = []
+                for cut in pieceAngleCuts {
+                    let idx = normalizedIndex(cut.anchorCornerIndex, count: baseCorners.count)
+                    guard idx < baseCorners.count else { continue }
+                    let vertex = baseCorners[idx]
+                    if cleanTriDisplay.contains(where: { distance($0, vertex) < 0.5 }) {
+                        triBaseCornerCuts.append(cut)
+                    } else {
+                        triNotchInteriorCuts.append(cut)
+                    }
+                }
+
+                // Classify corner radii for right triangle (same approach as rectangle)
+                var triBaseCornerRadii: [CornerRadius] = []
+                var triNotchInteriorRadii: [CornerRadius] = []
+                for radius in cornerRadii {
+                    guard radius.cornerIndex >= 0, radius.cornerIndex < labelingCorners.count else { continue }
+                    let vertex = labelingCorners[radius.cornerIndex]
+                    if cleanTriDisplay.contains(where: { distance($0, vertex) < 0.5 }) {
+                        triBaseCornerRadii.append(radius)
+                    } else {
+                        triNotchInteriorRadii.append(radius)
+                    }
+                }
+
+                // Step 1: Base shape with base-corner angle cuts only (no notches).
+                // Exclude angle cuts on curved corners — they distort the curve.
+                let safeTriBaseCornerCuts = triBaseCornerCuts.filter { !curveOccupiedCorners.contains($0.anchorCornerIndex) }
+                let baseResult = angledRightTrianglePoints(size: rawSize, notches: [], angleCuts: safeTriBaseCornerCuts)
                 let baseDisplayPoints = baseResult.points.map { displayPoint(fromRaw: $0) }
 
                 // Step 2: Apply curves to the simple polygon
                 let mappedCurves = mapCurvesToRawDisplayPoints(curves: activeCurves, displayPoints: baseDisplayPoints)
-                var curvedPath = curvedPolygonPath(points: baseDisplayPoints, shape: .rightTriangle, curves: mappedCurves, baseBounds: baseBounds)
+                let curvedPath = curvedPolygonPath(points: baseDisplayPoints, shape: .rightTriangle, curves: mappedCurves, baseBounds: baseBounds)
 
-                // Step 3: Apply corner radii
-                if !cornerRadii.isEmpty {
-                    curvedPath = applyCornerRadiiToPath(curvedPath, cornerRadii: cornerRadii, piece: piece, displayPoints: baseDisplayPoints)
-                }
+                // Step 3: (Base-corner radii skipped — same note as rectangle pipeline)
 
-                // Step 4: Subtract notches
+                // Step 4: Subtract notches (with chamfered angle cuts and rounded corner radii)
                 if !stableNotches.isEmpty {
-                    let clipPolygons = notchClipPolygons(notches: stableNotches, size: rawSize, shape: .rightTriangle)
+                    var clipPolygons = notchClipPolygons(notches: stableNotches, size: rawSize, shape: .rightTriangle)
+
+                    if !triNotchInteriorCuts.isEmpty {
+                        let notchedForChamfer = angledRightTrianglePoints(size: rawSize, notches: stableNotches, angleCuts: [])
+                        let notchedChamferDisplay = reorderCornersClockwise(notchedForChamfer.points.map { displayPoint(fromRaw: $0) })
+
+                        for cut in triNotchInteriorCuts {
+                            let classIdx = normalizedIndex(cut.anchorCornerIndex, count: baseCorners.count)
+                            guard classIdx < baseCorners.count else { continue }
+                            let anchorPosition = baseCorners[classIdx]
+
+                            guard let chamferIdx = notchedChamferDisplay.enumerated().min(by: {
+                                distance($0.element, anchorPosition) < distance($1.element, anchorPosition)
+                            })?.offset, distance(notchedChamferDisplay[chamferIdx], anchorPosition) < 1.0 else { continue }
+
+                            let anchor = notchedChamferDisplay[chamferIdx]
+                            let chamferCount = notchedChamferDisplay.count
+                            let outlinePrev = notchedChamferDisplay[(chamferIdx - 1 + chamferCount) % chamferCount]
+                            let outlineNext = notchedChamferDisplay[(chamferIdx + 1) % chamferCount]
+
+                            let alongEdge1 = abs(cut.anchorOffset)
+                            let alongEdge2 = abs(cut.secondaryOffset)
+                            let toOutlineNext = unitVector(from: anchor, to: outlineNext)
+                            let toOutlinePrev = unitVector(from: anchor, to: outlinePrev)
+                            let lenNext = distance(anchor, outlineNext)
+                            let lenPrev = distance(anchor, outlinePrev)
+                            guard alongEdge1 <= lenNext, alongEdge2 <= lenPrev else { continue }
+
+                            let p1 = CGPoint(x: anchor.x + toOutlineNext.x * alongEdge1, y: anchor.y + toOutlineNext.y * alongEdge1)
+                            let p2 = CGPoint(x: anchor.x + toOutlinePrev.x * alongEdge2, y: anchor.y + toOutlinePrev.y * alongEdge2)
+
+                            for clipIdx in clipPolygons.indices {
+                                let clipDisplay = clipPolygons[clipIdx].map { displayPoint(fromRaw: $0) }
+                                guard let cornerIdx = clipDisplay.enumerated().min(by: {
+                                    distance($0.element, anchor) < distance($1.element, anchor)
+                                })?.offset, distance(clipDisplay[cornerIdx], anchor) < 1.0 else { continue }
+
+                                let clipCount = clipDisplay.count
+                                let prevClip = clipDisplay[(cornerIdx - 1 + clipCount) % clipCount]
+                                let nextClip = clipDisplay[(cornerIdx + 1) % clipCount]
+
+                                let p1OnPrevEdge = abs(distance(prevClip, p1) + distance(p1, anchor) - distance(prevClip, anchor))
+                                let p1OnNextEdge = abs(distance(anchor, p1) + distance(p1, nextClip) - distance(anchor, nextClip))
+
+                                var newClip: [CGPoint] = []
+                                for (i, pt) in clipDisplay.enumerated() {
+                                    if i == cornerIdx {
+                                        if p1OnPrevEdge < p1OnNextEdge {
+                                            newClip.append(p1)
+                                            newClip.append(p2)
+                                        } else {
+                                            newClip.append(p2)
+                                            newClip.append(p1)
+                                        }
+                                    } else {
+                                        newClip.append(pt)
+                                    }
+                                }
+                                clipPolygons[clipIdx] = newClip.map { rawPoint(fromDisplay: $0) }
+                                break
+                            }
+                        }
+                    }
+
+                    // Build clip paths — use roundedPolygonPath for clips with corner radii
                     if !clipPolygons.isEmpty {
                         var clipPath = Path()
                         for clip in clipPolygons {
-                            let displayClip = clip.map { displayPoint(fromRaw: $0) }
+                            let displayClip = reorderCornersClockwise(clip.map { displayPoint(fromRaw: $0) })
                             guard displayClip.count >= 3 else { continue }
-                            clipPath.move(to: displayClip[0])
-                            for pt in displayClip.dropFirst() { clipPath.addLine(to: pt) }
-                            clipPath.closeSubpath()
+
+                            var localRadii: [CornerRadius] = []
+                            if !triNotchInteriorRadii.isEmpty {
+                                for radius in triNotchInteriorRadii {
+                                    guard radius.cornerIndex >= 0, radius.cornerIndex < labelingCorners.count else { continue }
+                                    let radiusVertex = labelingCorners[radius.cornerIndex]
+                                    if let matchIdx = displayClip.enumerated().min(by: {
+                                        distance($0.element, radiusVertex) < distance($1.element, radiusVertex)
+                                    })?.offset, distance(displayClip[matchIdx], radiusVertex) < 1.0 {
+                                        localRadii.append(CornerRadius(cornerIndex: matchIdx, radius: radius.radius, isInside: radius.isInside))
+                                    }
+                                }
+                            }
+
+                            if !localRadii.isEmpty {
+                                let roundedClip = roundedPolygonPath(points: displayClip, cornerRadii: localRadii)
+                                clipPath.addPath(roundedClip)
+                            } else {
+                                clipPath.move(to: displayClip[0])
+                                for pt in displayClip.dropFirst() { clipPath.addLine(to: pt) }
+                                clipPath.closeSubpath()
+                            }
                         }
                         let subtracted = curvedPath.subtracting(clipPath)
                         let subBounds = subtracted.boundingRect
@@ -716,6 +955,87 @@ enum ShapePathBuilder {
             shape: piece.shape,
             piece: piece
         )
+    }
+
+    /// Applies corner radii to an existing curved path using boolean clipping.
+    /// Unlike applyCornerRadiiToPath (which rebuilds from scratch via roundedCurvedPolygonPath),
+    /// this function preserves the existing curved path and only modifies the specific corners
+    /// that need rounding — preventing curve flattening/distortion.
+    ///
+    /// For each corner with a radius: subtracts a triangular "sharp corner" clip from the path,
+    /// then unions an arc fill to create the rounded corner.
+    private static func applyCornerRadiiByClipping(_ basePath: Path, cornerRadii: [CornerRadius], piece: Piece, displayPoints: [CGPoint]) -> Path {
+        guard !cornerRadii.isEmpty else { return basePath }
+
+        let count = displayPoints.count
+        guard count >= 3 else { return basePath }
+
+        var result = basePath
+
+        for radius in cornerRadii {
+            guard radius.radius > 0, radius.cornerIndex >= 0, radius.cornerIndex < count else { continue }
+
+            // Use displayPoints directly — the caller passes the polygon whose
+            // index space matches the corner radius indices.
+            let idx = radius.cornerIndex
+            let curr = displayPoints[idx]
+            let prev = displayPoints[(idx - 1 + count) % count]
+            let next = displayPoints[(idx + 1) % count]
+
+            // Compute tangent points (same math as roundedPolygonPath)
+            let v1 = unitVector(from: curr, to: prev)
+            let v2 = unitVector(from: curr, to: next)
+            let dot = max(min(v1.x * v2.x + v1.y * v2.y, 1), -1)
+            let angleSmall = acos(dot)
+            guard angleSmall > 0.0001 else { continue }
+
+            let lenPrev = distance(curr, prev)
+            let lenNext = distance(curr, next)
+            let tanHalf = tan(angleSmall / 2)
+            let tanHalfAbs = abs(tanHalf)
+            guard tanHalfAbs > 0.0001 else { continue }
+
+            let maxRadius = min(lenPrev, lenNext) * tanHalfAbs
+            let r = min(CGFloat(radius.radius), maxRadius)
+            guard r > 0.0001 else { continue }
+
+            let t = r / tanHalfAbs
+            let p1 = CGPoint(x: curr.x + v1.x * t, y: curr.y + v1.y * t)  // tangent on prev edge
+            let p2 = CGPoint(x: curr.x + v2.x * t, y: curr.y + v2.y * t)  // tangent on next edge
+
+            // Arc center
+            let bisector = unitVector(from: .zero, to: CGPoint(x: v1.x + v2.x, y: v1.y + v2.y))
+            let sinHalf = sin(angleSmall / 2)
+            guard sinHalf > 0.0001 else { continue }
+            let centerOffset = r / sinHalf
+            let center = CGPoint(x: curr.x + bisector.x * centerOffset,
+                                 y: curr.y + bisector.y * centerOffset)
+
+            let startRadians = atan2(p1.y - center.y, p1.x - center.x)
+            let endRadians = atan2(p2.y - center.y, p2.x - center.x)
+            var delta = endRadians - startRadians
+            while delta <= -CGFloat.pi { delta += 2 * CGFloat.pi }
+            while delta > CGFloat.pi { delta -= 2 * CGFloat.pi }
+            let arcClockwise = delta < 0
+
+            // Build the corner cap clip: the area between the sharp corner and the arc.
+            // Shape: p1 → curr → p2, then arc back from p2 to p1 (closing the rounded edge).
+            // Subtracting this from the path replaces the sharp corner with the arc.
+            var cornerCap = Path()
+            cornerCap.move(to: p1)
+            cornerCap.addLine(to: curr)
+            cornerCap.addLine(to: p2)
+            // Arc from p2 back to p1 (same arc direction, swapped endpoints = reverse traversal)
+            cornerCap.addArc(center: center, radius: r,
+                            startAngle: .radians(endRadians),
+                            endAngle: .radians(startRadians),
+                            clockwise: arcClockwise)
+            cornerCap.closeSubpath()
+
+            result = result.subtracting(cornerCap)
+        }
+
+        return result
     }
 
     private static func mapCurvesToRawDisplayPoints(curves: [CurvedEdge], displayPoints: [CGPoint]) -> [CurvedEdge] {
@@ -1477,7 +1797,9 @@ enum ShapePathBuilder {
     }
 
     private static func pieceCornerRadii(for piece: Piece) -> [CornerRadius] {
-        let cornerCount = displayPolygonPoints(for: piece, includeAngles: false).count
+        // Use the labeling polygon count (curve-aware notches) to validate indices,
+        // since the UI assigns corner indices from the same labeling polygon.
+        let cornerCount = cornerLabelCount(for: piece)
         return piece.cornerRadii.filter { $0.radius > 0 && $0.cornerIndex >= 0 && $0.cornerIndex < cornerCount }
     }
 

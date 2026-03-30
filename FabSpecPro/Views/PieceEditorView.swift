@@ -705,7 +705,13 @@ struct PieceEditorView: View {
         curve.piece = piece
         modelContext.insert(curve)
         if curve.radius > 0 {
-            removeCornerRadiiOnEdge(curve.edge)
+            // Remove corner radii and angle cuts on corners occupied by this curve —
+            // both cause distortions when combined with curves
+            let indices = cornerIndices(on: curve.edge, requireConvex: false)
+            for index in indices {
+                removeCornerRadius(at: index)
+                removeAngle(at: index)
+            }
         }
         openCurveIds = [curve.id]
     }
@@ -782,7 +788,15 @@ struct PieceEditorView: View {
         let cornerCount = ShapePathBuilder.cornerLabelCount(for: piece)
         guard cornerCount > 0 else { return }
         let usedAngles = Set(piece.angleCuts.map { $0.anchorCornerIndex })
-        let avoid = usedAngles
+        // Also block corners occupied by curved edges — angles on curved corners cause distortions
+        var curveBlocked = Set<Int>()
+        let baseCount = ShapePathBuilder.pieceCornerCount(for: piece)
+        if baseCount > 0 {
+            for index in 0..<baseCount where cornerIsOnCurvedEdge(index, requireConvex: false) {
+                curveBlocked.insert(index)
+            }
+        }
+        let avoid = usedAngles.union(curveBlocked)
         
         // Use default corner if set, otherwise find next available
         var defaultCorner: Int = -1
@@ -792,8 +806,13 @@ struct PieceEditorView: View {
             defaultCorner = nextAvailableCornerIndex(count: cornerCount, avoiding: avoid) ?? -1
         }
         
+        // Remove any existing corner radius on this corner (mutual exclusion)
+        if defaultCorner >= 0 {
+            removeCornerRadius(at: defaultCorner)
+        }
+
         let angle = AngleCut(anchorCornerIndex: defaultCorner)
-        
+
         // Apply default sizes and degrees
         if let defaults = pieceDefaults.first {
             angle.anchorOffset = defaults.defaultAngleEdge1
@@ -2832,6 +2851,12 @@ private struct AngleCutRow: View {
         .onChange(of: labels.count) { _, newValue in
             normalizeCornerSelection(count: newValue)
         }
+        .onChange(of: angleCut.anchorCornerIndex) { _, newIndex in
+            // Mutual exclusion: remove any corner radius on the newly selected corner
+            if newIndex >= 0 {
+                removeCornerRadius(at: newIndex)
+            }
+        }
         .onChange(of: angleCut.anchorOffset) { _, _ in
             if isAngleLocked {
                 updateOtherEdgeFromEdge1()
@@ -2866,7 +2891,15 @@ private struct AngleCutRow: View {
     }
 
     private func cornerRow(labels: [String]) -> some View {
-        let disabledCorners = Set(piece.angleCuts.map { $0.anchorCornerIndex })
+        var disabledCorners = Set(piece.angleCuts.map { $0.anchorCornerIndex })
+        // Also block corners occupied by curved edges — angles on curved corners cause distortions
+        let basePoints = ShapePathBuilder.cornerPoints(for: piece, includeAngles: false)
+        let activeCurves = ShapePathBuilder.validCurves(for: piece)
+        if !activeCurves.isEmpty {
+            let curveBlocked = ShapePathBuilder.cornerIndicesOnCurvedEdges(
+                points: basePoints, shape: piece.shape, curves: activeCurves, requireConvex: false)
+            disabledCorners = disabledCorners.union(curveBlocked)
+        }
         return HStack(spacing: 12) {
             cornerPickerField(title: "Corner", selection: $angleCut.anchorCornerIndex, labels: labels, dimmedIndices: disabledCorners)
         }
@@ -3036,6 +3069,14 @@ private struct AngleCutRow: View {
         }
     }
 
+    private func removeCornerRadius(at cornerIndex: Int) {
+        let matching = piece.cornerRadii.filter { $0.cornerIndex == cornerIndex }
+        guard !matching.isEmpty else { return }
+        piece.cornerRadii.removeAll { $0.cornerIndex == cornerIndex }
+        for radius in matching {
+            modelContext.delete(radius)
+        }
+    }
 }
 
 private struct CornerRadiusRow: View {
@@ -3049,6 +3090,12 @@ private struct CornerRadiusRow: View {
             deleteRow
             cornerRow(labels: labels)
             radiusRow
+        }
+        .onChange(of: cornerRadius.cornerIndex) { _, newIndex in
+            // Mutual exclusion: remove any angle cut on the newly selected corner
+            if newIndex >= 0 {
+                removeAngle(at: newIndex)
+            }
         }
         .padding(10)
         .background(Theme.surface)
@@ -3070,49 +3117,17 @@ private struct CornerRadiusRow: View {
     }
 
     private func cornerRow(labels: [String]) -> some View {
-        let curveOccupied = curveOccupiedBaseCorners()
-        let disabledCorners = curveOccupied
+        // Block corners occupied by curved edges — same approach as AngleCutRow
+        let basePoints = ShapePathBuilder.cornerPoints(for: piece, includeAngles: false)
+        let activeCurves = ShapePathBuilder.validCurves(for: piece)
+        var disabledCorners: Set<Int> = []
+        if !activeCurves.isEmpty {
+            disabledCorners = ShapePathBuilder.cornerIndicesOnCurvedEdges(
+                points: basePoints, shape: piece.shape, curves: activeCurves, requireConvex: false)
+        }
         return HStack(spacing: 12) {
             cornerPickerField(title: "Corner", selection: $cornerRadius.cornerIndex, labels: labels, dimmedIndices: disabledCorners)
         }
-    }
-    
-    private func curveOccupiedBaseCorners() -> Set<Int> {
-        // Map polygon indices back to base corner indices
-        let baseCorners = ShapePathBuilder.displayPolygonPointsForLabeling(for: piece, includeAngles: false)
-        let polygonPoints = ShapePathBuilder.displayPolygonPointsForLabeling(for: piece, includeAngles: true)
-        guard !baseCorners.isEmpty, !polygonPoints.isEmpty else { return [] }
-        
-        // Build reverse mapping: polygon index -> base corner index (if it's a base corner)
-        var polygonToBase: [Int: Int] = [:]
-        for (baseIndex, basePoint) in baseCorners.enumerated() {
-            var bestPolygonIndex = 0
-            var bestDistance = CGFloat.greatestFiniteMagnitude
-            for (polygonIndex, polygonPoint) in polygonPoints.enumerated() {
-                let dx = basePoint.x - polygonPoint.x
-                let dy = basePoint.y - polygonPoint.y
-                let distance = dx * dx + dy * dy
-                if distance < bestDistance {
-                    bestDistance = distance
-                    bestPolygonIndex = polygonIndex
-                }
-            }
-            if bestDistance < 0.01 { // Only if it's actually the same point
-                polygonToBase[bestPolygonIndex] = baseIndex
-            }
-        }
-        
-        // Find base corners occupied by curve endpoints
-        var occupied: Set<Int> = []
-        for curve in piece.curvedEdges where curve.hasSpan {
-            if let baseIndex = polygonToBase[curve.startCornerIndex] {
-                occupied.insert(baseIndex)
-            }
-            if let baseIndex = polygonToBase[curve.endCornerIndex] {
-                occupied.insert(baseIndex)
-            }
-        }
-        return occupied
     }
 
     private var radiusRow: some View {
