@@ -510,13 +510,13 @@ struct PieceEditorView: View {
 
     /// Returns all boundary segments not already covered by an existing curve.
     private func unclaimedBoundarySegments() -> [BoundarySegment] {
-        let allSegments = ShapePathBuilder.boundarySegments(for: piece)
+        let allSegments = ShapePathBuilder.boundarySegments(for: piece, includeAngles: false)
         let existingCurves = piece.curvedEdges.filter { $0.radius > 0 }
         guard !existingCurves.isEmpty else { return allSegments }
 
         // Build a set of claimed (edge, segmentIndex) pairs
         var claimed: Set<String> = []
-        let points = ShapePathBuilder.displayPolygonPoints(for: piece, includeAngles: true)
+        let points = ShapePathBuilder.displayPolygonPoints(for: piece, includeAngles: false)
         for curve in existingCurves {
             let edge = curve.edge
             let curveSegments = allSegments.filter { $0.edge == edge }
@@ -608,7 +608,8 @@ struct PieceEditorView: View {
             let p1 = CGFloat(max(c.startEdgeProgress, c.endEdgeProgress))
             if p1 - p0 > 0.001 { return (p0, p1) }
         }
-        let points = ShapePathBuilder.displayPolygonPoints(for: piece, includeAngles: true)
+        // Use angle-free polygon: curve corner indices are in angle-free space.
+        let points = ShapePathBuilder.displayPolygonPoints(for: piece, includeAngles: false)
         if c.usesCornerIndices &&
            c.startCornerIndex != c.endCornerIndex &&
            c.startCornerIndex >= 0 && c.startCornerIndex < points.count &&
@@ -669,7 +670,7 @@ struct PieceEditorView: View {
         // Without this, the new curve enters validCurves with hasSpan==false
         // and usesEdgeProgress==false, causing it to be treated as a full-edge
         // curve that knocks out other curves on the same edge.
-        let points = ShapePathBuilder.displayPolygonPoints(for: piece, includeAngles: true)
+        let points = ShapePathBuilder.displayPolygonPoints(for: piece, includeAngles: false)
         if defaultSpanStart >= 0 && defaultSpanStart < points.count &&
            defaultSpanEnd >= 0 && defaultSpanEnd < points.count {
             let startPt = points[defaultSpanStart]
@@ -691,7 +692,7 @@ struct PieceEditorView: View {
             curve.endEdgeProgress = Double(ep)
 
             // Also set boundary segment info
-            let segments = ShapePathBuilder.boundarySegments(for: piece)
+            let segments = ShapePathBuilder.boundarySegments(for: piece, includeAngles: false)
             if let startSeg = segments.first(where: { $0.startIndex == defaultSpanStart || $0.endIndex == defaultSpanStart }) {
                 curve.startBoundarySegmentIndex = startSeg.index
                 curve.startBoundaryIsEnd = startSeg.endIndex == defaultSpanStart
@@ -731,12 +732,15 @@ struct PieceEditorView: View {
         let cornerCount = ShapePathBuilder.cornerLabelCount(for: piece)
         guard cornerCount > 0 else { return }
         let usedRadii = Set(piece.cornerRadii.map { $0.cornerIndex })
+        // Block corners occupied by curved edges — same detection as the corner picker.
+        // Use requireConvex: false to block ALL corners on curved edges (including
+        // concave notch vertices), matching the picker and addAngle behavior.
+        let labelingPoints = ShapePathBuilder.displayPolygonPointsForLabeling(for: piece, includeAngles: false)
+        let activeCurves = ShapePathBuilder.validCurves(for: piece)
         var curveBlocked: Set<Int> = []
-        let baseCount = ShapePathBuilder.pieceCornerCount(for: piece)
-        if baseCount > 0 {
-            for index in 0..<baseCount where cornerIsOnCurvedEdge(index, requireConvex: true) {
-                curveBlocked.insert(index)
-            }
+        if !activeCurves.isEmpty {
+            curveBlocked = ShapePathBuilder.cornerIndicesOnCurvedEdges(
+                points: labelingPoints, shape: piece.shape, curves: activeCurves, requireConvex: false)
         }
         let avoid = usedRadii.union(curveBlocked)
         
@@ -763,10 +767,11 @@ struct PieceEditorView: View {
             index = nextAvailableCornerIndex(count: cornerCount, avoiding: avoid) ?? -1
         }
         
-        if index >= 0 {
-            removeAngle(at: index)
-        }
-        
+        // Don't create a corner radius if no valid corner is available
+        guard index >= 0 else { return }
+
+        removeAngle(at: index)
+
         let cornerRadius = CornerRadius(cornerIndex: index, radius: radiusValue, isInside: isInside)
         cornerRadius.piece = piece
         modelContext.insert(cornerRadius)
@@ -788,28 +793,30 @@ struct PieceEditorView: View {
         let cornerCount = ShapePathBuilder.cornerLabelCount(for: piece)
         guard cornerCount > 0 else { return }
         let usedAngles = Set(piece.angleCuts.map { $0.anchorCornerIndex })
-        // Also block corners occupied by curved edges — angles on curved corners cause distortions
+        // Block corners occupied by curved edges — angles on curved corners cause distortions.
+        // Use the same labeling-polygon-based detection as the corner picker so results match.
+        let labelingPoints = ShapePathBuilder.displayPolygonPointsForLabeling(for: piece, includeAngles: false)
+        let activeCurves = ShapePathBuilder.validCurves(for: piece)
         var curveBlocked = Set<Int>()
-        let baseCount = ShapePathBuilder.pieceCornerCount(for: piece)
-        if baseCount > 0 {
-            for index in 0..<baseCount where cornerIsOnCurvedEdge(index, requireConvex: false) {
-                curveBlocked.insert(index)
-            }
+        if !activeCurves.isEmpty {
+            curveBlocked = ShapePathBuilder.cornerIndicesOnCurvedEdges(
+                points: labelingPoints, shape: piece.shape, curves: activeCurves, requireConvex: false)
         }
         let avoid = usedAngles.union(curveBlocked)
-        
-        // Use default corner if set, otherwise find next available
+
+        // Find next available non-curved, non-used corner
         var defaultCorner: Int = -1
         if piece.angleCuts.isEmpty, !avoid.contains(0) {
             defaultCorner = 0
         } else {
             defaultCorner = nextAvailableCornerIndex(count: cornerCount, avoiding: avoid) ?? -1
         }
-        
+
+        // Don't create an angle if no valid corner is available
+        guard defaultCorner >= 0 else { return }
+
         // Remove any existing corner radius on this corner (mutual exclusion)
-        if defaultCorner >= 0 {
-            removeCornerRadius(at: defaultCorner)
-        }
+        removeCornerRadius(at: defaultCorner)
 
         let angle = AngleCut(anchorCornerIndex: defaultCorner)
 
@@ -819,7 +826,7 @@ struct PieceEditorView: View {
             angle.secondaryOffset = defaults.defaultAngleEdge2
             angle.angleDegrees = defaults.defaultAngleDegrees
         }
-        
+
         angle.piece = piece
         modelContext.insert(angle)
         openAngleIds = [angle.id]
@@ -862,8 +869,8 @@ struct PieceEditorView: View {
     }
 
     private func defaultSpanForEdge(edge: EdgePosition) -> (start: Int, end: Int)? {
-        let points = ShapePathBuilder.displayPolygonPoints(for: piece, includeAngles: true)
-        let segments = ShapePathBuilder.boundarySegments(for: piece)
+        let points = ShapePathBuilder.displayPolygonPoints(for: piece, includeAngles: false)
+        let segments = ShapePathBuilder.boundarySegments(for: piece, includeAngles: false)
         let edgeSegments = segments.filter { $0.edge == edge }
         guard !edgeSegments.isEmpty, !points.isEmpty else { return nil }
 
@@ -1197,7 +1204,8 @@ struct PieceEditorView: View {
 
         let pieceSize = ShapePathBuilder.pieceSize(for: piece)
         for cutout in piece.cutouts where cutout.isPlaced {
-            let isNotchOrBoundary = cutout.isNotch || ShapePathBuilder.cutoutTouchesBoundary(cutout: cutout, size: pieceSize, shape: piece.shape)
+            // Use dynamic evaluation instead of stale isNotch flag
+            let isNotchOrBoundary = ShapePathBuilder.isCurrentlyNotch(cutout: cutout, piece: piece)
             for edge in edgesForCutout(cutout) {
                 // Use different logic for notches vs interior cutouts
                 let shouldApply: Bool
@@ -2283,6 +2291,12 @@ private struct CurveRow: View {
         .onChange(of: piece.cutouts.count) { _, _ in
             normalizeSpanSelection()
         }
+        .onChange(of: piece.curvedEdges.count) { _, _ in
+            normalizeSpanSelection()
+        }
+        .onChange(of: piece.angleCuts.count) { _, _ in
+            normalizeSpanSelection()
+        }
         .onChange(of: curve.startCornerIndex) { _, _ in
             updateEdgeFromSpan()
         }
@@ -2295,9 +2309,10 @@ private struct CurveRow: View {
     }
 
     private var spanPickers: some View {
-        let labels = spanCornerLabels()
-        let labelToPolygon = spanCornerIndexMap()
-        let polygonToLabel = spanPolygonToLabelMap(from: labelToPolygon)
+        let data = spanCornerData()
+        let labels = data.map(\.label)
+        let labelToPolygon = data.map(\.polygonIndex)
+        let polygonToLabel = Dictionary(data.enumerated().map { ($1.polygonIndex, $0) }, uniquingKeysWith: { first, _ in first })
         return VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 12) {
                 cornerPickerField(
@@ -2339,16 +2354,52 @@ private struct CurveRow: View {
         }
     }
 
-    private func spanCornerLabels() -> [String] {
-        let polygonPoints = ShapePathBuilder.displayPolygonPoints(for: piece, includeAngles: true)
-        let baseCorners = ShapePathBuilder.displayPolygonPointsForLabeling(for: piece, includeAngles: false)
-        
-        // Map each polygon point to its nearest base corner label
-        return polygonPoints.indices.map { polygonIndex in
-            let point = polygonPoints[polygonIndex]
-            let nearestBaseIndex = nearestCornerIndex(for: point, in: baseCorners)
-            return cornerLabel(for: nearestBaseIndex)
+    /// Builds the unified list of (label, polygonIndex) pairs for the curve
+    /// start/end pickers.
+    ///
+    /// Labels are derived from the **labeling polygon's** boundary segment
+    /// endpoints (`boundarySegmentsForLabeling`).  Each endpoint index IS a
+    /// labeling-polygon vertex index, so the label is unique by construction
+    /// and always matches the corner letters drawn on the piece — even when
+    /// curves reclassify notches and the labeling polygon shrinks or grows.
+    ///
+    /// The curve storage system (`validCurves`, `edgeProgress`, etc.) works in
+    /// **straight-edge polygon** indices, so each labeling position is mapped
+    /// back to the nearest straight-edge vertex for the returned `polygonIndex`.
+    private func spanCornerData() -> [(label: String, polygonIndex: Int)] {
+        let polygonPoints = ShapePathBuilder.displayPolygonPoints(for: piece, includeAngles: false)
+        // Use angle-free labeling polygon for curve pickers — angle cut vertices
+        // are not valid curve start/end points and would map to the same base corner,
+        // producing duplicate or misleading picker options.
+        let labelingPoints = ShapePathBuilder.displayPolygonPointsForLabeling(for: piece, includeAngles: false)
+        let labelingSegments = ShapePathBuilder.boundarySegmentsForLabeling(for: piece, includeAngles: false)
+
+        // Collect unique labeling-polygon endpoint indices from boundary segments
+        var labelIndexSet = Set<Int>()
+        for seg in labelingSegments {
+            labelIndexSet.insert(seg.startIndex)
+            labelIndexSet.insert(seg.endIndex)
         }
+        let labelIndices = labelIndexSet.sorted()
+
+        // Build (label, polygonIndex) pairs.
+        // Labels come directly from labeling polygon indices (unique by construction).
+        // Polygon indices are found by nearest-vertex lookup into the straight-edge
+        // polygon (needed by validCurves, edgeProgress, etc.).
+        var result: [(label: String, polygonIndex: Int)] = []
+        var usedPolygonIndices = Set<Int>()
+        for labelIndex in labelIndices {
+            guard labelIndex >= 0, labelIndex < labelingPoints.count else { continue }
+            let label = cornerLabel(for: labelIndex)
+            let position = labelingPoints[labelIndex]
+            // Find nearest straight-edge polygon index for this labeling position
+            let polyIndex = nearestCornerIndex(for: position, in: polygonPoints)
+            // Skip if this straight-edge index was already claimed (safety dedup)
+            if usedPolygonIndices.contains(polyIndex) { continue }
+            usedPolygonIndices.insert(polyIndex)
+            result.append((label: label, polygonIndex: polyIndex))
+        }
+        return result
     }
     
     private func nearestCornerIndex(for point: CGPoint, in corners: [CGPoint]) -> Int {
@@ -2380,17 +2431,15 @@ private struct CurveRow: View {
     }
 
     private var polygonPointCount: Int {
-        ShapePathBuilder.displayPolygonPoints(for: piece, includeAngles: true).count
+        ShapePathBuilder.displayPolygonPoints(for: piece, includeAngles: false).count
     }
 
     private func normalizeSpanSelection() {
-        // Use the stable polygon (displayPolygonPoints) instead of the curve-aware
-        // labeling polygon. This ensures corner indices are consistent with
-        // validCurves() and syncBoundaryEndpoint(), both of which use
-        // displayPolygonPoints. Using displayPolygonPointsForLabeling here causes
-        // a mismatch when curves reclassify cutouts, shifting indices and producing
-        // wrong edge progress values that trigger false overlap detection.
-        let points = ShapePathBuilder.displayPolygonPoints(for: piece, includeAngles: true)
+        // Use the angle-free polygon. Curves are applied before angle cuts in the
+        // curve-first pipeline, so curve corner indices must live in angle-free space.
+        // Including angle vertices shifts polygon indices and causes normalisation to
+        // resolve curve endpoints to angle-cut vertices, corrupting edge assignment.
+        let points = ShapePathBuilder.displayPolygonPoints(for: piece, includeAngles: false)
         let count = points.count
         if count <= 1 {
             curve.startCornerIndex = 0
@@ -2409,7 +2458,7 @@ private struct CurveRow: View {
                 curve.endCornerIndex = endIndex
             }
         } else if curve.usesBoundaryEndpoints {
-            let segments = ShapePathBuilder.boundarySegments(for: piece)
+            let segments = ShapePathBuilder.boundarySegments(for: piece, includeAngles: false)
             if let startSegment = segments.first(where: { $0.edge == curve.edge && $0.index == curve.startBoundarySegmentIndex }) {
                 curve.startCornerIndex = curve.startBoundaryIsEnd ? startSegment.endIndex : startSegment.startIndex
             }
@@ -2428,20 +2477,13 @@ private struct CurveRow: View {
                 curve.endCornerIndex = min(1, count - 1)
             }
         }
-        let labelToPolygon = spanCornerIndexMap()
-        let polygonToLabel = spanPolygonToLabelMap(from: labelToPolygon)
-        syncBoundaryEndpoints(polygonToLabel: polygonToLabel)
+        syncBoundaryEndpoint(for: curve.startCornerIndex, isStart: true)
+        syncBoundaryEndpoint(for: curve.endCornerIndex, isStart: false)
         updateEdgeFromSpan()
     }
 
-    private func syncBoundaryEndpoints(polygonToLabel: [Int: Int]) {
-        _ = polygonToLabel
-        syncBoundaryEndpoint(for: curve.startCornerIndex, isStart: true)
-        syncBoundaryEndpoint(for: curve.endCornerIndex, isStart: false)
-    }
-
     private func inferredEdgeFromSpan() -> EdgePosition? {
-        let points = ShapePathBuilder.displayPolygonPoints(for: piece, includeAngles: true)
+        let points = ShapePathBuilder.displayPolygonPoints(for: piece, includeAngles: false)
         guard points.count > 1 else { return nil }
         let baseBounds = piece.shape == .rightTriangle ? CGRect(origin: .zero, size: ShapePathBuilder.displaySize(for: piece)) : nil
         let startIndex = curve.startCornerIndex
@@ -2489,7 +2531,7 @@ private struct CurveRow: View {
     }
 
     private func defaultSpanForEdge(points: [CGPoint]) -> (start: Int, end: Int)? {
-        let segments = ShapePathBuilder.boundarySegments(for: piece)
+        let segments = ShapePathBuilder.boundarySegments(for: piece, includeAngles: false)
         let edgeSegments = segments.filter { $0.edge == curve.edge }
         guard !edgeSegments.isEmpty else { return nil }
 
@@ -2548,7 +2590,7 @@ private struct CurveRow: View {
     }
 
     private func spanPathIsValid(edge: EdgePosition) -> Bool {
-        let points = ShapePathBuilder.displayPolygonPoints(for: piece, includeAngles: true)
+        let points = ShapePathBuilder.displayPolygonPoints(for: piece, includeAngles: false)
         let bounds = bounds(for: points)
         let hypotenuseBounds = piece.shape == .rightTriangle ? CGRect(origin: .zero, size: ShapePathBuilder.displaySize(for: piece)) : bounds
         return ShapePathBuilder.spanPathIsValid(
@@ -2587,8 +2629,8 @@ private struct CurveRow: View {
             let p1 = CGFloat(max(c.startEdgeProgress, c.endEdgeProgress))
             if p1 - p0 > 0.001 { return (p0, p1) }
         }
-        // Compute from corner indices on the fly
-        let points = ShapePathBuilder.displayPolygonPoints(for: piece, includeAngles: true)
+        // Compute from corner indices on the fly (angle-free polygon space)
+        let points = ShapePathBuilder.displayPolygonPoints(for: piece, includeAngles: false)
         if c.usesCornerIndices &&
            c.startCornerIndex != c.endCornerIndex &&
            c.startCornerIndex >= 0 && c.startCornerIndex < points.count &&
@@ -2683,35 +2725,6 @@ private struct CurveRow: View {
         }
     }
 
-    private func spanCornerPolygonIndices() -> [Int] {
-        // Only include polygon indices that are boundary segment endpoints.
-        // This excludes interior notch teeth and other vertices that don't
-        // correspond to labeled corners, preventing duplicate labels in the picker.
-        let segments = ShapePathBuilder.boundarySegments(for: piece)
-        var indexSet = Set<Int>()
-        for seg in segments {
-            indexSet.insert(seg.startIndex)
-            indexSet.insert(seg.endIndex)
-        }
-        return indexSet.sorted()
-    }
-
-    private func spanCornerPoints() -> [CGPoint] {
-        let polygonPoints = ShapePathBuilder.displayPolygonPoints(for: piece, includeAngles: true)
-        return spanCornerPolygonIndices().map { polygonPoints[$0] }
-    }
-
-    private func spanCornerIndexMap() -> [Int] {
-        spanCornerPolygonIndices()
-    }
-
-    private func spanPolygonToLabelMap(from labelToPolygon: [Int]) -> [Int: Int] {
-        var map: [Int: Int] = [:]
-        for (labelIndex, polygonIndex) in labelToPolygon.enumerated() {
-            map[polygonIndex] = labelIndex
-        }
-        return map
-    }
 
 
     private func spanBinding(
@@ -2722,7 +2735,30 @@ private struct CurveRow: View {
     ) -> Binding<Int> {
         Binding(
             get: {
-                polygonToLabel[polygonIndex.wrappedValue] ?? 0
+                if let labelIdx = polygonToLabel[polygonIndex.wrappedValue] {
+                    return labelIdx
+                }
+                // Stored polygon index not in current labeling options
+                // (can happen transiently when curves change the labeling
+                // polygon before normalizeSpanSelection re-resolves).
+                // Fall back to the nearest available option by position.
+                let points = ShapePathBuilder.displayPolygonPoints(for: piece, includeAngles: false)
+                let stored = polygonIndex.wrappedValue
+                guard stored >= 0, stored < points.count else { return 0 }
+                let pos = points[stored]
+                var bestLabel = 0
+                var bestDist = CGFloat.greatestFiniteMagnitude
+                for (polyIdx, lblIdx) in polygonToLabel {
+                    guard polyIdx >= 0, polyIdx < points.count else { continue }
+                    let dx = points[polyIdx].x - pos.x
+                    let dy = points[polyIdx].y - pos.y
+                    let d = dx * dx + dy * dy
+                    if d < bestDist {
+                        bestDist = d
+                        bestLabel = lblIdx
+                    }
+                }
+                return bestLabel
             },
             set: { newLabelIndex in
                 if newLabelIndex >= 0 && newLabelIndex < labelToPolygon.count {
@@ -2747,7 +2783,7 @@ private struct CurveRow: View {
         } else {
             curve.endEdgeProgress = Double(progress)
         }
-        let segments = ShapePathBuilder.boundarySegments(for: piece)
+        let segments = ShapePathBuilder.boundarySegments(for: piece, includeAngles: false)
         if let segment = segments.first(where: { $0.startIndex == polygonIndex || $0.endIndex == polygonIndex }) {
             let isEnd = segment.endIndex == polygonIndex
             if isStart {
@@ -2769,17 +2805,17 @@ private struct CurveRow: View {
     }
 
     private func edgeProgress(for polygonIndex: Int) -> CGFloat? {
-        let points = ShapePathBuilder.displayPolygonPoints(for: piece, includeAngles: true)
+        let points = ShapePathBuilder.displayPolygonPoints(for: piece, includeAngles: false)
         guard polygonIndex >= 0 && polygonIndex < points.count else { return nil }
         let bounds = bounds(for: points)
         return ShapePathBuilder.edgeProgress(for: points[polygonIndex], edge: curve.edge, shape: piece.shape, bounds: bounds)
     }
 
     private func resolveCornerIndex(for progress: Double) -> Int? {
-        let points = ShapePathBuilder.displayPolygonPoints(for: piece, includeAngles: true)
+        let points = ShapePathBuilder.displayPolygonPoints(for: piece, includeAngles: false)
         guard !points.isEmpty else { return nil }
         let bounds = bounds(for: points)
-        let segments = ShapePathBuilder.boundarySegments(for: piece).filter { $0.edge == curve.edge }
+        let segments = ShapePathBuilder.boundarySegments(for: piece, includeAngles: false).filter { $0.edge == curve.edge }
         guard !segments.isEmpty else { return nil }
         var endpoints: [(index: Int, progress: CGFloat)] = []
         endpoints.reserveCapacity(segments.count * 2)
@@ -2806,14 +2842,16 @@ private struct CurveRow: View {
 
     private func cornerPickerField(title: String, selection: Binding<Int>, labels: [String], dimmedIndices: Set<Int>) -> some View {
         let options = labels.enumerated().map { (index: $0.offset, label: $0.element) }
+        // Only show selectable (non-dimmed) corners in the picker.
+        // Dimmed corners have curves attached — selecting them causes distortions.
+        let selectableOptions = options.filter { !dimmedIndices.contains($0.index) }
         return VStack(alignment: .leading, spacing: 6) {
             Text(title)
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(Theme.secondaryText)
             Picker(title, selection: selection) {
-                ForEach(options, id: \.index) { option in
-                    let prefix = dimmedIndices.contains(option.index) ? "✓ " : ""
-                    Text(prefix + option.label)
+                ForEach(selectableOptions, id: \.index) { option in
+                    Text(option.label)
                         .tag(option.index)
                 }
             }
@@ -2891,13 +2929,16 @@ private struct AngleCutRow: View {
     }
 
     private func cornerRow(labels: [String]) -> some View {
-        var disabledCorners = Set(piece.angleCuts.map { $0.anchorCornerIndex })
-        // Also block corners occupied by curved edges — angles on curved corners cause distortions
-        let basePoints = ShapePathBuilder.cornerPoints(for: piece, includeAngles: false)
+        var disabledCorners = Set(piece.angleCuts.filter { $0.id != angleCut.id }.map { $0.anchorCornerIndex })
+        // Also block corners occupied by curved edges — angles on curved corners cause distortions.
+        // Must use displayPolygonPointsForLabeling so indices match the picker labels.
+        // cornerPoints uses notchCandidates (non-curve-aware) which diverges from labels
+        // when full-side curves reclassify notches as interior.
+        let labelingPoints = ShapePathBuilder.displayPolygonPointsForLabeling(for: piece, includeAngles: false)
         let activeCurves = ShapePathBuilder.validCurves(for: piece)
         if !activeCurves.isEmpty {
             let curveBlocked = ShapePathBuilder.cornerIndicesOnCurvedEdges(
-                points: basePoints, shape: piece.shape, curves: activeCurves, requireConvex: false)
+                points: labelingPoints, shape: piece.shape, curves: activeCurves, requireConvex: false)
             disabledCorners = disabledCorners.union(curveBlocked)
         }
         return HStack(spacing: 12) {
@@ -3020,15 +3061,15 @@ private struct AngleCutRow: View {
     }
 
     private func cornerPickerField(title: String, selection: Binding<Int>, labels: [String], dimmedIndices: Set<Int>) -> some View {
-        let options: [(Int, String)] = [(-1, "None")] + labels.indices.map { ($0, labels[$0]) }
+        // Only show selectable (non-dimmed) corners. Dimmed corners have curves attached.
+        let options: [(Int, String)] = [(-1, "None")] + labels.indices.filter { !dimmedIndices.contains($0) }.map { ($0, labels[$0]) }
         return VStack(alignment: .leading, spacing: 6) {
             Text(title)
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(Theme.secondaryText)
             Picker(title, selection: selection) {
                 ForEach(options, id: \.0) { option in
-                    let prefix = dimmedIndices.contains(option.0) ? "✓ " : ""
-                    Text(prefix + option.1)
+                    Text(option.1)
                         .tag(option.0)
                 }
             }
@@ -3117,13 +3158,15 @@ private struct CornerRadiusRow: View {
     }
 
     private func cornerRow(labels: [String]) -> some View {
-        // Block corners occupied by curved edges — same approach as AngleCutRow
-        let basePoints = ShapePathBuilder.cornerPoints(for: piece, includeAngles: false)
+        // Block corners used by other radii (exclude current radius so its own corner stays selectable).
+        var disabledCorners = Set(piece.cornerRadii.filter { $0.id != cornerRadius.id }.map { $0.cornerIndex })
+        // Also block corners occupied by curved edges — same approach as AngleCutRow.
+        let labelingPoints = ShapePathBuilder.displayPolygonPointsForLabeling(for: piece, includeAngles: false)
         let activeCurves = ShapePathBuilder.validCurves(for: piece)
-        var disabledCorners: Set<Int> = []
         if !activeCurves.isEmpty {
-            disabledCorners = ShapePathBuilder.cornerIndicesOnCurvedEdges(
-                points: basePoints, shape: piece.shape, curves: activeCurves, requireConvex: false)
+            let curveBlocked = ShapePathBuilder.cornerIndicesOnCurvedEdges(
+                points: labelingPoints, shape: piece.shape, curves: activeCurves, requireConvex: false)
+            disabledCorners = disabledCorners.union(curveBlocked)
         }
         return HStack(spacing: 12) {
             cornerPickerField(title: "Corner", selection: $cornerRadius.cornerIndex, labels: labels, dimmedIndices: disabledCorners)
@@ -3137,15 +3180,15 @@ private struct CornerRadiusRow: View {
     }
 
     private func cornerPickerField(title: String, selection: Binding<Int>, labels: [String], dimmedIndices: Set<Int>) -> some View {
-        let options: [(Int, String)] = [(-1, "None")] + labels.indices.map { ($0, labels[$0]) }
+        // Only show selectable (non-dimmed) corners. Dimmed corners have curves attached.
+        let options: [(Int, String)] = [(-1, "None")] + labels.indices.filter { !dimmedIndices.contains($0) }.map { ($0, labels[$0]) }
         return VStack(alignment: .leading, spacing: 6) {
             Text(title)
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(Theme.secondaryText)
             Picker(title, selection: selection) {
                 ForEach(options, id: \.0) { option in
-                    let prefix = dimmedIndices.contains(option.0) ? "✓ " : ""
-                    Text(prefix + option.1)
+                    Text(option.1)
                         .tag(option.0)
                 }
             }

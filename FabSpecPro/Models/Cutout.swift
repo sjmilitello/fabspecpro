@@ -156,4 +156,5 @@ final class CurvedEdge {
         }
         return false
     }
+
 }

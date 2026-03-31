@@ -1742,7 +1742,8 @@ enum PDFRenderer {
         guard ShapePathBuilder.cutoutOverlapsPiece(cutout: cutout, size: rawSize, shape: shape, curves: []) else {
             return false
         }
-        return cutout.isNotch || ShapePathBuilder.cutoutTouchesBoundary(cutout: cutout, size: rawSize, shape: shape)
+        // Use dynamic geometric evaluation - don't rely on stale isNotch flag
+        return ShapePathBuilder.cutoutTouchesBoundary(cutout: cutout, size: rawSize, shape: shape)
     }
     
     /// Checks if a notch cutout is on the hypotenuse of a right triangle

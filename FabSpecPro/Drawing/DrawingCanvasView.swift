@@ -94,6 +94,7 @@ struct DrawingCanvasView: View {
                 if !isReadOnly {
                     EdgeTapGestureOverlay(
                         metrics: metrics,
+                        piece: piece,
                         shape: piece.shape,
                         curves: piece.curvedEdges,
                         cutouts: piece.cutouts,
@@ -335,7 +336,17 @@ struct DrawingCanvasView: View {
         let baseCenter = CGPoint(x: (baseBounds.minX + baseBounds.maxX) / 2, y: (baseBounds.minY + baseBounds.maxY) / 2)
         let isPieceClockwise = polygonIsClockwise(pieceCorners)
 
+        // Track drawn positions to skip near-duplicate vertices that
+        // Path.subtracting can produce at curve/line intersections.
+        var drawnPositions: [CGPoint] = []
+        let labelDupTolerance: CGFloat = 1.0
+
         for (index, point) in pieceCorners.enumerated() {
+            // Skip if a label was already drawn at this position
+            if drawnPositions.contains(where: { abs($0.x - point.x) < labelDupTolerance && abs($0.y - point.y) < labelDupTolerance }) {
+                continue
+            }
+            drawnPositions.append(point)
             let label = Text(cornerLabel(for: index))
                 .font(.system(size: labelFontSize, weight: .semibold))
                 .foregroundStyle(Theme.secondaryText)
@@ -414,17 +425,18 @@ struct DrawingCanvasView: View {
             context.draw(label, at: displayPoint, anchor: .center)
         }
 
-        for entry in ShapePathBuilder.cutoutCornerRanges(for: piece) {
+        let interiorRanges = ShapePathBuilder.cutoutCornerRanges(for: piece)
+        for entry in interiorRanges {
             let displayCutout = rotatedCutout(entry.cutout)
             let corners = cutoutCornerPoints(for: displayCutout)
             let bounds = bounds(for: corners)
             let center = CGPoint(x: (bounds.minX + bounds.maxX) / 2, y: (bounds.minY + bounds.maxY) / 2)
-            _ = polygonIsClockwise(corners)
             for (localIndex, point) in corners.enumerated() {
-                // Skip corners that are outside the piece boundary (including curves)
-                if !pointIsInsidePiecePath(point) {
-                    continue
-                }
+                // interiorCutoutsCurveAware guarantees all corners are inside the
+                // piece boundary via cutoutFullyInsideBoundary. No pointIsInsidePiecePath
+                // check needed — that check used path(for: piece) which includes
+                // Path.subtracting for notch clips, and its numerical artifacts can cause
+                // cgPath.contains to return false for valid interior points.
                 let labelIndex = entry.range.lowerBound + localIndex
                 let label = Text(cornerLabel(for: labelIndex))
                     .font(.system(size: labelFontSize, weight: .semibold))
@@ -712,7 +724,9 @@ struct DrawingCanvasView: View {
     }
     
     private func cutoutCornerPoints(for cutout: Cutout) -> [CGPoint] {
-        let displaySize = ShapePathBuilder.pieceSize(for: piece)
+        // rotatedCutout already swaps center and dimensions to display space,
+        // so pass displaySize (not raw pieceSize) for correct rotation angles.
+        let displaySize = ShapePathBuilder.displaySize(for: piece)
         return GeometryHelpers.cutoutCornerPoints(cutout: cutout, size: displaySize, shape: piece.shape)
     }
 
@@ -2736,6 +2750,7 @@ struct EdgeTapTarget {
 
 struct EdgeTapGestureOverlay: View {
     let metrics: DrawingMetrics
+    let piece: Piece
     let shape: ShapeKind
     let curves: [CurvedEdge]
     let cutouts: [Cutout]
@@ -2808,7 +2823,8 @@ private extension EdgeTapGestureOverlay {
         var best: (UUID, EdgePosition, CGFloat)?
 
         for cutout in cutouts where cutout.isPlaced {
-            if cutout.isNotch || (cutout.kind != .circle && ShapePathBuilder.cutoutTouchesBoundary(cutout: cutout, size: metrics.pieceSize, shape: shape)) {
+            // Use dynamic evaluation instead of stale isNotch flag
+            if ShapePathBuilder.isCurrentlyNotch(cutout: cutout, piece: piece) {
                 continue
             }
             let displayCutout = rotatedCutout(cutout)
@@ -2861,9 +2877,8 @@ private extension EdgeTapGestureOverlay {
         var best: (UUID, EdgePosition, CGFloat)?
 
         for cutout in cutouts where cutout.isPlaced {
-            // Only process notches and boundary-touching cutouts
-            let isNotchOrBoundary = cutout.isNotch || (cutout.kind != .circle && ShapePathBuilder.cutoutTouchesBoundary(cutout: cutout, size: metrics.pieceSize, shape: shape))
-            guard isNotchOrBoundary else { continue }
+            // Only process notches and boundary-touching cutouts - use dynamic evaluation
+            guard ShapePathBuilder.isCurrentlyNotch(cutout: cutout, piece: piece) else { continue }
             guard cutout.kind != .circle else { continue }
             
             let displayCutout = rotatedCutout(cutout)
@@ -3221,7 +3236,7 @@ private extension EdgeTapGestureOverlay {
         let pieceWidth = metrics.pieceSize.width * metrics.scale
         let pieceHeight = metrics.pieceSize.height * metrics.scale
 
-        for cutout in cutouts where (cutout.isNotch || ShapePathBuilder.cutoutTouchesBoundary(cutout: cutout, size: metrics.pieceSize, shape: shape)) && cutout.isPlaced {
+        for cutout in cutouts where cutout.isPlaced && ShapePathBuilder.isCurrentlyNotch(cutout: cutout, piece: piece) {
             let displayCutout = rotatedCutout(cutout)
             let corners = GeometryHelpers.cutoutCornerPoints(cutout: displayCutout, size: metrics.pieceSize, shape: shape)
             let bounds = GeometryHelpers.bounds(for: corners)
@@ -3304,7 +3319,8 @@ private func isEffectiveNotch(_ cutout: Cutout, piece: Piece, pieceSize: CGSize)
     guard ShapePathBuilder.cutoutOverlapsPiece(cutout: cutout, size: pieceSize, shape: piece.shape, curves: []) else {
         return false
     }
-    return cutout.isNotch || ShapePathBuilder.cutoutTouchesBoundary(cutout: cutout, size: pieceSize, shape: piece.shape)
+    // Use dynamic geometric evaluation - don't rely on stale isNotch flag
+    return ShapePathBuilder.cutoutTouchesBoundary(cutout: cutout, size: pieceSize, shape: piece.shape)
 }
 
 private func isInteriorNotchEdge(cutout: Cutout, edge: EdgePosition, pieceSize: CGSize, shape: ShapeKind) -> Bool {
