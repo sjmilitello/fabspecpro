@@ -188,6 +188,8 @@ enum PDFRenderer {
                     if yOffset + pd.layout.blockHeight > pageSize.height - 60 {
                         pageCount += 1
                         yOffset = 140
+                        // Account for continuation header on new page
+                        yOffset += headerHeight
                     }
                     yOffset += pd.layout.blockHeight + blockSpacing
                 }
@@ -348,6 +350,15 @@ enum PDFRenderer {
                         #endif
                         state.pageIndex += 1
                         beginPage()
+                        
+                        // Repeat the material/thickness header on continuation pages
+                        drawSectionHeader(
+                            in: context,
+                            title: "\(materialKey) - \(thicknessKey)",
+                            origin: CGPoint(x: leftMargin, y: state.yOffset + 4),
+                            maxWidth: pageSize.width - (leftMargin * 2)
+                        )
+                        state.yOffset += headerHeight
                     }
 
                     let xOffset: CGFloat = leftMargin
@@ -865,7 +876,10 @@ enum PDFRenderer {
         let expandedBottomPt = expanded.maxY * resolvedScale
         let topEdgeLabelPt = edgeLabelYPoint(piece: piece, size: size, scale: resolvedScale, expandedTop: expandedTopPt, expandedBottom: expandedBottomPt, isTop: true)
         let bottomEdgeLabelPt = edgeLabelYPoint(piece: piece, size: size, scale: resolvedScale, expandedTop: expandedTopPt, expandedBottom: expandedBottomPt, isTop: false)
-        let topMeasurementY0 = topEdgeLabelPt - topMeasurementToEdgeGap - measurementHeight
+        // Ensure minimum gap above the shape for measurement labels, even when no edge labels exist
+        let minTopEdgeLabelOffset: CGFloat = -12
+        let adjustedTopEdgeLabelPt = min(topEdgeLabelPt, expandedTopPt + minTopEdgeLabelOffset)
+        let topMeasurementY0 = adjustedTopEdgeLabelPt - topMeasurementToEdgeGap - measurementHeight
         let pieceHeaderY0 = topMeasurementY0 - pieceHeaderToTopMeasurementGap - pieceHeaderHeight
         let pieceHeaderLineY0 = pieceHeaderY0 - headerGapToPieceHeader - headerTextHeight
         let requiredTopPadding = minTopMargin - pieceHeaderLineY0
@@ -2950,6 +2964,30 @@ enum PDFRenderer {
                 } else {
                     drawText(lengthLabel, in: context, frame: CGRect(x: offsetX + (size.width * scale / 2) - 30, y: topLabelFrameY, width: 60, height: 12), font: .systemFont(ofSize: 9, weight: .semibold), alignment: .center)
                 }
+            }
+            
+            // Show right side measurement when it differs from left (e.g., angle cuts)
+            // Match DrawingCanvasView behavior
+            let rightSegmentCount = segmentCounts[.right] ?? 1
+            let fullHeight = size.height
+            if rightSegmentCount == 1, let rightMetric = sideMetrics[.right], abs(rightMetric.length - fullHeight) > 0.01 {
+                let widthText = "\(MeasurementParser.formatInches(Double(rightMetric.length)))\""
+                let centerY = offsetY + rightMetric.center.y * scale
+                let rightLabelCenterX = right + widthLabelPadding
+                let rightLabelFrameX = rightLabelCenterX - labelWidth / 2
+                drawText(widthText, in: context, frame: CGRect(x: rightLabelFrameX, y: centerY - 6, width: labelWidth, height: 12), font: .systemFont(ofSize: 9, weight: .semibold), alignment: .center)
+            }
+            
+            // Show bottom side measurement when it differs from top (e.g., angle cuts)
+            let bottomSegmentCount = segmentCounts[.bottom] ?? 1
+            let fullWidth = size.width
+            if bottomSegmentCount == 1, let bottomMetric = sideMetrics[.bottom], abs(bottomMetric.length - fullWidth) > 0.01 {
+                let lengthText = "\(MeasurementParser.formatInches(Double(bottomMetric.length)))\""
+                let centerX = offsetX + bottomMetric.center.x * scale
+                let bottom = offsetY + expanded.maxY * scale
+                let bottomLabelCenterY = bottom + lengthLabelPadding
+                let bottomLabelFrameY = bottomLabelCenterY - 6
+                drawText(lengthText, in: context, frame: CGRect(x: centerX - 30, y: bottomLabelFrameY, width: 60, height: 12), font: .systemFont(ofSize: 9, weight: .semibold), alignment: .center)
             }
 
 
