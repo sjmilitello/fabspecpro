@@ -43,7 +43,7 @@ struct PieceEditorView: View {
             Theme.background.ignoresSafeArea()
             VStack(spacing: 0) {
                 // Drawing section pinned to top
-                collapsibleSection(title: "Drawing", isOpen: $isDrawingOpen) {
+                collapsibleSection(title: "Drawing (\(piece.name.isEmpty ? "Untitled" : piece.name))", isOpen: $isDrawingOpen) {
                     VStack(spacing: 12) {
                         DrawingCanvasView(piece: piece, selectedTreatment: selectedTreatment)
                             .frame(height: 320)
@@ -58,7 +58,7 @@ struct PieceEditorView: View {
                 // Scrollable content below
                 ScrollView {
                     VStack(alignment: .leading, spacing: 18) {
-                        collapsibleSection(title: "Material", isOpen: $isMaterialOpen, onClose: saveMaterialToLibraryIfNeeded) {
+                        collapsibleSection(title: "Material (\(piece.materialName.isEmpty ? "None" : piece.materialName))", isOpen: $isMaterialOpen, onClose: saveMaterialToLibraryIfNeeded) {
                             VStack(spacing: 12) {
                                 TextField("Piece name", text: $piece.name, prompt: Text("Piece name").foregroundStyle(Theme.secondaryText))
                                     .foregroundStyle(Theme.primaryText)
@@ -96,7 +96,7 @@ struct PieceEditorView: View {
                             }
                         }
 
-                        collapsibleSection(title: "Shape", isOpen: $isShapeOpen) {
+                        collapsibleSection(title: "Shape (\(shapeHeaderLabel))", isOpen: $isShapeOpen) {
                             VStack(spacing: 12) {
                                 shapeButtons
                                 dimensionFields
@@ -213,6 +213,19 @@ struct PieceEditorView: View {
     }
     #endif
 
+    private var shapeHeaderLabel: String {
+        let shapeName: String
+        switch piece.shape {
+        case .rectangle: shapeName = "Rectangle"
+        case .rightTriangle: shapeName = "Triangle"
+        case .circle: shapeName = "Circle"
+        case .quarterCircle: shapeName = "Quarter Circle"
+        }
+        let widthStr = piece.widthText.isEmpty ? "0" : piece.widthText
+        let heightStr = piece.heightText.isEmpty ? "0" : piece.heightText
+        return "\(shapeName) \(widthStr)\" x \(heightStr)\""
+    }
+
     private var shapeButtons: some View {
         let availableShapes = ShapeKind.allCases.filter { $0 != .quarterCircle }
         return HStack(spacing: 10) {
@@ -303,17 +316,17 @@ struct PieceEditorView: View {
                         let cutoutCount = displayCutouts.count
                         ForEach(displayCutouts.indices, id: \.self) { index in
                             let cutout = displayCutouts[index]
-                            collapsibleItem(
-                                title: "Cutout \(cutoutCount - index)",
+                            CutoutCollapsibleItem(
+                                cutout: cutout,
+                                piece: piece,
+                                cutoutNumber: cutoutCount - index,
                                 isOpen: Binding(
                                     get: { openCutoutIds.contains(cutout.id) },
                                     set: { isOpen in
                                         if isOpen { openCutoutIds.insert(cutout.id) } else { openCutoutIds.remove(cutout.id) }
                                     }
                                 )
-                            ) {
-                                CutoutRow(cutout: cutout, piece: piece)
-                            }
+                            )
                         }
                     }
                 }
@@ -326,11 +339,12 @@ struct PieceEditorView: View {
                             }
                             return lhs.cornerIndex > rhs.cornerIndex
                         }
+                        let radiusLabels = cornerLabelsForPiece()
                         ForEach(displayCornerRadii.indices, id: \.self) { index in
                             let cornerRadius = displayCornerRadii[index]
-                            let labelNumber = cornerRadius.cornerIndex >= 0 ? (cornerRadius.cornerIndex + 1) : (displayCornerRadii.count - index)
+                            let cornerLetter = cornerRadius.cornerIndex >= 0 && cornerRadius.cornerIndex < radiusLabels.count ? radiusLabels[cornerRadius.cornerIndex] : "?"
                             collapsibleItem(
-                                title: "Corner \(labelNumber)",
+                                title: "Corner Radius \(index + 1) (\(cornerLetter))",
                                 isOpen: Binding(
                                     get: { openCornerRadiusIds.contains(cornerRadius.id) },
                                     set: { isOpen in
@@ -352,11 +366,12 @@ struct PieceEditorView: View {
                             }
                             return lhs.anchorCornerIndex > rhs.anchorCornerIndex
                         }
+                        let angleLabels = cornerLabelsForPiece()
                         ForEach(displayAngles.indices, id: \.self) { index in
                             let angle = displayAngles[index]
-                            let labelNumber = angle.anchorCornerIndex >= 0 ? (angle.anchorCornerIndex + 1) : (displayAngles.count - index)
+                            let cornerLetter = angle.anchorCornerIndex >= 0 && angle.anchorCornerIndex < angleLabels.count ? angleLabels[angle.anchorCornerIndex] : "?"
                             collapsibleItem(
-                                title: "Angle \(labelNumber)",
+                                title: "Angle \(index + 1) (\(cornerLetter))",
                                 isOpen: Binding(
                                     get: { openAngleIds.contains(angle.id) },
                                     set: { isOpen in
@@ -376,17 +391,17 @@ struct PieceEditorView: View {
                         let curveCount = displayCurves.count
                         ForEach(displayCurves.indices, id: \.self) { index in
                             let curve = displayCurves[index]
-                            collapsibleItem(
-                                title: "Curve \(curveCount - index)",
+                            CurveCollapsibleItem(
+                                curve: curve,
+                                piece: piece,
+                                curveNumber: curveCount - index,
                                 isOpen: Binding(
                                     get: { openCurveIds.contains(curve.id) },
                                     set: { isOpen in
                                         if isOpen { openCurveIds.insert(curve.id) } else { openCurveIds.remove(curve.id) }
                                     }
                                 )
-                            ) {
-                                CurveRow(curve: curve, shape: piece.shape, piece: piece)
-                            }
+                            )
                         }
                     }
                 }
@@ -728,6 +743,21 @@ struct PieceEditorView: View {
         markUpdated()
     }
 
+    private func cornerLabelsForPiece() -> [String] {
+        let count = ShapePathBuilder.cornerLabelCount(for: piece)
+        return (0..<count).map { index in
+            var value = index
+            var result = ""
+            repeat {
+                let remainder = value % 26
+                let scalar = UnicodeScalar(65 + remainder)!
+                result = String(Character(scalar)) + result
+                value = (value / 26) - 1
+            } while value >= 0
+            return result
+        }
+    }
+
     private func addCornerRadius() {
         let cornerCount = ShapePathBuilder.cornerLabelCount(for: piece)
         guard cornerCount > 0 else { return }
@@ -855,6 +885,7 @@ struct PieceEditorView: View {
     private func removeCornerRadius(at cornerIndex: Int) {
         let matching = piece.cornerRadii.filter { $0.cornerIndex == cornerIndex }
         guard !matching.isEmpty else { return }
+        piece.cornerRadii.removeAll { $0.cornerIndex == cornerIndex }
         for radius in matching {
             modelContext.delete(radius)
         }
@@ -863,6 +894,7 @@ struct PieceEditorView: View {
     private func removeAngle(at cornerIndex: Int) {
         let matching = piece.angleCuts.filter { $0.anchorCornerIndex == cornerIndex }
         guard !matching.isEmpty else { return }
+        piece.angleCuts.removeAll { $0.anchorCornerIndex == cornerIndex }
         for angle in matching {
             modelContext.delete(angle)
         }
@@ -1359,6 +1391,22 @@ struct PieceEditorView: View {
         } while value >= 0
         return result
     }
+    
+    private func nearestCornerIndex(for point: CGPoint, in corners: [CGPoint]) -> Int {
+        guard !corners.isEmpty else { return 0 }
+        var bestIndex = 0
+        var bestDistance = CGFloat.greatestFiniteMagnitude
+        for (index, corner) in corners.enumerated() {
+            let dx = point.x - corner.x
+            let dy = point.y - corner.y
+            let distance = dx * dx + dy * dy
+            if distance < bestDistance {
+                bestDistance = distance
+                bestIndex = index
+            }
+        }
+        return bestIndex
+    }
 
     private func letter(for index: Int) -> String {
         let scalar = UnicodeScalar(65 + (index % 26))!
@@ -1369,11 +1417,9 @@ struct PieceEditorView: View {
     private func collapsibleSection<Content: View>(title: String, isOpen: Binding<Bool>, onClose: (() -> Void)? = nil, @ViewBuilder content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             Button {
-                withAnimation(.easeInOut(duration: 0.2)) {
-                    let wasOpen = isOpen.wrappedValue
-                    isOpen.wrappedValue.toggle()
-                    if wasOpen { onClose?() }
-                }
+                let wasOpen = isOpen.wrappedValue
+                isOpen.wrappedValue.toggle()
+                if wasOpen { onClose?() }
             } label: {
                 HStack {
                     Text(title)
@@ -1383,6 +1429,7 @@ struct PieceEditorView: View {
                     Image(systemName: isOpen.wrappedValue ? "chevron.down" : "chevron.right")
                         .font(.system(size: 12, weight: .semibold))
                         .foregroundStyle(Theme.secondaryText)
+                        .animation(.easeInOut(duration: 0.15), value: isOpen.wrappedValue)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .contentShape(Rectangle())
@@ -1406,9 +1453,7 @@ struct PieceEditorView: View {
     private func collapsibleSubsection<Content: View>(title: String, isOpen: Binding<Bool>, @ViewBuilder content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             Button {
-                withAnimation(.easeInOut(duration: 0.2)) {
-                    isOpen.wrappedValue.toggle()
-                }
+                isOpen.wrappedValue.toggle()
             } label: {
                 HStack {
                     Text(title)
@@ -1418,6 +1463,7 @@ struct PieceEditorView: View {
                     Image(systemName: isOpen.wrappedValue ? "chevron.down" : "chevron.right")
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(Theme.secondaryText)
+                        .animation(.easeInOut(duration: 0.15), value: isOpen.wrappedValue)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .contentShape(Rectangle())
@@ -1441,9 +1487,7 @@ struct PieceEditorView: View {
     private func collapsibleItem<Content: View>(title: String, isOpen: Binding<Bool>, @ViewBuilder content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             Button {
-                withAnimation(.easeInOut(duration: 0.2)) {
-                    isOpen.wrappedValue.toggle()
-                }
+                isOpen.wrappedValue.toggle()
             } label: {
                 HStack {
                     Text(title)
@@ -1453,6 +1497,7 @@ struct PieceEditorView: View {
                     Image(systemName: isOpen.wrappedValue ? "chevron.down" : "chevron.right")
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(Theme.secondaryText)
+                        .animation(.easeInOut(duration: 0.15), value: isOpen.wrappedValue)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .contentShape(Rectangle())
@@ -1831,11 +1876,13 @@ private struct CutoutRow: View {
                             if isLocked { return proxyCenterY + leftApexOffset }
                             return cutout.centerY + leftApexOffset
                         },
-                        set: {
-                            if isLocked { proxyCenterY = $0 - leftApexOffset }
+                        set: { newValue in
+                            let newRaw = newValue - leftApexOffset
+                            if isLocked { proxyCenterY = newRaw }
                             else {
-                                cutout.centerY = $0 - leftApexOffset
-                                deselectCornerSnap()
+                                let changed = abs(cutout.centerY - newRaw) > 0.0001
+                                cutout.centerY = newRaw
+                                if changed { deselectCornerSnap() }
                             }
                         }
                     ), denominator: 32)
@@ -1853,11 +1900,13 @@ private struct CutoutRow: View {
                             if isLocked { return proxyCenterX + topApexOffset }
                             return cutout.centerX + topApexOffset
                         },
-                        set: {
-                            if isLocked { proxyCenterX = $0 - topApexOffset }
+                        set: { newValue in
+                            let newRaw = newValue - topApexOffset
+                            if isLocked { proxyCenterX = newRaw }
                             else {
-                                cutout.centerX = $0 - topApexOffset
-                                deselectCornerSnap()
+                                let changed = abs(cutout.centerX - newRaw) > 0.0001
+                                cutout.centerX = newRaw
+                                if changed { deselectCornerSnap() }
                             }
                         }
                     ), denominator: 32)
@@ -2056,6 +2105,10 @@ private struct CutoutRow: View {
 
     /// Apply proxy values to the actual cutout model (on unlock)
     private func applyProxiesToCutout() {
+        // Check if position changed before applying
+        let positionChanged = abs(cutout.centerX - proxyCenterX) > 0.0001 ||
+                              abs(cutout.centerY - proxyCenterY) > 0.0001
+        
         cutout.width = proxyWidth
         cutout.height = proxyHeight
         cutout.centerX = proxyCenterX
@@ -2063,8 +2116,16 @@ private struct CutoutRow: View {
         cutout.kindRaw = proxyKindRaw
         cutout.orientationRaw = proxyOrientationRaw
         cutout.customAngleDegrees = proxyCustomAngleDegrees
+        
         // Re-run shape-change side effects if kind changed
         if cutout.kind == .circle {
+            selectedCorner = nil
+            cutout.isNotch = false
+            cutout.cornerIndex = -1
+            cutout.cornerAnchorX = -1
+            cutout.cornerAnchorY = -1
+        } else if positionChanged && selectedCorner != nil {
+            // Position was manually changed while locked - deselect snap
             selectedCorner = nil
             cutout.isNotch = false
             cutout.cornerIndex = -1
@@ -2257,6 +2318,187 @@ private struct CutoutRow: View {
             return [.topLeft, .topRight, .bottomLeft]
         }
         return NotchCorner.allCases
+    }
+}
+
+/// A wrapper view that observes cutout properties to display details in the header.
+private struct CutoutCollapsibleItem: View {
+    @Bindable var cutout: Cutout
+    let piece: Piece
+    let cutoutNumber: Int
+    @Binding var isOpen: Bool
+    
+    private var headerLabel: String {
+        // Shape name (Rectangle for both rectangle and square)
+        let shapeName = cutout.kind == .circle ? "Circle" : "Rectangle"
+        
+        // Dimensions formatted
+        let widthStr = MeasurementParser.formatInches(cutout.width)
+        let heightStr = MeasurementParser.formatInches(cutout.height)
+        
+        // Corner abbreviation if snapped
+        var cornerStr = ""
+        if cutout.isNotch && cutout.kind != .circle {
+            let corner = inferredCorner()
+            cornerStr = " \(corner)"
+        }
+        
+        return "\(shapeName) \(widthStr)\"x\(heightStr)\"\(cornerStr)"
+    }
+    
+    private func inferredCorner() -> String {
+        let displaySize = ShapePathBuilder.displaySize(for: piece)
+        let displayCenter = ShapePathBuilder.displayPoint(fromRaw: CGPoint(x: cutout.centerX, y: cutout.centerY))
+        let isTop = displayCenter.y <= displaySize.height / 2
+        let isLeft = displayCenter.x <= displaySize.width / 2
+        switch (isTop, isLeft) {
+        case (true, true): return "TL"
+        case (true, false): return "TR"
+        case (false, false): return "BR"
+        case (false, true): return "BL"
+        }
+    }
+    
+    var body: some View {
+        // Explicitly read observed properties to ensure SwiftUI tracks changes
+        let _ = cutout.isNotch
+        let _ = cutout.kind
+        let _ = cutout.width
+        let _ = cutout.height
+        let _ = cutout.centerX
+        let _ = cutout.centerY
+        
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("Cutout \(cutoutNumber) (\(headerLabel))")
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundStyle(Theme.secondaryText)
+                Spacer()
+                Image(systemName: isOpen ? "chevron.down" : "chevron.right")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(Theme.secondaryText)
+                    .animation(.easeInOut(duration: 0.15), value: isOpen)
+            }
+            .contentShape(Rectangle())
+            .onTapGesture {
+                isOpen.toggle()
+            }
+            
+            if isOpen {
+                CutoutRow(cutout: cutout, piece: piece)
+            }
+        }
+        .padding(10)
+        .background(Theme.panel.opacity(0.6))
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(Theme.divider, lineWidth: 1)
+        )
+    }
+}
+
+/// A wrapper view that observes curve corner indices to ensure the title updates
+/// even when the curve item is collapsed/minimized.
+private struct CurveCollapsibleItem: View {
+    @Bindable var curve: CurvedEdge
+    let piece: Piece
+    let curveNumber: Int
+    @Binding var isOpen: Bool
+    
+    private var spanLabel: String {
+        // Use the same spanCornerData() mapping that CurveRow's picker uses
+        // This ensures header labels match the picker field labels exactly
+        let data = spanCornerData()
+        let polygonToLabel = Dictionary(data.map { ($0.polygonIndex, $0.label) }, uniquingKeysWith: { first, _ in first })
+        let startLabel = polygonToLabel[curve.startCornerIndex] ?? "?"
+        let endLabel = polygonToLabel[curve.endCornerIndex] ?? "?"
+        return "\(startLabel)-\(endLabel)"
+    }
+    
+    /// Same logic as CurveRow.spanCornerData() to ensure consistent label mapping
+    private func spanCornerData() -> [(label: String, polygonIndex: Int)] {
+        let polygonPoints = ShapePathBuilder.displayPolygonPoints(for: piece, includeAngles: false)
+        let labelingPoints = ShapePathBuilder.displayPolygonPointsForLabeling(for: piece, includeAngles: false)
+        let labelingSegments = ShapePathBuilder.boundarySegmentsForLabeling(for: piece, includeAngles: false)
+        
+        var labelIndexSet = Set<Int>()
+        for seg in labelingSegments {
+            labelIndexSet.insert(seg.startIndex)
+            labelIndexSet.insert(seg.endIndex)
+        }
+        let labelIndices = labelIndexSet.sorted()
+        
+        var result: [(label: String, polygonIndex: Int)] = []
+        var usedPolygonIndices = Set<Int>()
+        for labelIndex in labelIndices {
+            guard labelIndex >= 0, labelIndex < labelingPoints.count else { continue }
+            let label = cornerLabel(for: labelIndex)
+            let position = labelingPoints[labelIndex]
+            let polyIndex = nearestCornerIndex(for: position, in: polygonPoints)
+            if usedPolygonIndices.contains(polyIndex) { continue }
+            usedPolygonIndices.insert(polyIndex)
+            result.append((label: label, polygonIndex: polyIndex))
+        }
+        return result
+    }
+    
+    private func cornerLabel(for index: Int) -> String {
+        var value = index
+        var result = ""
+        repeat {
+            let remainder = value % 26
+            let scalar = UnicodeScalar(65 + remainder)!
+            result = String(Character(scalar)) + result
+            value = (value / 26) - 1
+        } while value >= 0
+        return result
+    }
+    
+    private func nearestCornerIndex(for point: CGPoint, in corners: [CGPoint]) -> Int {
+        guard !corners.isEmpty else { return 0 }
+        var bestIndex = 0
+        var bestDistance = CGFloat.greatestFiniteMagnitude
+        for (index, corner) in corners.enumerated() {
+            let dx = point.x - corner.x
+            let dy = point.y - corner.y
+            let distance = dx * dx + dy * dy
+            if distance < bestDistance {
+                bestDistance = distance
+                bestIndex = index
+            }
+        }
+        return bestIndex
+    }
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("Curve \(curveNumber) (\(spanLabel))")
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundStyle(Theme.secondaryText)
+                Spacer()
+                Image(systemName: isOpen ? "chevron.down" : "chevron.right")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(Theme.secondaryText)
+                    .animation(.easeInOut(duration: 0.15), value: isOpen)
+            }
+            .contentShape(Rectangle())
+            .onTapGesture {
+                isOpen.toggle()
+            }
+            
+            if isOpen {
+                CurveRow(curve: curve, shape: piece.shape, piece: piece)
+            }
+        }
+        .padding(10)
+        .background(Theme.surface)
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(Theme.divider, lineWidth: 1)
+        )
     }
 }
 
