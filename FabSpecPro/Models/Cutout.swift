@@ -79,6 +79,11 @@ final class CurvedEdge {
     /// End corner index for corner-based curve selection (-1 means use legacy edge-based)
     var endCornerIndex: Int = -1
 
+    /// Label index for curve start (matches drawn corner labels)
+    var startLabelIndex: Int = -1
+    /// Label index for curve end (matches drawn corner labels)
+    var endLabelIndex: Int = -1
+
     /// Stable boundary segment index for the start point (-1 means unset)
     var startBoundarySegmentIndex: Int = -1
     /// True if the start point is the end of the boundary segment
@@ -100,6 +105,8 @@ final class CurvedEdge {
         self.isConcave = isConcave
         self.startCornerIndex = -1
         self.endCornerIndex = -1
+        self.startLabelIndex = -1
+        self.endLabelIndex = -1
         self.startBoundarySegmentIndex = -1
         self.startBoundaryIsEnd = false
         self.endBoundarySegmentIndex = -1
@@ -113,6 +120,8 @@ final class CurvedEdge {
         self.id = UUID()
         self.startCornerIndex = startCornerIndex
         self.endCornerIndex = endCornerIndex
+        self.startLabelIndex = -1
+        self.endLabelIndex = -1
         self.startBoundarySegmentIndex = -1
         self.startBoundaryIsEnd = false
         self.endBoundarySegmentIndex = -1

@@ -15,7 +15,6 @@ struct DrawingCanvasView: View {
     private let noteYOffsetPoints: CGFloat = 35
     private var lengthLabelPadding: CGFloat { isReadOnly ? 14 : 28 }
     private var widthLabelPadding: CGFloat { isReadOnly ? 21 : 42 }
-
     var body: some View {
         GeometryReader { proxy in
             let metrics = DrawingMetrics(piece: piece, in: proxy.size)
@@ -336,17 +335,7 @@ struct DrawingCanvasView: View {
         let baseCenter = CGPoint(x: (baseBounds.minX + baseBounds.maxX) / 2, y: (baseBounds.minY + baseBounds.maxY) / 2)
         let isPieceClockwise = polygonIsClockwise(pieceCorners)
 
-        // Track drawn positions to skip near-duplicate vertices that
-        // Path.subtracting can produce at curve/line intersections.
-        var drawnPositions: [CGPoint] = []
-        let labelDupTolerance: CGFloat = 1.0
-
         for (index, point) in pieceCorners.enumerated() {
-            // Skip if a label was already drawn at this position
-            if drawnPositions.contains(where: { abs($0.x - point.x) < labelDupTolerance && abs($0.y - point.y) < labelDupTolerance }) {
-                continue
-            }
-            drawnPositions.append(point)
             let label = Text(cornerLabel(for: index))
                 .font(.system(size: labelFontSize, weight: .semibold))
                 .foregroundStyle(Theme.secondaryText)

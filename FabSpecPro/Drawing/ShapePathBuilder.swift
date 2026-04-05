@@ -193,7 +193,13 @@ enum ShapePathBuilder {
     }
 
     /// Returns corner indices (based on the current base-corner list) that lie on curved outer edges.
-    static func cornerIndicesOnCurvedEdges(points: [CGPoint], shape: ShapeKind, curves: [CurvedEdge], requireConvex: Bool = false) -> Set<Int> {
+    static func cornerIndicesOnCurvedEdges(
+        points: [CGPoint],
+        shape: ShapeKind,
+        curves: [CurvedEdge],
+        baseBounds: CGRect? = nil,
+        requireConvex: Bool = false
+    ) -> Set<Int> {
         guard !points.isEmpty else { return [] }
         let curvedEdges = Set(curves.filter { $0.radius > 0 }.map { $0.edge })
         guard !curvedEdges.isEmpty else { return [] }
@@ -202,7 +208,8 @@ enum ShapePathBuilder {
         // This catches notch vertices that are indented from the edge line —
         // pointIsOnEdge misses them because they don't sit at the edge coordinate,
         // but they still belong to the curved edge and must be blocked.
-        let bounds = polygonBounds(points)
+        let bounds = baseBounds ?? polygonBounds(points)
+        let hypotenuseBounds = baseBounds ?? bounds
         let segments = boundarySegments(for: points, shape: shape, bounds: bounds)
 
         // Build a set of vertex indices that touch any curved edge.
@@ -212,6 +219,61 @@ enum ShapePathBuilder {
             if curvedEdges.contains(segment.edge) {
                 occupied.insert(segment.startIndex)
                 occupied.insert(segment.endIndex)
+            }
+        }
+
+        // Also classify points that lie on the actual curved boundary. This catches
+        // curve-only notches where vertices are off the straight-edge line and
+        // boundarySegments can't assign an edge.
+        let curveDistanceTolerance: CGFloat = 1.0
+        for curve in curves where curve.radius > 0 {
+            guard let geometry = fullEdgeGeometry(edge: curve.edge, bounds: bounds, hypotenuseBounds: hypotenuseBounds, shape: shape) else {
+                continue
+            }
+            let mid = CGPoint(x: (geometry.start.x + geometry.end.x) / 2, y: (geometry.start.y + geometry.end.y) / 2)
+            let direction: CGFloat = curve.isConcave ? -1.0 : 1.0
+            let control = CGPoint(
+                x: mid.x + geometry.normal.x * CGFloat(curve.radius) * 2 * direction,
+                y: mid.y + geometry.normal.y * CGFloat(curve.radius) * 2 * direction
+            )
+            let spanRange: (min: CGFloat, max: CGFloat)?
+            if curve.hasSpan && curve.usesEdgeProgress {
+                let p0 = CGFloat(min(curve.startEdgeProgress, curve.endEdgeProgress))
+                let p1 = CGFloat(max(curve.startEdgeProgress, curve.endEdgeProgress))
+                spanRange = (min: p0, max: p1)
+            } else if curve.hasSpan && curve.usesBoundaryEndpoints {
+                if let startSegment = segments.first(where: { $0.edge == curve.edge && $0.index == curve.startBoundarySegmentIndex }),
+                   let endSegment = segments.first(where: { $0.edge == curve.edge && $0.index == curve.endBoundarySegmentIndex }) {
+                    let startPoint = curve.startBoundaryIsEnd ? startSegment.end : startSegment.start
+                    let endPoint = curve.endBoundaryIsEnd ? endSegment.end : endSegment.start
+                    let p0 = edgeProgress(for: startPoint, edge: curve.edge, shape: shape, bounds: hypotenuseBounds)
+                    let p1 = edgeProgress(for: endPoint, edge: curve.edge, shape: shape, bounds: hypotenuseBounds)
+                    spanRange = (min: min(p0, p1), max: max(p0, p1))
+                } else {
+                    spanRange = nil
+                }
+            } else if curve.hasSpan && curve.usesCornerIndices {
+                if curve.startCornerIndex >= 0, curve.startCornerIndex < points.count,
+                   curve.endCornerIndex >= 0, curve.endCornerIndex < points.count {
+                    let p0 = edgeProgress(for: points[curve.startCornerIndex], edge: curve.edge, shape: shape, bounds: hypotenuseBounds)
+                    let p1 = edgeProgress(for: points[curve.endCornerIndex], edge: curve.edge, shape: shape, bounds: hypotenuseBounds)
+                    spanRange = (min: min(p0, p1), max: max(p0, p1))
+                } else {
+                    spanRange = nil
+                }
+            } else {
+                spanRange = nil
+            }
+            for index in 0..<points.count {
+                let point = points[index]
+                let t = edgeProgress(for: point, edge: curve.edge, shape: shape, bounds: hypotenuseBounds)
+                if let spanRange, (t < spanRange.min - 0.02 || t > spanRange.max + 0.02) {
+                    continue
+                }
+                let curvePoint = quadPoint(start: geometry.start, control: control, end: geometry.end, t: t)
+                if distance(point, curvePoint) <= curveDistanceTolerance {
+                    occupied.insert(index)
+                }
             }
         }
 
@@ -227,6 +289,104 @@ enum ShapePathBuilder {
         }
 
         return occupied
+    }
+
+    /// Returns corner indices that fall within the span of any curve on the same edge.
+    /// Uses labeling boundary segments so the blocked indices match the UI labels.
+    static func cornerIndicesBlockedByCurveSpans(
+        points: [CGPoint],
+        shape: ShapeKind,
+        curves: [CurvedEdge],
+        segments: [BoundarySegment],
+        baseBounds: CGRect,
+        requireConvex: Bool = false
+    ) -> Set<Int> {
+        guard !points.isEmpty else { return [] }
+        let activeCurves = curves.filter { $0.radius > 0 }
+        guard !activeCurves.isEmpty else { return [] }
+
+        var blocked = Set<Int>()
+
+        // Identify the indices that correspond to the curve span endpoints,
+        // then block the contiguous edge-list range between them. This matches
+        // how the curve spans are defined for drawing and avoids curve-distance
+        // heuristics that miss span endpoints outside straight edges.
+        let concave = requireConvex ? concaveCornerIndices(points: points) : []
+
+        func orderedEdgeIndices(for edge: EdgePosition) -> [Int] {
+            let edgeSegments = segments.filter { $0.edge == edge }.sorted { $0.index < $1.index }
+            guard !edgeSegments.isEmpty else { return [] }
+            var ordered: [Int] = []
+            for seg in edgeSegments {
+                if ordered.last != seg.startIndex { ordered.append(seg.startIndex) }
+                if ordered.last != seg.endIndex { ordered.append(seg.endIndex) }
+            }
+            if requireConvex {
+                ordered = ordered.filter { !concave.contains($0) }
+            }
+            return ordered
+        }
+
+        func indicesBetween(_ list: [Int], start: Int, end: Int) -> [Int] {
+            guard let startPos = list.firstIndex(of: start),
+                  let endPos = list.firstIndex(of: end) else { return [] }
+            if startPos <= endPos {
+                return Array(list[startPos...endPos])
+            }
+            return Array(list[endPos...startPos])
+        }
+
+        for curve in activeCurves {
+            if curve.hasSpan {
+                var startIndex: Int?
+                var endIndex: Int?
+
+                if curve.usesEdgeProgress {
+                    // Use edge-progress to derive concrete endpoint indices on the labeling polygon.
+                    let edgeSegments = segments.filter { $0.edge == curve.edge }
+                    var endpoints: [(index: Int, progress: CGFloat)] = []
+                    endpoints.reserveCapacity(edgeSegments.count * 2)
+                    for segment in edgeSegments {
+                        endpoints.append((segment.startIndex, edgeProgress(for: segment.start, edge: curve.edge, shape: shape, bounds: baseBounds)))
+                        endpoints.append((segment.endIndex, edgeProgress(for: segment.end, edge: curve.edge, shape: shape, bounds: baseBounds)))
+                    }
+                    startIndex = nearestEndpointIndex(progress: CGFloat(curve.startEdgeProgress), endpoints: endpoints)
+                    endIndex = nearestEndpointIndex(progress: CGFloat(curve.endEdgeProgress), endpoints: endpoints)
+                } else if curve.usesBoundaryEndpoints {
+                    if let startSegment = segments.first(where: { $0.edge == curve.edge && $0.index == curve.startBoundarySegmentIndex }),
+                       let endSegment = segments.first(where: { $0.edge == curve.edge && $0.index == curve.endBoundarySegmentIndex }) {
+                        startIndex = curve.startBoundaryIsEnd ? startSegment.endIndex : startSegment.startIndex
+                        endIndex = curve.endBoundaryIsEnd ? endSegment.endIndex : endSegment.startIndex
+                    }
+                } else if curve.usesCornerIndices {
+                    startIndex = curve.startCornerIndex
+                    endIndex = curve.endCornerIndex
+                }
+
+                if let startIndex, let endIndex {
+                    let edgeList = orderedEdgeIndices(for: curve.edge)
+                    blocked.formUnion(indicesBetween(edgeList, start: startIndex, end: endIndex))
+                    if requireConvex {
+                        if !concave.contains(startIndex) { blocked.insert(startIndex) }
+                        if !concave.contains(endIndex) { blocked.insert(endIndex) }
+                    } else {
+                        blocked.insert(startIndex)
+                        blocked.insert(endIndex)
+                    }
+                }
+                continue
+            }
+            if curve.usesCornerIndices {
+                let edgeList = orderedEdgeIndices(for: curve.edge)
+                blocked.formUnion(indicesBetween(edgeList, start: curve.startCornerIndex, end: curve.endCornerIndex))
+                continue
+            }
+            // Full-edge curves block the whole edge list.
+            let edgeList = orderedEdgeIndices(for: curve.edge)
+            blocked.formUnion(edgeList)
+        }
+
+        return blocked
     }
 
     /// Returns only curves that are valid for rendering: radius > 0, valid
@@ -464,6 +624,9 @@ enum ShapePathBuilder {
         // (notch vertices are indented from the edge line but still belong to it).
         let curvedCornerIndices = cornerIndicesOnCurvedEdges(
             points: labelingCorners, shape: piece.shape, curves: activeCurves, requireConvex: false)
+        let curvedCornerIndicesForAngles = cornerIndicesOnCurvedEdges(
+            points: labelingCorners, shape: piece.shape, curves: activeCurves, requireConvex: true)
+        let isClockwise = polygonIsClockwise(labelingCorners)
         let cornerRadii = allCornerRadii.filter { radius in
             guard radius.cornerIndex >= 0, radius.cornerIndex < labelingCorners.count else { return false }
             return !curvedCornerIndices.contains(radius.cornerIndex)
@@ -534,13 +697,21 @@ enum ShapePathBuilder {
                 // This applies to BOTH base-corner cuts (Step 1) and notch-interior
                 // cuts (Step 4) — chamfering a notch clip at a curved corner also
                 // distorts the curve when the clip is subtracted.
+                let notchInteriorAngleIndices = Set(notchInteriorCuts.map { $0.anchorCornerIndex })
+                let curvedCornerIndicesForAngleCuts = curvedCornerIndicesForAngles.subtracting(notchInteriorAngleIndices)
                 let safeBaseCornerCuts = baseCornerCuts.filter { cut in
                     guard cut.anchorCornerIndex >= 0, cut.anchorCornerIndex < labelingCorners.count else { return false }
-                    return !curvedCornerIndices.contains(cut.anchorCornerIndex)
+                    return !curvedCornerIndicesForAngleCuts.contains(cut.anchorCornerIndex)
                 }
                 let safeNotchInteriorCuts = notchInteriorCuts.filter { cut in
-                    guard cut.anchorCornerIndex >= 0, cut.anchorCornerIndex < labelingCorners.count else { return false }
-                    return !curvedCornerIndices.contains(cut.anchorCornerIndex)
+                    let idx = cut.anchorCornerIndex
+                    guard idx >= 0, idx < labelingCorners.count else { return false }
+                    let prev = labelingCorners[(idx - 1 + labelingCorners.count) % labelingCorners.count]
+                    let curr = labelingCorners[idx]
+                    let next = labelingCorners[(idx + 1) % labelingCorners.count]
+                    let isConcave = isConcaveCorner(prev: prev, curr: curr, next: next, clockwise: isClockwise)
+                    if isConcave { return true }
+                    return !curvedCornerIndicesForAngleCuts.contains(idx)
                 }
                 // Step 1-2: Always apply curves to the clean rectangle first using
                 // curvedRectanglePath. This function handles both full-side and segment
@@ -595,7 +766,17 @@ enum ShapePathBuilder {
 
                     // Chamfer clip polygon corners for notch-interior angle cuts
                     if !safeNotchInteriorCuts.isEmpty {
-                        let notchedForChamfer = angledRectanglePoints(size: rawSize, notches: stableNotches, angleCuts: [])
+                        let needsCurvedChamfer = !activeCurves.isEmpty && stableNotches.contains { cutout in
+                            cutoutOverlapsPiece(cutout: cutout, size: rawSize, shape: piece.shape, curves: activeCurves)
+                                && !cutoutOverlapsPiece(cutout: cutout, size: rawSize, shape: piece.shape, curves: [])
+                        }
+                        let notchedForChamfer = angledRectanglePoints(
+                            size: rawSize,
+                            notches: stableNotches,
+                            angleCuts: [],
+                            curves: needsCurvedChamfer ? activeCurves : [],
+                            forLabeling: needsCurvedChamfer
+                        )
                         let notchedChamferDisplay = reorderCornersClockwise(notchedForChamfer.points.map { displayPoint(fromRaw: $0) })
 
                         for cut in safeNotchInteriorCuts {
@@ -626,12 +807,27 @@ enum ShapePathBuilder {
                             let p1 = CGPoint(x: anchor.x + toOutlineNext.x * alongEdge1, y: anchor.y + toOutlineNext.y * alongEdge1)
                             let p2 = CGPoint(x: anchor.x + toOutlinePrev.x * alongEdge2, y: anchor.y + toOutlinePrev.y * alongEdge2)
 
+                            var bestClipIndex: Int?
+                            var bestCornerIndex: Int?
+                            var bestDistance = CGFloat.greatestFiniteMagnitude
+
                             for clipIdx in clipPolygons.indices {
                                 let clipDisplay = clipPolygons[clipIdx].map { displayPoint(fromRaw: $0) }
                                 guard let cornerIdx = clipDisplay.enumerated().min(by: {
                                     distance($0.element, anchor) < distance($1.element, anchor)
-                                })?.offset, distance(clipDisplay[cornerIdx], anchor) < 1.0 else { continue }
+                                })?.offset else { continue }
+                                let cornerDistance = distance(clipDisplay[cornerIdx], anchor)
+                                if cornerDistance < bestDistance {
+                                    bestDistance = cornerDistance
+                                    bestClipIndex = clipIdx
+                                    bestCornerIndex = cornerIdx
+                                }
+                            }
 
+                            if let clipIdx = bestClipIndex,
+                               let cornerIdx = bestCornerIndex,
+                               bestDistance < 1.0 {
+                                let clipDisplay = clipPolygons[clipIdx].map { displayPoint(fromRaw: $0) }
                                 let clipCount = clipDisplay.count
                                 let prevClip = clipDisplay[(cornerIdx - 1 + clipCount) % clipCount]
                                 let nextClip = clipDisplay[(cornerIdx + 1) % clipCount]
@@ -654,7 +850,6 @@ enum ShapePathBuilder {
                                     }
                                 }
                                 clipPolygons[clipIdx] = newClip.map { rawPoint(fromDisplay: $0) }
-                                break
                             }
                         }
                     }
@@ -709,6 +904,75 @@ enum ShapePathBuilder {
                         return curvedPolygonPath(points: fallbackPoints, shape: .rectangle, curves: fallbackMapped, baseBounds: nil)
                     }
                 }
+
+                // Subtract interior cutouts using the curve-first path to avoid curve distortion.
+                let interiorCutouts = interiorCutoutsCurveAware(for: piece)
+                if !interiorCutouts.isEmpty {
+                    let cutoutRanges = cutoutCornerRanges(for: piece)
+                    let displaySize = CGSize(width: rawSize.height, height: rawSize.width)
+                    func displayCutoutForPath(_ cutout: Cutout) -> Cutout {
+                        let isHypotenuseOriented = cutout.orientation == .hypotenuse
+                        return Cutout(
+                            kind: cutout.kind,
+                            width: isHypotenuseOriented ? cutout.width : cutout.height,
+                            height: isHypotenuseOriented ? cutout.height : cutout.width,
+                            centerX: cutout.centerY,
+                            centerY: cutout.centerX,
+                            isNotch: cutout.isNotch,
+                            orientation: cutout.orientation,
+                            customAngleDegrees: cutout.customAngleDegrees
+                        )
+                    }
+                    func localAngleCuts(for cutout: Cutout) -> [AngleCut] {
+                        guard let range = cutoutRanges.first(where: { $0.cutout.id == cutout.id })?.range else { return [] }
+                        return piece.angleCuts.compactMap { cut in
+                            guard range.contains(cut.anchorCornerIndex) else { return nil }
+                            let local = AngleCut(
+                                anchorCornerIndex: cut.anchorCornerIndex - range.lowerBound,
+                                anchorOffset: cut.anchorOffset,
+                                secondaryCornerIndex: cut.secondaryCornerIndex,
+                                secondaryOffset: cut.secondaryOffset,
+                                usesSecondPoint: cut.usesSecondPoint,
+                                angleDegrees: cut.angleDegrees
+                            )
+                            local.id = cut.id
+                            return local
+                        }
+                    }
+                    func localCornerRadii(for cutout: Cutout) -> [CornerRadius] {
+                        guard let range = cutoutRanges.first(where: { $0.cutout.id == cutout.id })?.range else { return [] }
+                        return piece.cornerRadii.compactMap { radius in
+                            guard range.contains(radius.cornerIndex) else { return nil }
+                            let local = CornerRadius(
+                                cornerIndex: radius.cornerIndex - range.lowerBound,
+                                radius: radius.radius,
+                                isInside: radius.isInside
+                            )
+                            local.id = radius.id
+                            return local
+                        }
+                    }
+
+                    var cutoutClipPath = Path()
+                    for cutout in interiorCutouts {
+                        let displayCutout = displayCutoutForPath(cutout)
+                        let angleCuts = localAngleCuts(for: cutout)
+                        let cornerRadii = localCornerRadii(for: cutout)
+                        let cutoutPath = cutoutPath(
+                            displayCutout,
+                            angleCuts: angleCuts,
+                            cornerRadii: cornerRadii,
+                            size: displaySize,
+                            shape: piece.shape
+                        )
+                        cutoutClipPath.addPath(cutoutPath)
+                    }
+                    let subtracted = curvedPath.subtracting(cutoutClipPath)
+                    let subBounds = subtracted.boundingRect
+                    if subBounds.width >= 0.01 || subBounds.height >= 0.01 {
+                        curvedPath = subtracted
+                    }
+                }
                 return curvedPath
             }
 
@@ -717,7 +981,7 @@ enum ShapePathBuilder {
             let displayPoints = result.points.map { displayPoint(fromRaw: $0) }
             if !cornerRadii.isEmpty {
                 let ordered = reorderCornersClockwise(displayPoints)
-                let baseCorners = cornerPoints(for: piece, includeAngles: false)
+                let baseCorners = displayPolygonPointsForLabeling(for: piece, includeAngles: false)
                 return roundedPolygonPath(points: ordered, cornerRadii: cornerRadii, baseCorners: baseCorners)
             }
             return polygonPath(displayPoints)
@@ -769,8 +1033,14 @@ enum ShapePathBuilder {
                     return !curvedCornerIndices.contains(cut.anchorCornerIndex)
                 }
                 let safeTriNotchInteriorCuts = triNotchInteriorCuts.filter { cut in
-                    guard cut.anchorCornerIndex >= 0, cut.anchorCornerIndex < labelingCorners.count else { return false }
-                    return !curvedCornerIndices.contains(cut.anchorCornerIndex)
+                    let idx = cut.anchorCornerIndex
+                    guard idx >= 0, idx < labelingCorners.count else { return false }
+                    let prev = labelingCorners[(idx - 1 + labelingCorners.count) % labelingCorners.count]
+                    let curr = labelingCorners[idx]
+                    let next = labelingCorners[(idx + 1) % labelingCorners.count]
+                    let isConcave = isConcaveCorner(prev: prev, curr: curr, next: next, clockwise: isClockwise)
+                    if isConcave { return true }
+                    return !curvedCornerIndices.contains(idx)
                 }
                 // Step 1-2: Apply curves to the clean triangle first, then subtract
                 // base-corner angle cuts as boolean clip triangles.
@@ -927,7 +1197,7 @@ enum ShapePathBuilder {
             let displayPoints = result.points.map { displayPoint(fromRaw: $0) }
             if !cornerRadii.isEmpty {
                 let ordered = reorderCornersClockwise(displayPoints)
-                let baseCorners = cornerPoints(for: piece, includeAngles: false)
+                let baseCorners = displayPolygonPointsForLabeling(for: piece, includeAngles: false)
                 return roundedPolygonPath(points: ordered, cornerRadii: cornerRadii, baseCorners: baseCorners)
             }
             return polygonPath(displayPoints)
@@ -951,7 +1221,7 @@ enum ShapePathBuilder {
                 }
                 if !cornerRadii.isEmpty {
                     let ordered = reorderCornersClockwise(displayPoints)
-                    let baseCorners = cornerPoints(for: piece, includeAngles: false)
+                    let baseCorners = displayPolygonPointsForLabeling(for: piece, includeAngles: false)
                     return roundedPolygonPath(points: ordered, cornerRadii: cornerRadii, baseCorners: baseCorners)
                 }
             case .rightTriangle:
@@ -986,7 +1256,7 @@ enum ShapePathBuilder {
                 }
                 if !cornerRadii.isEmpty {
                     let ordered = reorderCornersClockwise(displayPoints)
-                    let baseCorners = cornerPoints(for: piece, includeAngles: false)
+                    let baseCorners = displayPolygonPointsForLabeling(for: piece, includeAngles: false)
                     return roundedPolygonPath(points: ordered, cornerRadii: cornerRadii, baseCorners: baseCorners)
                 }
             default:
@@ -1001,7 +1271,7 @@ enum ShapePathBuilder {
     /// This allows curves and corner radii to coexist on different parts of the same piece.
     private static func applyCornerRadiiToPath(_ basePath: Path, cornerRadii: [CornerRadius], piece: Piece, displayPoints: [CGPoint]) -> Path {
         // Get the base corners for reference
-        let baseCorners = cornerPoints(for: piece, includeAngles: false)
+        let baseCorners = displayPolygonPointsForLabeling(for: piece, includeAngles: false)
         let ordered = reorderCornersClockwise(displayPoints)
 
         func indexMap(from source: [CGPoint], to target: [CGPoint]) -> [Int: Int] {
@@ -1023,7 +1293,7 @@ enum ShapePathBuilder {
             return map
         }
         
-        func exactIndexMap(from source: [CGPoint], to target: [CGPoint], tolerance: CGFloat = 0.01) -> [Int: Int] {
+        func exactIndexMap(from source: [CGPoint], to target: [CGPoint], tolerance: CGFloat = 0.5) -> [Int: Int] {
             var map: [Int: Int] = [:]
             for (sourceIndex, sourcePoint) in source.enumerated() {
                 if let match = target.enumerated().first(where: { candidate in
@@ -1031,8 +1301,6 @@ enum ShapePathBuilder {
                     abs(candidate.element.y - sourcePoint.y) <= tolerance
                 }) {
                     map[sourceIndex] = match.offset
-                } else {
-                    map[sourceIndex] = indexMap(from: [sourcePoint], to: target)[0]
                 }
             }
             return map
@@ -1939,7 +2207,8 @@ enum ShapePathBuilder {
     }
 
     private static func boundaryAngleCuts(for piece: Piece) -> [AngleCut] {
-        let polygonCount = displayPolygonPoints(for: piece, includeAngles: false).count
+        // Use the labeling polygon count (curve-aware) so indices align with the UI picker.
+        let polygonCount = displayPolygonPointsForLabeling(for: piece, includeAngles: false).count
         return piece.angleCuts.filter { $0.anchorCornerIndex >= 0 && $0.anchorCornerIndex < polygonCount }
     }
 
@@ -2027,12 +2296,9 @@ enum ShapePathBuilder {
     }
 
     /// Curve-aware interior cutouts: cutouts that need their own 4 corner labels.
-    /// When curves are active, the curve IS the boundary on that edge. A cutout
-    /// that touches an uncurved straight edge gets perimeter polygon labels.
-    /// A cutout that crosses the curve AND touches its straight edge also gets
-    /// perimeter labels (polygon indentation projected onto curve). Everything
-    /// else gets its own 4 corner labels: cutouts interior to a curve, cutouts
-    /// crossing only the curve, and truly interior cutouts.
+    /// When curves are active, the curve IS the boundary on that edge. Cutouts
+    /// that extend beyond the curved boundary are treated as notches and get
+    /// perimeter labels; only fully interior cutouts get their own 4 labels.
     static func interiorCutoutsCurveAware(for piece: Piece) -> [Cutout] {
         let activeCurves = validCurves(for: piece)
         guard !activeCurves.isEmpty else {
@@ -2048,17 +2314,6 @@ enum ShapePathBuilder {
             }
             // Case 1: Fully inside the curved boundary → interior.
             if cutoutFullyInsideBoundary(cutout: cutout, size: rawSize, shape: piece.shape, curves: activeCurves) {
-                if piece.shape == .rightTriangle {
-                    return cutoutIsInsideTriangle(cutout: cutout, size: rawSize)
-                }
-                return true
-            }
-            // Case 2: Crosses the curved boundary but is fully inside the straight-edge
-            // boundary. The labeling polygon uses straight-edge boolean, so this cutout
-            // won't produce notch vertices there — it needs its own 4 corner labels.
-            // This handles cutouts in the curve bulge area that extend past the curve
-            // but haven't reached the straight edge.
-            if cutoutFullyInsideBoundary(cutout: cutout, size: rawSize, shape: piece.shape, curves: []) {
                 if piece.shape == .rightTriangle {
                     return cutoutIsInsideTriangle(cutout: cutout, size: rawSize)
                 }
@@ -2080,6 +2335,65 @@ enum ShapePathBuilder {
         return ranges
     }
 
+    static func interiorCornerIndices(for piece: Piece) -> Set<Int> {
+        let ranges = cutoutCornerRanges(for: piece)
+        guard !ranges.isEmpty else { return [] }
+        var indices = Set<Int>()
+        for entry in ranges {
+            for index in entry.range {
+                indices.insert(index)
+            }
+        }
+        return indices
+    }
+
+    /// Notch interior corners: for each notch cutout, pick the two cutout corners
+    /// closest to the piece center and map them to labeling indices.
+    static func notchInteriorCornerIndices(for piece: Piece) -> Set<Int> {
+        let labelingPoints = displayPolygonPointsForLabeling(for: piece, includeAngles: false)
+        guard !labelingPoints.isEmpty else { return [] }
+        let rawSize = pieceSize(for: piece)
+        let curves = validCurves(for: piece)
+        let rawCenter = CGPoint(x: rawSize.width / 2, y: rawSize.height / 2)
+
+        func nearestLabelIndex(to point: CGPoint) -> Int? {
+            var bestIndex: Int?
+            var bestDistance = CGFloat.greatestFiniteMagnitude
+            for (index, candidate) in labelingPoints.enumerated() {
+                let d = distance(candidate, point)
+                if d < bestDistance {
+                    bestDistance = d
+                    bestIndex = index
+                }
+            }
+            return bestIndex
+        }
+
+        var indices = Set<Int>()
+        for cutout in piece.cutouts {
+            guard cutout.isPlaced else { continue }
+            guard cutout.kind != .circle else { continue }
+            if !cutoutTouchesBoundary(cutout: cutout, size: rawSize, shape: piece.shape, curves: curves) {
+                continue
+            }
+            if cutoutFullyInsideBoundary(cutout: cutout, size: rawSize, shape: piece.shape, curves: curves) {
+                continue
+            }
+            let rawCorners = GeometryHelpers.cutoutCornerPoints(cutout: cutout, size: rawSize, shape: piece.shape)
+            let displayCorners = rawCorners.map { displayPoint(fromRaw: $0) }
+            let sortedByCenter = displayCorners
+                .map { (point: $0, dist: distance(rawCenter, $0)) }
+                .sorted { $0.dist < $1.dist }
+            for entry in sortedByCenter.prefix(2) {
+                if let labelIndex = nearestLabelIndex(to: entry.point) {
+                    indices.insert(labelIndex)
+                }
+            }
+        }
+
+        return indices
+    }
+
     static func cutoutCornerInfo(for piece: Piece, index: Int) -> (cutout: Cutout, corner: CutoutCornerPosition, localIndex: Int)? {
         for entry in cutoutCornerRanges(for: piece) {
             if entry.range.contains(index) {
@@ -2093,16 +2407,27 @@ enum ShapePathBuilder {
 
     static func angleSegments(for piece: Piece) -> [AngleSegment] {
         let rawSize = pieceSize(for: piece)
+        let referencePolygon = displayPolygonPointsForLabeling(for: piece, includeAngles: false)
         if piece.shape == .rectangle {
-            let notches = notchCandidates(for: piece, size: rawSize)
-            let result = angledRectanglePoints(size: rawSize, notches: notches, angleCuts: boundaryAngleCuts(for: piece))
+            let notches = notchCandidatesCurveAware(for: piece, size: rawSize)
+            let result = angledRectanglePoints(
+                size: rawSize,
+                notches: notches,
+                angleCuts: boundaryAngleCuts(for: piece),
+                referencePolygon: referencePolygon
+            )
             return result.segments.map { segment in
                 AngleSegment(id: segment.id, start: displayPoint(fromRaw: segment.start), end: displayPoint(fromRaw: segment.end))
             }
         }
         if piece.shape == .rightTriangle {
-            let notches = notchCandidates(for: piece, size: rawSize)
-            let result = angledRightTrianglePoints(size: rawSize, notches: notches, angleCuts: boundaryAngleCuts(for: piece))
+            let notches = notchCandidatesCurveAware(for: piece, size: rawSize)
+            let result = angledRightTrianglePoints(
+                size: rawSize,
+                notches: notches,
+                angleCuts: boundaryAngleCuts(for: piece),
+                referencePolygon: referencePolygon
+            )
             return result.segments.map { segment in
                 AngleSegment(id: segment.id, start: displayPoint(fromRaw: segment.start), end: displayPoint(fromRaw: segment.end))
             }
@@ -2206,18 +2531,21 @@ enum ShapePathBuilder {
 
     /// Curve-aware polygon points for labeling and corner counting.
     /// Labeling polygon: uses curve-aware notch candidates for correct classification,
-    /// but ALWAYS uses the straight-edge boolean pipeline (no curves passed to
-    /// angledRectanglePoints). This avoids Path.subtracting artifacts that produce
-    /// near-duplicate vertices, causing extra labels and alphabetical skips.
+    /// and defaults to the straight-edge boolean pipeline to avoid Path.subtracting
+    /// artifacts that can produce near-duplicate vertices and extra labels.
     ///
-    /// The straight-edge boolean is reliable and fast. Cutouts fully inside the
-    /// curved boundary (detected by cutoutFullyInsideBoundary) are excluded from
-    /// the notch list and get their own 4 corner labels via interiorCutoutsCurveAware
-    /// / cutoutCornerRanges. Cutouts that cross the curved boundary but remain inside
-    /// the straight-edge boundary also get 4 interior labels (they don't produce
-    /// notch vertices in the straight-edge polygon).
+    /// When a notch overlaps only the curved boundary (outside the straight-edge
+    /// bounds), the straight-edge boolean cannot generate the perimeter indentation,
+    /// so we switch to a curved labeling boolean for those cases.
+    ///
+    /// Cutouts fully inside the curved boundary (detected by cutoutFullyInsideBoundary)
+    /// are excluded from the notch list and get their own 4 corner labels via
+    /// interiorCutoutsCurveAware / cutoutCornerRanges. Cutouts that cross the curved
+    /// boundary but remain inside the straight-edge boundary also get 4 interior
+    /// labels (they don't produce notch vertices in the straight-edge polygon).
     static func displayPolygonPointsForLabeling(for piece: Piece, includeAngles: Bool = true) -> [CGPoint] {
         let rawSize = pieceSize(for: piece)
+        let activeCurves = validCurves(for: piece)
         switch piece.shape {
         case .rectangle:
             let notches = notchCandidatesCurveAware(for: piece, size: rawSize)
@@ -2227,11 +2555,20 @@ enum ShapePathBuilder {
             } else {
                 angleCuts = []
             }
-            // Always use straight-edge boolean for labeling (no curves, no forLabeling).
-            // The curved boolean pipeline (Path.subtracting) produces near-duplicate
-            // vertices at curve/line transitions that survive deduplication, causing
-            // extra corner labels and alphabetical letter skips.
-            let result = angledRectanglePoints(size: rawSize, notches: notches, angleCuts: angleCuts)
+            // Default to straight-edge boolean for labeling to avoid Path.subtracting artifacts.
+            // If a notch only intersects the curved boundary, use the curved labeling boolean
+            // so perimeter corners and label order stay correct.
+            let needsCurvedLabeling = !activeCurves.isEmpty && notches.contains { cutout in
+                cutoutOverlapsPiece(cutout: cutout, size: rawSize, shape: piece.shape, curves: activeCurves)
+                    && !cutoutOverlapsPiece(cutout: cutout, size: rawSize, shape: piece.shape, curves: [])
+            }
+            let result = angledRectanglePoints(
+                size: rawSize,
+                notches: notches,
+                angleCuts: angleCuts,
+                curves: needsCurvedLabeling ? activeCurves : [],
+                forLabeling: needsCurvedLabeling
+            )
             let displayPoints = result.points.map { displayPoint(fromRaw: $0) }
             return reorderCornersClockwise(displayPoints)
         case .rightTriangle:
@@ -2242,7 +2579,17 @@ enum ShapePathBuilder {
             } else {
                 angleCuts = []
             }
-            let result = angledRightTrianglePoints(size: rawSize, notches: notches, angleCuts: angleCuts)
+            let needsCurvedLabeling = !activeCurves.isEmpty && notches.contains { cutout in
+                cutoutOverlapsPiece(cutout: cutout, size: rawSize, shape: piece.shape, curves: activeCurves)
+                    && !cutoutOverlapsPiece(cutout: cutout, size: rawSize, shape: piece.shape, curves: [])
+            }
+            let result = angledRightTrianglePoints(
+                size: rawSize,
+                notches: notches,
+                angleCuts: angleCuts,
+                curves: needsCurvedLabeling ? activeCurves : [],
+                forLabeling: needsCurvedLabeling
+            )
             let displayPoints = result.points.map { displayPoint(fromRaw: $0) }
             return reorderCornersClockwise(displayPoints)
         default:
@@ -2269,7 +2616,7 @@ enum ShapePathBuilder {
         let base = rectanglePoints(size: size)
         let baseAfterNotches = basePolygonAfterNotches(base: base, size: size, shape: .rectangle, notches: notches, curves: curves, forLabeling: forLabeling)
         let points = applyAngleCutsToPolygon(polygon: baseAfterNotches, angleCuts: angleCuts, referencePolygon: referencePolygon)
-        let segments = angleCutSegments(polygon: baseAfterNotches, angleCuts: angleCuts)
+        let segments = angleCutSegments(polygon: baseAfterNotches, angleCuts: angleCuts, referencePolygon: referencePolygon)
         return (points: points, segments: segments)
     }
 
@@ -2277,7 +2624,7 @@ enum ShapePathBuilder {
         let base = rightTrianglePoints(size: size)
         let baseAfterNotches = basePolygonAfterNotches(base: base, size: size, shape: .rightTriangle, notches: notches, curves: curves, forLabeling: forLabeling)
         let points = applyAngleCutsToPolygon(polygon: baseAfterNotches, angleCuts: angleCuts, referencePolygon: referencePolygon)
-        let segments = angleCutSegments(polygon: baseAfterNotches, angleCuts: angleCuts)
+        let segments = angleCutSegments(polygon: baseAfterNotches, angleCuts: angleCuts, referencePolygon: referencePolygon)
         return (points: points, segments: segments)
     }
 
@@ -2362,13 +2709,13 @@ enum ShapePathBuilder {
         return applyAngleCutsToPolygon(polygon: baseAfterNotches, angleCuts: angleCuts)
     }
 
-    private static func angleCutSegments(polygon: [CGPoint], angleCuts: [AngleCut]) -> [AngleSegment] {
+    private static func angleCutSegments(polygon: [CGPoint], angleCuts: [AngleCut], referencePolygon: [CGPoint]? = nil) -> [AngleSegment] {
         guard !angleCuts.isEmpty, polygon.count >= 3 else { return [] }
         let displayPolygon = reorderCornersClockwise(polygon.map { displayPoint(fromRaw: $0) })
         var segments: [AngleSegment] = []
         segments.reserveCapacity(angleCuts.count)
         for cut in angleCuts {
-            if let segment = angleCutSegmentRaw(cut, polygonDisplay: displayPolygon) {
+            if let segment = angleCutSegmentRaw(cut, polygonDisplay: displayPolygon, referencePolygon: referencePolygon) {
                 segments.append(segment)
             }
         }
@@ -2405,24 +2752,25 @@ enum ShapePathBuilder {
     private static func angleCutPolygonsRaw(
         polygon: [CGPoint],
         angleCuts: [AngleCut],
-        polygonDisplay: [CGPoint]? = nil
+        polygonDisplay: [CGPoint]? = nil,
+        referencePolygon: [CGPoint]? = nil
     ) -> [[CGPoint]] {
         guard !angleCuts.isEmpty, polygon.count >= 3 else { return [] }
         let displayPolygon = polygonDisplay ?? polygon.map { displayPoint(fromRaw: $0) }
         var clips: [[CGPoint]] = []
         clips.reserveCapacity(angleCuts.count)
         for cut in angleCuts {
-            if let polygon = angleCutPolygonRaw(cut, polygonDisplay: displayPolygon) {
+            if let polygon = angleCutPolygonRaw(cut, polygonDisplay: displayPolygon, referencePolygon: referencePolygon) {
                 clips.append(polygon)
             }
         }
         return clips
     }
 
-    private static func angleCutPolygonRaw(_ cut: AngleCut, polygonDisplay: [CGPoint]) -> [CGPoint]? {
+    private static func angleCutPolygonRaw(_ cut: AngleCut, polygonDisplay: [CGPoint], referencePolygon: [CGPoint]? = nil) -> [CGPoint]? {
         let count = polygonDisplay.count
         guard count >= 3 else { return nil }
-        let anchorIndex = normalizedIndex(cut.anchorCornerIndex, count: count)
+        let anchorIndex = resolvedAngleAnchorIndex(cut, polygonDisplay: polygonDisplay, referencePolygon: referencePolygon)
         let prevIndex = normalizedIndex(anchorIndex - 1, count: count)
         let nextIndex = normalizedIndex(anchorIndex + 1, count: count)
         let corner = polygonDisplay[anchorIndex]
@@ -2446,10 +2794,10 @@ enum ShapePathBuilder {
         ]
     }
 
-    private static func angleCutSegmentRaw(_ cut: AngleCut, polygonDisplay: [CGPoint]) -> AngleSegment? {
+    private static func angleCutSegmentRaw(_ cut: AngleCut, polygonDisplay: [CGPoint], referencePolygon: [CGPoint]? = nil) -> AngleSegment? {
         let count = polygonDisplay.count
         guard count >= 3 else { return nil }
-        let anchorIndex = normalizedIndex(cut.anchorCornerIndex, count: count)
+        let anchorIndex = resolvedAngleAnchorIndex(cut, polygonDisplay: polygonDisplay, referencePolygon: referencePolygon)
         let prevIndex = normalizedIndex(anchorIndex - 1, count: count)
         let nextIndex = normalizedIndex(anchorIndex + 1, count: count)
         let corner = polygonDisplay[anchorIndex]
@@ -2466,6 +2814,15 @@ enum ShapePathBuilder {
         let p1 = CGPoint(x: corner.x + toNext.x * alongEdge1, y: corner.y + toNext.y * alongEdge1)
         let p2 = CGPoint(x: corner.x + toPrev.x * alongEdge2, y: corner.y + toPrev.y * alongEdge2)
         return AngleSegment(id: cut.id, start: rawPoint(fromDisplay: p2), end: rawPoint(fromDisplay: p1))
+    }
+
+    private static func resolvedAngleAnchorIndex(_ cut: AngleCut, polygonDisplay: [CGPoint], referencePolygon: [CGPoint]? = nil) -> Int {
+        if let ref = referencePolygon, !ref.isEmpty {
+            let refIdx = normalizedIndex(cut.anchorCornerIndex, count: ref.count)
+            let refVertex = ref[refIdx]
+            return nearestVertexIndex(to: refVertex, in: polygonDisplay)
+        }
+        return normalizedIndex(cut.anchorCornerIndex, count: polygonDisplay.count)
     }
 
 
@@ -2528,11 +2885,16 @@ enum ShapePathBuilder {
         // Use SwiftUI Path.subtracting
         let result = subjectPath.subtracting(clipPath)
         
-        // Extract points from the result using helper function (samples curves)
+        // Prefer non-sampled corner extraction to avoid curve sampling artifacts.
+        let cornerContours = extractCornersFromPath(result)
+        if !cornerContours.isEmpty {
+            let best = cornerContours.max { abs(polygonArea($0)) < abs(polygonArea($1)) }
+            return (best ?? []).map { rawPoint(fromDisplay: $0) }
+        }
+        // Fallback to sampled extraction when corner-only extraction fails.
         let displayContours = extractContoursFromPath(result)
         guard !displayContours.isEmpty else { return [] }
         let best = displayContours.max { abs(polygonArea($0)) < abs(polygonArea($1)) }
-        // Convert back to raw coordinates
         return (best ?? []).map { rawPoint(fromDisplay: $0) }
     }
     
@@ -2606,7 +2968,7 @@ enum ShapePathBuilder {
         // Path.subtracting produces near-duplicate points at curve/line
         // intersections (e.g., quadCurve end ≈ next line start). Without
         // deduplication these cause extra corner labels (C and D at same spot).
-        let dupTolerance: CGFloat = 0.1
+        let dupTolerance: CGFloat = 1.0
         return contours.map { contour in
             guard contour.count > 1 else { return contour }
             var deduped: [CGPoint] = [contour[0]]
@@ -2654,8 +3016,8 @@ enum ShapePathBuilder {
                 let denom = len1 * len2
                 let sinAngle = denom > 0.0001 ? cross / denom : 1.0
 
-                // sin(2°) ≈ 0.035 — anything below this is effectively collinear
-                if sinAngle > 0.035 {
+                // sin(5°) ≈ 0.087 — anything below this is effectively collinear
+                if sinAngle > 0.087 {
                     filtered.append(curr)
                 }
             }
@@ -4618,6 +4980,21 @@ enum ShapePathBuilder {
         case .legB: return CGPoint(x: -1, y: 0)
         case .hypotenuse: return CGPoint(x: 0.7071, y: 0.7071) // Normalized diagonal
         }
+    }
+
+    static func concaveCornerIndices(points: [CGPoint]) -> Set<Int> {
+        guard points.count > 2 else { return [] }
+        let clockwise = polygonIsClockwise(points)
+        var indices = Set<Int>()
+        for index in 0..<points.count {
+            let prev = points[(index - 1 + points.count) % points.count]
+            let curr = points[index]
+            let next = points[(index + 1) % points.count]
+            if isConcaveCorner(prev: prev, curr: curr, next: next, clockwise: clockwise) {
+                indices.insert(index)
+            }
+        }
+        return indices
     }
 
     private static func isConcaveCorner(prev: CGPoint, curr: CGPoint, next: CGPoint, clockwise: Bool) -> Bool {
