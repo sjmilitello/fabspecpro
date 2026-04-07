@@ -266,11 +266,17 @@ enum ShapePathBuilder {
             }
             for index in 0..<points.count {
                 let point = points[index]
-                let t = edgeProgress(for: point, edge: curve.edge, shape: shape, bounds: hypotenuseBounds)
-                if let spanRange, (t < spanRange.min - 0.02 || t > spanRange.max + 0.02) {
+                // Use edgeProgress for the span range check (which uses min/max so
+                // direction doesn't matter) but tForEdge for the Bézier evaluation
+                // so the parametric direction matches fullEdgeGeometry's start→end.
+                // edgeProgress always goes left→right / top→bottom, but the Bézier
+                // direction is reversed for bottom (right→left) and left (bottom→top).
+                let progressT = edgeProgress(for: point, edge: curve.edge, shape: shape, bounds: hypotenuseBounds)
+                if let spanRange, (progressT < spanRange.min - 0.02 || progressT > spanRange.max + 0.02) {
                     continue
                 }
-                let curvePoint = quadPoint(start: geometry.start, control: control, end: geometry.end, t: t)
+                let bezierT = tForEdge(point: point, geometry: geometry, edge: curve.edge)
+                let curvePoint = quadPoint(start: geometry.start, control: control, end: geometry.end, t: bezierT)
                 if distance(point, curvePoint) <= curveDistanceTolerance {
                     occupied.insert(index)
                 }
@@ -2292,7 +2298,7 @@ enum ShapePathBuilder {
                     !cutoutTouchesBoundary(cutout: cutout, size: rawSize, shape: piece.shape)
             }
             return !cutoutTouchesBoundary(cutout: cutout, size: rawSize, shape: piece.shape)
-        }
+        }.sorted { $0.id.uuidString < $1.id.uuidString }
     }
 
     /// Curve-aware interior cutouts: cutouts that need their own 4 corner labels.
@@ -2320,7 +2326,7 @@ enum ShapePathBuilder {
                 return true
             }
             return false
-        }
+        }.sorted { $0.id.uuidString < $1.id.uuidString }
     }
 
     static func cutoutCornerRanges(for piece: Piece) -> [(cutout: Cutout, range: Range<Int>)] {
@@ -2913,17 +2919,99 @@ enum ShapePathBuilder {
             for pt in displayClip.dropFirst() { clipPath.addLine(to: pt) }
             clipPath.closeSubpath()
         }
-        
+
         // Use SwiftUI Path.subtracting
         let result = subjectPath.subtracting(clipPath)
-        
+
         // Extract only corner points (no curve sampling)
         let displayContours = extractCornersFromPath(result)
         guard !displayContours.isEmpty else { return [] }
-        let best = displayContours.max { abs(polygonArea($0)) < abs(polygonArea($1)) }
+        var corners = displayContours.max { abs(polygonArea($0)) < abs(polygonArea($1)) } ?? []
+        guard !corners.isEmpty else { return [] }
+
+        // Remove curve-junction artifacts.
+        // Path.subtracting can emit a near-duplicate vertex close to a curve
+        // start/end point (rectangle corner).  The artifact has a gentle bend
+        // angle (~5-20°) while the real corner bends sharply (~90°).
+        // For each curve endpoint, if multiple extracted corners are nearby,
+        // keep the one with the largest bend angle (the real corner) and
+        // discard the rest.  This is robust even when Path.subtracting
+        // shifts the real corner position away from the mathematical endpoint.
+        let curveSegments = extractQuadCurves(from: subjectPath)
+        if !curveSegments.isEmpty {
+            var uniqueEndpoints: [CGPoint] = []
+            for seg in curveSegments {
+                for ep in [seg.start, seg.end] {
+                    if !uniqueEndpoints.contains(where: { hypot($0.x - ep.x, $0.y - ep.y) < 0.5 }) {
+                        uniqueEndpoints.append(ep)
+                    }
+                }
+            }
+            let nearRadius: CGFloat = 5.0
+            var indicesToRemove = Set<Int>()
+            let m = corners.count
+            for ep in uniqueEndpoints {
+                var nearby: [(index: Int, bendSin: CGFloat)] = []
+                for (i, corner) in corners.enumerated() {
+                    let d = hypot(corner.x - ep.x, corner.y - ep.y)
+                    if d < nearRadius {
+                        let prev = corners[(i - 1 + m) % m]
+                        let next = corners[(i + 1) % m]
+                        let v1x = corner.x - prev.x, v1y = corner.y - prev.y
+                        let v2x = next.x - corner.x, v2y = next.y - corner.y
+                        let cross = abs(v1x * v2y - v1y * v2x)
+                        let len1 = sqrt(v1x * v1x + v1y * v1y)
+                        let len2 = sqrt(v2x * v2x + v2y * v2y)
+                        let denom = len1 * len2
+                        let sinA = denom > 0.0001 ? cross / denom : 0.0
+                        nearby.append((i, sinA))
+                    }
+                }
+                if nearby.count > 1 {
+                        // Only remove clear outliers: vertices whose bend angle
+                    // is less than half the second-smallest bend in the group.
+                    // This targets the single artifact without touching real corners.
+                    nearby.sort { $0.bendSin < $1.bendSin }
+                    let secondSmallest = nearby.count >= 2 ? nearby[1].bendSin : nearby[0].bendSin
+                    let outlierThreshold = secondSmallest * 0.5
+                    for entry in nearby where entry.bendSin < outlierThreshold {
+                        indicesToRemove.insert(entry.index)
+                    }
+                }
+            }
+            if !indicesToRemove.isEmpty {
+                corners = corners.enumerated().compactMap {
+                    indicesToRemove.contains($0.offset) ? nil : $0.element
+                }
+            }
+        }
+
         // Convert back to raw coordinates
-        return (best ?? []).map { rawPoint(fromDisplay: $0) }
+        return corners.map { rawPoint(fromDisplay: $0) }
     }
+
+    /// Extract quadratic Bézier segments (start, control, end) from a Path.
+    private static func extractQuadCurves(from path: Path) -> [(start: CGPoint, control: CGPoint, end: CGPoint)] {
+        var curves: [(start: CGPoint, control: CGPoint, end: CGPoint)] = []
+        var currentPoint: CGPoint = .zero
+        path.forEach { element in
+            switch element {
+            case .move(to: let pt):
+                currentPoint = pt
+            case .line(to: let pt):
+                currentPoint = pt
+            case .quadCurve(to: let end, control: let control):
+                curves.append((start: currentPoint, control: control, end: end))
+                currentPoint = end
+            case .curve(to: let end, control1: _, control2: _):
+                currentPoint = end
+            case .closeSubpath:
+                break
+            }
+        }
+        return curves
+    }
+
     
     /// Extracts polygon contours from a Path, sampling curves into line segments
     private static func extractContoursFromPath(_ path: Path) -> [[CGPoint]] {

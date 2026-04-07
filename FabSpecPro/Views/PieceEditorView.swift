@@ -8,6 +8,7 @@ private func curvedBoundaryLabelIndicesForPiece(_ piece: Piece) -> Set<Int> {
     let points = ShapePathBuilder.displayPolygonPointsForLabeling(for: piece, includeAngles: false)
     let curves = ShapePathBuilder.validCurves(for: piece).filter { $0.radius > 0 }
     guard !points.isEmpty, !curves.isEmpty else { return [] }
+    let polygonPoints = ShapePathBuilder.displayPolygonPoints(for: piece, includeAngles: false)
     let segments = ShapePathBuilder.boundarySegmentsForLabeling(for: piece, includeAngles: false)
     let bounds = CGRect(origin: .zero, size: ShapePathBuilder.displaySize(for: piece))
     let labelingBounds = bounds
@@ -41,6 +42,23 @@ private func curvedBoundaryLabelIndicesForPiece(_ piece: Piece) -> Set<Int> {
         return bestIndex
     }
 
+    /// Find nearest labeling polygon index for a physical point.
+    func nearestLabelIndex(forPoint point: CGPoint) -> Int? {
+        guard !points.isEmpty else { return nil }
+        var bestIndex = 0
+        var bestDist = CGFloat.greatestFiniteMagnitude
+        for (i, lp) in points.enumerated() {
+            let dx = lp.x - point.x
+            let dy = lp.y - point.y
+            let dist = dx * dx + dy * dy
+            if dist < bestDist {
+                bestDist = dist
+                bestIndex = i
+            }
+        }
+        return bestIndex
+    }
+
     func curveEndpointLabelIndices() -> Set<Int> {
         var indices = Set<Int>()
         for curve in curves {
@@ -50,9 +68,11 @@ private func curvedBoundaryLabelIndicesForPiece(_ piece: Piece) -> Set<Int> {
             } else if curve.usesBoundaryEndpoints,
                       let segment = segments.first(where: { $0.edge == curve.edge && $0.index == curve.startBoundarySegmentIndex }) {
                 startIndex = curve.startBoundaryIsEnd ? segment.endIndex : segment.startIndex
+            } else if curve.startCornerIndex >= 0 && curve.startCornerIndex < polygonPoints.count {
+                // Map geometry polygon position to nearest labeling polygon vertex
+                startIndex = nearestLabelIndex(forPoint: polygonPoints[curve.startCornerIndex])
             } else {
-                startIndex = curve.startCornerIndex >= 0 && curve.startCornerIndex < points.count
-                    ? curve.startCornerIndex : nil
+                startIndex = nil
             }
             if let startIndex { indices.insert(startIndex) }
 
@@ -62,9 +82,11 @@ private func curvedBoundaryLabelIndicesForPiece(_ piece: Piece) -> Set<Int> {
             } else if curve.usesBoundaryEndpoints,
                       let segment = segments.first(where: { $0.edge == curve.edge && $0.index == curve.endBoundarySegmentIndex }) {
                 endIndex = curve.endBoundaryIsEnd ? segment.endIndex : segment.startIndex
+            } else if curve.endCornerIndex >= 0 && curve.endCornerIndex < polygonPoints.count {
+                // Map geometry polygon position to nearest labeling polygon vertex
+                endIndex = nearestLabelIndex(forPoint: polygonPoints[curve.endCornerIndex])
             } else {
-                endIndex = curve.endCornerIndex >= 0 && curve.endCornerIndex < points.count
-                    ? curve.endCornerIndex : nil
+                endIndex = nil
             }
             if let endIndex { indices.insert(endIndex) }
         }
@@ -86,27 +108,104 @@ private func curvedBoundaryLabelIndicesForPiece(_ piece: Piece) -> Set<Int> {
         requireConvex: true
     )
     blocked.formUnion(spanBlocked)
-    blocked.formUnion(curveEndpointLabelIndicesForPiece(piece))
+    blocked.formUnion(curveEndpointLabelIndices())
     blocked.subtract(ShapePathBuilder.interiorCornerIndices(for: piece))
     let notchInterior = ShapePathBuilder.notchInteriorCornerIndices(for: piece)
     blocked.subtract(notchInterior)
     return blocked
 }
 
+/// Computes curve endpoint label indices fresh from the current labeling polygon
+/// rather than reading stored startLabelIndex/endLabelIndex, which can become
+/// stale when the labeling polygon changes (e.g. due to arc depth changes).
+/// Uses physical coordinate matching: geometry polygon → physical point → nearest
+/// labeling polygon vertex.
 private func curveEndpointLabelIndicesForPiece(_ piece: Piece) -> Set<Int> {
+    let curves = piece.curvedEdges.filter { $0.radius > 0 }
+    guard !curves.isEmpty else { return [] }
+    let labelingPoints = ShapePathBuilder.displayPolygonPointsForLabeling(for: piece, includeAngles: false)
+    let polygonPoints = ShapePathBuilder.displayPolygonPoints(for: piece, includeAngles: false)
+    guard !labelingPoints.isEmpty, !polygonPoints.isEmpty else { return [] }
+
+    func nearestLabelIndex(forPoint point: CGPoint) -> Int {
+        var bestIndex = 0
+        var bestDist = CGFloat.greatestFiniteMagnitude
+        for (i, lp) in labelingPoints.enumerated() {
+            let dx = lp.x - point.x
+            let dy = lp.y - point.y
+            let dist = dx * dx + dy * dy
+            if dist < bestDist {
+                bestDist = dist
+                bestIndex = i
+            }
+        }
+        return bestIndex
+    }
+
     var indices = Set<Int>()
-    for curve in piece.curvedEdges {
-        if curve.startLabelIndex >= 0 { indices.insert(curve.startLabelIndex) }
-        if curve.endLabelIndex >= 0 { indices.insert(curve.endLabelIndex) }
+    for curve in curves {
+        if curve.startCornerIndex >= 0 && curve.startCornerIndex < polygonPoints.count {
+            let physicalPoint = polygonPoints[curve.startCornerIndex]
+            indices.insert(nearestLabelIndex(forPoint: physicalPoint))
+        }
+        if curve.endCornerIndex >= 0 && curve.endCornerIndex < polygonPoints.count {
+            let physicalPoint = polygonPoints[curve.endCornerIndex]
+            indices.insert(nearestLabelIndex(forPoint: physicalPoint))
+        }
     }
     return indices
 }
 
-private func curveEndpointLabelIndicesForCurve(_ curve: CurvedEdge, piece: Piece) -> (Int?, Int?) {
-    return (
-        curve.startLabelIndex >= 0 ? curve.startLabelIndex : nil,
-        curve.endLabelIndex >= 0 ? curve.endLabelIndex : nil
-    )
+/// Computes the label string for a single curve's endpoints, fresh from the
+/// current labeling polygon. Used by curve headers so they always match the
+/// drawing's corner labels regardless of labeling polygon changes.
+private func curveEndpointLabelsForCurve(_ curve: CurvedEdge, piece: Piece) -> (start: String, end: String) {
+    let labelingPoints = ShapePathBuilder.displayPolygonPointsForLabeling(for: piece, includeAngles: false)
+    let polygonPoints = ShapePathBuilder.displayPolygonPoints(for: piece, includeAngles: false)
+    guard !labelingPoints.isEmpty, !polygonPoints.isEmpty else { return ("?", "?") }
+
+    func nearestLabelIndex(forPoint point: CGPoint) -> Int {
+        var bestIndex = 0
+        var bestDist = CGFloat.greatestFiniteMagnitude
+        for (i, lp) in labelingPoints.enumerated() {
+            let dx = lp.x - point.x
+            let dy = lp.y - point.y
+            let dist = dx * dx + dy * dy
+            if dist < bestDist {
+                bestDist = dist
+                bestIndex = i
+            }
+        }
+        return bestIndex
+    }
+
+    func cornerLabel(for index: Int) -> String {
+        var value = index
+        var result = ""
+        repeat {
+            let remainder = value % 26
+            let scalar = UnicodeScalar(65 + remainder)!
+            result = String(Character(scalar)) + result
+            value = (value / 26) - 1
+        } while value >= 0
+        return result
+    }
+
+    let startLabel: String
+    if curve.startCornerIndex >= 0 && curve.startCornerIndex < polygonPoints.count {
+        startLabel = cornerLabel(for: nearestLabelIndex(forPoint: polygonPoints[curve.startCornerIndex]))
+    } else {
+        startLabel = "?"
+    }
+
+    let endLabel: String
+    if curve.endCornerIndex >= 0 && curve.endCornerIndex < polygonPoints.count {
+        endLabel = cornerLabel(for: nearestLabelIndex(forPoint: polygonPoints[curve.endCornerIndex]))
+    } else {
+        endLabel = "?"
+    }
+
+    return (startLabel, endLabel)
 }
 
 struct PieceEditorView: View {
@@ -529,6 +628,13 @@ struct PieceEditorView: View {
     }
 
     private var labelingSignature: Int {
+        // Hash only the labeling polygon points.  These already reflect
+        // every structural change (notch add/remove, dimension change,
+        // curve-induced labeling switch).  Curve geometry indices
+        // (startCornerIndex / endCornerIndex) are intentionally excluded —
+        // they are recalculated by normalizeSpanSelection and can change
+        // without any actual label reorder, which would falsely trigger
+        // clearAllAnglesAndRadii.
         let points = ShapePathBuilder.displayPolygonPointsForLabeling(for: piece, includeAngles: false)
         var hasher = Hasher()
         hasher.combine(points.count)
@@ -961,32 +1067,29 @@ struct PieceEditorView: View {
                 curve.endLabelIndex = endLabelIndex
             }
         }
-        removeBlockedAnglesAndRadiiIfNeeded()
+        clearAllAnglesAndRadii()
+    }
+
+    /// Removes every angle cut and corner radius on the piece.
+    /// Called when corner labels are reordered (notch add/remove) so that
+    /// stale anchorCornerIndex / cornerIndex values cannot reference the
+    /// wrong corner after the polygon shifts.
+    private func clearAllAnglesAndRadii() {
+        for angle in piece.angleCuts {
+            modelContext.delete(angle)
+        }
+        piece.angleCuts.removeAll()
+
+        for radius in piece.cornerRadii {
+            modelContext.delete(radius)
+        }
+        piece.cornerRadii.removeAll()
     }
 
     private func syncCurveLabelIndicesIfNeeded() {
         let labelingPoints = ShapePathBuilder.displayPolygonPointsForLabeling(for: piece, includeAngles: false)
         let polygonPoints = ShapePathBuilder.displayPolygonPoints(for: piece, includeAngles: false)
-        let outlineCount = labelingPoints.count
-        guard outlineCount > 0 else { return }
-
-        var labelIndexToPolygon: [Int: Int] = [:]
-        labelIndexToPolygon.reserveCapacity(outlineCount)
-        for labelIndex in labelingPoints.indices {
-            let labelPoint = labelingPoints[labelIndex]
-            var bestIndex = 0
-            var bestDistance = CGFloat.greatestFiniteMagnitude
-            for (index, point) in polygonPoints.enumerated() {
-                let dx = point.x - labelPoint.x
-                let dy = point.y - labelPoint.y
-                let distance = dx * dx + dy * dy
-                if distance < bestDistance {
-                    bestDistance = distance
-                    bestIndex = index
-                }
-            }
-            labelIndexToPolygon[labelIndex] = bestIndex
-        }
+        guard !labelingPoints.isEmpty, !polygonPoints.isEmpty else { return }
 
         func nearestLabelIndex(for polygonIndex: Int) -> Int? {
             guard polygonIndex >= 0, polygonIndex < polygonPoints.count else { return nil }
@@ -1006,17 +1109,11 @@ struct PieceEditorView: View {
         }
 
         for curve in piece.curvedEdges {
-            if curve.startLabelIndex >= 0, curve.startLabelIndex < outlineCount,
-               let mappedStart = labelIndexToPolygon[curve.startLabelIndex] {
-                curve.startCornerIndex = mappedStart
-            } else if let fallbackStart = nearestLabelIndex(for: curve.startCornerIndex) {
-                curve.startLabelIndex = fallbackStart
+            if let freshStart = nearestLabelIndex(for: curve.startCornerIndex) {
+                curve.startLabelIndex = freshStart
             }
-            if curve.endLabelIndex >= 0, curve.endLabelIndex < outlineCount,
-               let mappedEnd = labelIndexToPolygon[curve.endLabelIndex] {
-                curve.endCornerIndex = mappedEnd
-            } else if let fallbackEnd = nearestLabelIndex(for: curve.endCornerIndex) {
-                curve.endLabelIndex = fallbackEnd
+            if let freshEnd = nearestLabelIndex(for: curve.endCornerIndex) {
+                curve.endLabelIndex = freshEnd
             }
         }
     }
@@ -2714,16 +2811,18 @@ private struct CurveCollapsibleItem: View {
     @State private var headerRefreshToken = 0
     
     private var spanLabel: String {
-        _ = labelingSignature
-        _ = headerRefreshToken
-        let startIndex = curve.startLabelIndex
-        let endIndex = curve.endLabelIndex
-        let startLabel = startIndex >= 0 ? cornerLabel(for: startIndex) : "?"
-        let endLabel = endIndex >= 0 ? cornerLabel(for: endIndex) : "?"
-        return "\(startLabel)-\(endLabel)"
+        // Read stored label indices directly — these are @Bindable properties,
+        // so SwiftUI observes them and re-renders when they change.
+        // The sync chain (cutout change → syncCurveLabelStateIfNeeded →
+        // refreshCurveLabelsForReorder) updates these stored indices, which
+        // then triggers re-render automatically.
+        let startIdx = curve.startLabelIndex
+        let endIdx = curve.endLabelIndex
+        return "\(cornerLabel(for: startIdx))-\(cornerLabel(for: endIdx))"
     }
-    
+
     private func cornerLabel(for index: Int) -> String {
+        guard index >= 0 else { return "?" }
         var value = index
         var result = ""
         repeat {
@@ -2752,12 +2851,23 @@ private struct CurveCollapsibleItem: View {
                 isOpen.toggle()
             }
             
-            if isOpen {
-                CurveRow(curve: curve, shape: piece.shape, piece: piece)
-            }
+            // CurveRow is always in the view tree so its .onChange handlers
+            // (especially piece.cutouts.count → normalizeSpanSelection) stay
+            // active even when collapsed.  Without this, adding/removing a
+            // notch never recalculates startCornerIndex and the header, fields,
+            // and Blocked list show stale labels until the user taps to expand.
+            CurveRow(curve: curve, shape: piece.shape, piece: piece)
+                .frame(maxHeight: isOpen ? .none : 0)
+                .clipped()
+                .allowsHitTesting(isOpen)
         }
+        .onChange(of: curve.startCornerIndex) { _, _ in headerRefreshToken &+= 1 }
+        .onChange(of: curve.endCornerIndex) { _, _ in headerRefreshToken &+= 1 }
         .onChange(of: curve.startLabelIndex) { _, _ in headerRefreshToken &+= 1 }
         .onChange(of: curve.endLabelIndex) { _, _ in headerRefreshToken &+= 1 }
+        .onChange(of: curve.radius) { _, _ in headerRefreshToken &+= 1 }
+        .onChange(of: curve.isConcave) { _, _ in headerRefreshToken &+= 1 }
+        .onChange(of: labelingSignature) { _, _ in headerRefreshToken &+= 1 }
         .padding(10)
         .background(Theme.surface)
         .clipShape(RoundedRectangle(cornerRadius: 10))
