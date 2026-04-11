@@ -236,11 +236,7 @@ struct PieceEditorView: View {
     @State private var showDeleteCurvesConfirm = false
     @State private var showDeleteAnglesConfirm = false
     @State private var showDeleteCornerRadiiConfirm = false
-    @State private var keyboardHeight: CGFloat = 0
-    @State private var isKeyboardVisible = false
     @FocusState private var isMaterialNameFocused: Bool
-
-    private let keyboardOverlapHeight: CGFloat = 200
 
     var body: some View {
         ZStack {
@@ -255,49 +251,18 @@ struct PieceEditorView: View {
                     }
                 }
                 .padding(.horizontal, 20)
-                .padding(.top, 20)
-                .padding(.bottom, 18)
+                .padding(.top, 10)
+                .padding(.bottom, 0)
                 .background(Theme.background)
-                
+                .zIndex(2)
+
                 // Scrollable content below
                 ScrollView {
                     VStack(alignment: .leading, spacing: 18) {
+                        // Spacer fills the overlap zone when drawing is open
+                        Color.clear.frame(height: isDrawingOpen ? 150 : 0)
                         collapsibleSection(title: "Material (\(piece.materialName.isEmpty ? "None" : piece.materialName))", isOpen: $isMaterialOpen, onClose: saveMaterialToLibraryIfNeeded) {
-                            VStack(spacing: 12) {
-                                TextField("Piece name", text: $piece.name, prompt: Text("Piece name").foregroundStyle(Theme.secondaryText))
-                                    .foregroundStyle(Theme.primaryText)
-                                    #if canImport(UIKit)
-                                    .textInputAutocapitalization(.words)
-                                    #endif
-                                TextField("Material name", text: $piece.materialName, prompt: Text("Material name").foregroundStyle(Theme.secondaryText))
-                                    .foregroundStyle(Theme.primaryText)
-                                    .focused($isMaterialNameFocused)
-                                    #if canImport(UIKit)
-                                    .textInputAutocapitalization(.words)
-                                    #endif
-                                    .onSubmit {
-                                        saveMaterialToLibraryIfNeeded()
-                                    }
-                                    .onChange(of: isMaterialNameFocused) { _, isFocused in
-                                        if !isFocused {
-                                            saveMaterialToLibraryIfNeeded()
-                                        }
-                                    }
-                                HStack {
-                                    Picker("Thickness", selection: $piece.thicknessRaw) {
-                                        ForEach(MaterialThickness.allCases) { thickness in
-                                            Text(thickness.rawValue).tag(thickness.rawValue)
-                                        }
-                                    }
-                                    .pickerStyle(.menu)
-                                    Spacer()
-                                    Menu("Saved") {
-                                        ForEach(materials.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }) { material in
-                                            Button(material.name) { piece.materialName = material.name }
-                                        }
-                                    }
-                                }
-                            }
+                            materialFields
                         }
 
                         collapsibleSection(title: "Shape (\(shapeHeaderLabel))", isOpen: $isShapeOpen) {
@@ -311,11 +276,7 @@ struct PieceEditorView: View {
 
                         optionsSection
 
-                        collapsibleSection(title: "Notes", isOpen: $isNotesOpen) {
-                            TextField("Notes", text: $piece.notes, prompt: Text("Notes").foregroundStyle(Theme.secondaryText), axis: .vertical)
-                                .foregroundStyle(Theme.primaryText)
-                                .lineLimit(3...6)
-                        }
+                        notesSection
 
                         HStack(spacing: 12) {
                             Button("Add Another Piece") {
@@ -340,19 +301,13 @@ struct PieceEditorView: View {
                     .padding(.horizontal, 20)
                     .padding(.bottom, 20)
                 }
-                .dismissKeyboardOnSwipe()
-                .modifier(KeyboardOverlapModifier(isKeyboardVisible: isKeyboardVisible, keyboardHeight: keyboardHeight, overlapHeight: keyboardOverlapHeight))
+                .dismissKeyboardOnTapOutside()
+                .scrollDismissesKeyboard(.never)
+                .padding(.top, isDrawingOpen ? -150 : 0)
+                .background(Theme.background)
+                .keyboardZIndex(behind: 0, inFront: 3)
             }
         }
-        #if canImport(UIKit)
-        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillChangeFrameNotification)) { notification in
-            updateKeyboardState(from: notification)
-        }
-        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { _ in
-            keyboardHeight = 0
-            isKeyboardVisible = false
-        }
-        #endif
         .navigationTitle(piece.name)
         #if canImport(UIKit)
         .navigationBarTitleDisplayMode(.inline)
@@ -392,30 +347,6 @@ struct PieceEditorView: View {
         .onChange(of: piece.edgeAssignments.count) { _, _ in markUpdated() }
     }
 
-    #if canImport(UIKit)
-    private func updateKeyboardState(from notification: Notification) {
-        guard let userInfo = notification.userInfo,
-              let endFrame = userInfo[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect else { return }
-        let window = keyWindow()
-        let screenHeight = window?.windowScene?.screen.bounds.height ?? endFrame.maxY
-        let overlap = max(0, screenHeight - endFrame.origin.y)
-        let safeAreaBottom = window?.safeAreaInsets.bottom ?? 0
-        let adjustedHeight = max(0, overlap - safeAreaBottom)
-        keyboardHeight = adjustedHeight
-        isKeyboardVisible = adjustedHeight > 0
-    }
-
-    private func keyWindow() -> UIWindow? {
-        let scenes = UIApplication.shared.connectedScenes
-            .compactMap { $0 as? UIWindowScene }
-        for scene in scenes {
-            if let window = scene.windows.first(where: { $0.isKeyWindow }) {
-                return window
-            }
-        }
-        return nil
-    }
-    #endif
 
     private var shapeHeaderLabel: String {
         let shapeName: String
@@ -438,6 +369,51 @@ struct PieceEditorView: View {
                     piece.shape = shape
                 }
                 .buttonStyle(PillButtonStyle(isProminent: piece.shape == shape))
+            }
+        }
+    }
+
+    private var notesSection: some View {
+        collapsibleSection(title: "Notes", isOpen: $isNotesOpen) {
+            BufferedTextField("Notes", text: $piece.notes, prompt: Text("Notes").foregroundStyle(Theme.secondaryText), axis: .vertical)
+                .foregroundStyle(Theme.primaryText)
+                .autocorrectionDisabled(true)
+                #if canImport(UIKit)
+                .keyboardType(.asciiCapable)
+                #endif
+                .lineLimit(3...6)
+        }
+    }
+
+    private var materialFields: some View {
+        VStack(spacing: 12) {
+            BufferedTextField("Piece name", text: $piece.name, prompt: Text("Piece name").foregroundStyle(Theme.secondaryText))
+                .foregroundStyle(Theme.primaryText)
+                .autocorrectionDisabled(true)
+                #if canImport(UIKit)
+                .keyboardType(.asciiCapable)
+                .textInputAutocapitalization(.words)
+                #endif
+            BufferedTextField("Material name", text: $piece.materialName, prompt: Text("Material name").foregroundStyle(Theme.secondaryText), onCommit: saveMaterialToLibraryIfNeeded)
+                .foregroundStyle(Theme.primaryText)
+                .autocorrectionDisabled(true)
+                #if canImport(UIKit)
+                .keyboardType(.asciiCapable)
+                .textInputAutocapitalization(.words)
+                #endif
+            HStack {
+                Picker("Thickness", selection: $piece.thicknessRaw) {
+                    ForEach(MaterialThickness.allCases) { thickness in
+                        Text(thickness.rawValue).tag(thickness.rawValue)
+                    }
+                }
+                .pickerStyle(.menu)
+                Spacer()
+                Menu("Saved") {
+                    ForEach(materials.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }) { material in
+                        Button(material.name) { piece.materialName = material.name }
+                    }
+                }
             }
         }
     }
@@ -516,7 +492,7 @@ struct PieceEditorView: View {
                 collapsibleSubsection(title: "Cutouts", isOpen: $isCutoutsOpen) {
                     VStack(spacing: 12) {
                         cutoutButtons
-                        let displayCutouts = Array(piece.cutouts.reversed())
+                        let displayCutouts = piece.cutouts.sorted { $0.createdAt > $1.createdAt }
                         let cutoutCount = displayCutouts.count
                         ForEach(displayCutouts.indices, id: \.self) { index in
                             let cutout = displayCutouts[index]
@@ -540,12 +516,7 @@ struct PieceEditorView: View {
                         #if DEBUG
                         debugCurvedBoundaryReadout
                         #endif
-                        let displayCornerRadii = piece.cornerRadii.sorted { lhs, rhs in
-                            if lhs.cornerIndex == rhs.cornerIndex {
-                                return lhs.id.uuidString > rhs.id.uuidString
-                            }
-                            return lhs.cornerIndex > rhs.cornerIndex
-                        }
+                        let displayCornerRadii = piece.cornerRadii.sorted { $0.createdAt > $1.createdAt }
                         let radiusLabels = cornerLabelsForPiece()
                         ForEach(displayCornerRadii.indices, id: \.self) { index in
                             let cornerRadius = displayCornerRadii[index]
@@ -571,12 +542,7 @@ struct PieceEditorView: View {
                         debugCurvedBoundaryReadout
                         debugAngleEligibilityReadout
                         #endif
-                        let displayAngles = piece.angleCuts.sorted { lhs, rhs in
-                            if lhs.anchorCornerIndex == rhs.anchorCornerIndex {
-                                return lhs.id.uuidString > rhs.id.uuidString
-                            }
-                            return lhs.anchorCornerIndex > rhs.anchorCornerIndex
-                        }
+                        let displayAngles = piece.angleCuts.sorted { $0.createdAt > $1.createdAt }
                         let angleLabels = cornerLabelsForPiece()
                         ForEach(displayAngles.indices, id: \.self) { index in
                             let angle = displayAngles[index]
@@ -598,7 +564,7 @@ struct PieceEditorView: View {
                 collapsibleSubsection(title: "Curves", isOpen: $isCurvesOpen) {
                     VStack(spacing: 12) {
                         curveButtons
-                        let displayCurves = Array(piece.curvedEdges.reversed())
+                        let displayCurves = piece.curvedEdges.sorted { $0.createdAt > $1.createdAt }
                         let curveCount = displayCurves.count
                         ForEach(Array(displayCurves.enumerated()), id: \.element.id) { index, curve in
                             CurveCollapsibleItem(
@@ -1969,6 +1935,7 @@ private struct FractionTextField: View {
             HStack(spacing: 8) {
                 TextField("0", text: $wholeText, prompt: Text("0").foregroundStyle(Theme.secondaryText))
                     .foregroundStyle(Theme.primaryText)
+                    .autocorrectionDisabled(true)
                     #if canImport(UIKit)
                     .keyboardType(.numberPad)
                     #endif
@@ -2069,6 +2036,7 @@ private struct FractionNumberField: View {
 
                 TextField("0", text: $wholeText, prompt: Text("0").foregroundStyle(Theme.secondaryText))
                     .foregroundStyle(Theme.primaryText)
+                    .autocorrectionDisabled(true)
                     #if canImport(UIKit)
                     .keyboardType(allowNegative ? .numbersAndPunctuation : .numberPad)
                     #endif
@@ -2159,26 +2127,6 @@ private struct SignToggleStyle: ToggleStyle {
                 )
         }
         .buttonStyle(.plain)
-    }
-}
-
-private struct KeyboardOverlapModifier: ViewModifier {
-    let isKeyboardVisible: Bool
-    let keyboardHeight: CGFloat
-    let overlapHeight: CGFloat
-
-    func body(content: Content) -> some View {
-        #if canImport(UIKit)
-        let effectiveOverlap = min(overlapHeight, keyboardHeight * 0.8)
-        let bottomPadding = max(0, keyboardHeight - effectiveOverlap)
-        content
-            .padding(.top, isKeyboardVisible ? -effectiveOverlap : 0)
-            .padding(.bottom, isKeyboardVisible ? bottomPadding : 0)
-            .zIndex(isKeyboardVisible ? 1 : 0)
-            .animation(.easeInOut(duration: 0.2), value: isKeyboardVisible)
-        #else
-        content
-        #endif
     }
 }
 
@@ -2364,6 +2312,7 @@ private struct CutoutRow: View {
                                     set: { cutout.customAngleDegrees = $0 }
                                 )
                             ), format: .number)
+                            .autocorrectionDisabled(true)
                             .textFieldStyle(.roundedBorder)
                             .frame(width: 80)
                             Text("°")
@@ -3618,6 +3567,7 @@ private struct AngleCutRow: View {
                     }
                 ), format: .number)
                 .foregroundStyle(Theme.primaryText)
+                .autocorrectionDisabled(true)
                 .padding(8)
                 .background(Theme.panel)
                 .clipShape(RoundedRectangle(cornerRadius: 8))

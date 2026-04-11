@@ -72,8 +72,9 @@ final class CurvedEdge {
     var edgeRaw: String
     var radius: Double
     var isConcave: Bool
+    var createdAt: Date = Date()
     var piece: Piece?
-    
+
     /// Start corner index for corner-based curve selection (-1 means use legacy edge-based)
     var startCornerIndex: Int = -1
     /// End corner index for corner-based curve selection (-1 means use legacy edge-based)
@@ -98,11 +99,12 @@ final class CurvedEdge {
     var endEdgeProgress: Double = -1
 
     /// Legacy initializer for edge-based curves (backward compatibility)
-    init(edge: EdgePosition, radius: Double, isConcave: Bool) {
+    init(edge: EdgePosition, radius: Double, isConcave: Bool, createdAt: Date = Date()) {
         self.id = UUID()
         self.edgeRaw = edge.rawValue
         self.radius = radius
         self.isConcave = isConcave
+        self.createdAt = createdAt
         self.startCornerIndex = -1
         self.endCornerIndex = -1
         self.startLabelIndex = -1
@@ -116,7 +118,7 @@ final class CurvedEdge {
     }
     
     /// New initializer for corner-based curves
-    init(startCornerIndex: Int, endCornerIndex: Int, radius: Double, isConcave: Bool, edge: EdgePosition) {
+    init(startCornerIndex: Int, endCornerIndex: Int, radius: Double, isConcave: Bool, edge: EdgePosition, createdAt: Date = Date()) {
         self.id = UUID()
         self.startCornerIndex = startCornerIndex
         self.endCornerIndex = endCornerIndex
@@ -131,6 +133,7 @@ final class CurvedEdge {
         self.radius = radius
         self.isConcave = isConcave
         self.edgeRaw = edge.rawValue
+        self.createdAt = createdAt
     }
 
     var edge: EdgePosition {

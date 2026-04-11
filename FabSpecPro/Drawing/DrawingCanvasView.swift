@@ -72,9 +72,7 @@ struct DrawingCanvasView: View {
                     if !isReadOnly {
                         drawCornerLabels(in: &context, metrics: metrics)
                     }
-                    if !isReadOnly {
-                        drawCutoutNotes(in: &context, metrics: metrics)
-                    }
+                    // Cutout notes are only drawn on PDF export (isReadOnly path)
                 }
 
                 // Only show total dimensions text in interactive mode

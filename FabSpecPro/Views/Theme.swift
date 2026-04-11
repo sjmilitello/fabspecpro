@@ -110,23 +110,92 @@ struct LogoHeaderView: View {
     }
 }
 
-// MARK: - Keyboard Dismissal
+// MARK: - Buffered Text Field
+
+/// A TextField that buffers keystrokes locally and only writes to the model
+/// binding on focus loss or submit. This prevents per-keystroke model updates
+/// that would trigger expensive view re-renders (e.g. DrawingCanvasView).
+struct BufferedTextField: View {
+    let title: String
+    @Binding var text: String
+    var prompt: Text?
+    var axis: Axis
+    var onCommit: (() -> Void)?
+
+    init(_ title: String, text: Binding<String>, prompt: Text? = nil, axis: Axis = .horizontal, onCommit: (() -> Void)? = nil) {
+        self.title = title
+        self._text = text
+        self.prompt = prompt
+        self.axis = axis
+        self.onCommit = onCommit
+    }
+
+    @State private var buffer: String = ""
+    @FocusState private var isFocused: Bool
+
+    var body: some View {
+        Group {
+            if axis == .vertical {
+                TextField(title, text: $buffer, prompt: prompt, axis: .vertical)
+            } else {
+                TextField(title, text: $buffer, prompt: prompt)
+            }
+        }
+        .focused($isFocused)
+        .onAppear { buffer = text }
+        .onChange(of: isFocused) { _, focused in
+            if !focused {
+                text = buffer
+                onCommit?()
+            }
+        }
+        .onSubmit {
+            text = buffer
+            onCommit?()
+        }
+        .onChange(of: text) { _, newValue in
+            if !isFocused && buffer != newValue { buffer = newValue }
+        }
+    }
+}
+
+// MARK: - Keyboard Z-Index & Dismissal
 
 #if canImport(UIKit)
+
+/// Toggles zIndex so the ScrollView renders behind the drawing when the keyboard
+/// is closed and in front of it when the keyboard is open.
+/// Only changes render order — no layout recalculation, no content re-evaluation.
+struct KeyboardZIndexModifier: ViewModifier {
+    let behind: Double
+    let inFront: Double
+    @State private var keyboardVisible = false
+
+    func body(content: Content) -> some View {
+        content
+            .zIndex(keyboardVisible ? inFront : behind)
+            .onReceive(
+                NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)
+            ) { _ in keyboardVisible = true }
+            .onReceive(
+                NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)
+            ) { _ in keyboardVisible = false }
+    }
+}
+
+extension View {
+    /// Toggles zIndex based on keyboard visibility
+    func keyboardZIndex(behind: Double = 0, inFront: Double = 3) -> some View {
+        modifier(KeyboardZIndexModifier(behind: behind, inFront: inFront))
+    }
+}
+
 extension View {
     /// Configures ScrollView to dismiss keyboard when scrolling
     func dismissKeyboardOnSwipe() -> some View {
         self.scrollDismissesKeyboard(.interactively)
     }
-    
-    /// Dismisses keyboard when tapping outside text fields
-    func dismissKeyboardOnTap() -> some View {
-        self.contentShape(Rectangle())
-            .onTapGesture {
-                UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
-            }
-    }
-    
+
     /// Applies tap-to-dismiss keyboard to the entire view hierarchy
     func dismissKeyboardOnTapOutside() -> some View {
         self.onAppear {
@@ -139,13 +208,12 @@ extension View {
 private func setupKeyboardDismissGesture() {
     guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
           let window = windowScene.windows.first else { return }
-    
-    // Check if we already added the gesture
+
     let gestureTag = 999
     if window.gestureRecognizers?.contains(where: { $0.view?.tag == gestureTag }) == true {
         return
     }
-    
+
     let tapGesture = UITapGestureRecognizer(target: window, action: nil)
     tapGesture.requiresExclusiveTouchType = false
     tapGesture.cancelsTouchesInView = false
@@ -153,32 +221,31 @@ private func setupKeyboardDismissGesture() {
     window.addGestureRecognizer(tapGesture)
 }
 
-/// Gesture delegate that dismisses keyboard on any tap
+/// Gesture delegate that dismisses keyboard on any tap outside text fields
 class KeyboardDismissGestureDelegate: NSObject, UIGestureRecognizerDelegate {
     static let shared = KeyboardDismissGestureDelegate()
-    
+
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
-        // Dismiss keyboard on any touch
+        var view = touch.view
+        while let v = view {
+            if v is UITextField || v is UITextView {
+                return false
+            }
+            view = v.superview
+        }
         UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
-        return false // Don't consume the touch
+        return false
     }
-    
+
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
         return true
     }
 }
+
 #else
 extension View {
-    func dismissKeyboardOnSwipe() -> some View {
-        self // No-op on macOS
-    }
-    
-    func dismissKeyboardOnTap() -> some View {
-        self // No-op on macOS
-    }
-    
-    func dismissKeyboardOnTapOutside() -> some View {
-        self // No-op on macOS
-    }
+    func dismissKeyboardOnSwipe() -> some View { self }
+    func dismissKeyboardOnTapOutside() -> some View { self }
+    func keyboardZIndex(behind: Double = 0, inFront: Double = 3) -> some View { self }
 }
 #endif

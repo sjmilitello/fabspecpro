@@ -7,12 +7,14 @@ final class CornerRadius {
     var cornerIndex: Int
     var radius: Double
     var isInside: Bool
+    var createdAt: Date = Date()
     var piece: Piece?
 
-    init(cornerIndex: Int = 0, radius: Double = 1, isInside: Bool = false) {
+    init(cornerIndex: Int = 0, radius: Double = 1, isInside: Bool = false, createdAt: Date = Date()) {
         self.id = UUID()
         self.cornerIndex = cornerIndex
         self.radius = radius
         self.isInside = isInside
+        self.createdAt = createdAt
     }
 }

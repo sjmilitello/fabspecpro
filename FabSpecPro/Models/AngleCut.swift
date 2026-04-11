@@ -10,6 +10,7 @@ final class AngleCut {
     var secondaryOffset: Double
     var usesSecondPoint: Bool
     var angleDegrees: Double
+    var createdAt: Date = Date()
     var piece: Piece?
 
     init(anchorCornerIndex: Int = 0,
@@ -17,7 +18,8 @@ final class AngleCut {
          secondaryCornerIndex: Int = 0,
          secondaryOffset: Double = 2,
          usesSecondPoint: Bool = true,
-         angleDegrees: Double = 45) {
+         angleDegrees: Double = 45,
+         createdAt: Date = Date()) {
         self.id = UUID()
         self.anchorCornerIndex = anchorCornerIndex
         self.anchorOffset = anchorOffset
@@ -25,5 +27,6 @@ final class AngleCut {
         self.secondaryOffset = secondaryOffset
         self.usesSecondPoint = usesSecondPoint
         self.angleDegrees = angleDegrees
+        self.createdAt = createdAt
     }
 }
