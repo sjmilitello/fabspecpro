@@ -513,9 +513,7 @@ struct PieceEditorView: View {
                 collapsibleSubsection(title: "Corner Radius", isOpen: $isCornerRadiiOpen) {
                     VStack(spacing: 12) {
                         cornerRadiusButtons
-                        #if DEBUG
-                        debugCurvedBoundaryReadout
-                        #endif
+
                         let displayCornerRadii = piece.cornerRadii.sorted { $0.createdAt > $1.createdAt }
                         let radiusLabels = cornerLabelsForPiece()
                         ForEach(displayCornerRadii.indices, id: \.self) { index in
@@ -538,10 +536,7 @@ struct PieceEditorView: View {
                 collapsibleSubsection(title: "Angles", isOpen: $isAnglesOpen) {
                     VStack(spacing: 12) {
                         angleButtons
-                        #if DEBUG
-                        debugCurvedBoundaryReadout
-                        debugAngleEligibilityReadout
-                        #endif
+
                         let displayAngles = piece.angleCuts.sorted { $0.createdAt > $1.createdAt }
                         let angleLabels = cornerLabelsForPiece()
                         ForEach(displayAngles.indices, id: \.self) { index in
@@ -698,60 +693,6 @@ struct PieceEditorView: View {
         }
     }
 
-    #if DEBUG
-    private var debugCurvedBoundaryReadout: some View {
-        let blocked = curvedBoundaryLabelIndices().sorted()
-        let labels = cornerLabelsForPiece()
-        let blockedLabels = blocked.compactMap { index in
-            index >= 0 && index < labels.count ? labels[index] : nil
-        }
-        let blockedText = blockedLabels.isEmpty ? "None" : blockedLabels.joined(separator: ", ")
-        return Text("Blocked curved boundary corners: \(blockedText)")
-            .font(.system(size: 11, weight: .semibold))
-            .foregroundStyle(Color.orange)
-            .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private var debugAngleEligibilityReadout: some View {
-        let labels = cornerLabelsForPiece()
-        let labelCount = labels.count
-        let geometryCount = ShapePathBuilder.displayPolygonPoints(for: piece, includeAngles: false).count
-        let curveEndpointsStored = Set(piece.curvedEdges.flatMap { edge in
-            var indices: [Int] = []
-            if edge.startLabelIndex >= 0 { indices.append(edge.startLabelIndex) }
-            if edge.endLabelIndex >= 0 { indices.append(edge.endLabelIndex) }
-            return indices
-        })
-        let curveEndpointsFresh = curveEndpointLabelIndicesForPiece(piece)
-        let blocked = curvedBoundaryLabelIndices().union(curveEndpointsFresh)
-        let blockedLabels = blocked.sorted().compactMap { idx in
-            idx >= 0 && idx < labels.count ? labels[idx] : nil
-        }
-        let geometryMissingLabels = (geometryCount..<labelCount).compactMap { idx in
-            idx >= 0 && idx < labels.count ? labels[idx] : nil
-        }
-
-        let blockedText = blockedLabels.isEmpty ? "None" : blockedLabels.joined(separator: ", ")
-        let endpointsStoredText = curveEndpointsStored.sorted().compactMap { idx in
-            idx >= 0 && idx < labels.count ? labels[idx] : nil
-        }.joined(separator: ", ")
-        let endpointsFreshText = curveEndpointsFresh.sorted().compactMap { idx in
-            idx >= 0 && idx < labels.count ? labels[idx] : nil
-        }.joined(separator: ", ")
-        let missingText = geometryMissingLabels.isEmpty ? "None" : geometryMissingLabels.joined(separator: ", ")
-
-        return VStack(alignment: .leading, spacing: 4) {
-            Text("Angle labels: \(labelCount) | Angle geometry corners: \(geometryCount)")
-            Text("Blocked (curves/endpoints): \(blockedText)")
-            Text("Curve endpoints (stored): \(endpointsStoredText.isEmpty ? "None" : endpointsStoredText)")
-            Text("Curve endpoints (fresh): \(endpointsFreshText.isEmpty ? "None" : endpointsFreshText)")
-            Text("Not in angle geometry: \(missingText)")
-        }
-        .font(.system(size: 11, weight: .semibold))
-        .foregroundStyle(Color.orange)
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-    #endif
 
     private func addCutout(kind: CutoutKind) {
         let size = ShapePathBuilder.pieceSize(for: piece)

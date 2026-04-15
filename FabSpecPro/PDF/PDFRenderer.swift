@@ -914,7 +914,8 @@ enum PDFRenderer {
         // Notes must start BELOW all visual content with proper padding
         let visualContentBottom = max(shapeBottom, edgeLabelBottom, measurementBottom, qtyLabelBottom)
         let notesPadding: CGFloat = 8
-        let notesY = visualContentBottom + notesPadding
+        let minMeasurementToNotesGap: CGFloat = 8
+        let notesY = max(visualContentBottom + notesPadding, bottomMeasurementY + measurementHeight + minMeasurementToNotesGap)
         
         // Notes bottom
         let notesBottom = notesY + notesHeight
@@ -2904,8 +2905,12 @@ enum PDFRenderer {
         let headerX = rect.minX - drawingLeftInset + 19
         let pageWidth: CGFloat = 612
         let rightMargin: CGFloat = 24
-        let headerWidth = pageWidth - rightMargin - headerX
+        let qtyLabelWidth: CGFloat = 44
+        let headerWidth = pageWidth - rightMargin - headerX - qtyLabelWidth - 8
         drawText(headerLine, in: context, frame: CGRect(x: headerX, y: pieceHeaderY, width: headerWidth, height: 12), font: .boldSystemFont(ofSize: 11), alignment: .left)
+        // Draw Qty on same line as piece header, right-aligned
+        let qtyX = pageWidth - rightMargin - qtyLabelWidth
+        drawText("Qty \(piece.quantity)", in: context, frame: CGRect(x: qtyX, y: pieceHeaderY, width: qtyLabelWidth, height: 12), font: .boldSystemFont(ofSize: 11), alignment: .left)
 
         if piece.shape == .circle {
             // Match DrawingCanvasView positioning for circles
@@ -3025,7 +3030,7 @@ enum PDFRenderer {
             drawText(lengthLabel, in: context, frame: CGRect(x: offsetX + (size.width * scale / 2) - 30, y: topLabelCenterY - 6, width: 60, height: 12), font: .systemFont(ofSize: 9, weight: .semibold), alignment: .center)
             drawText(depthLabel, in: context, frame: CGRect(x: leftLabelCenterX - 32, y: offsetY + (size.height * scale / 2) - 6, width: 64, height: 12), font: .systemFont(ofSize: 9, weight: .semibold), alignment: .center)
         }
-        drawText("Qty \(piece.quantity)", in: context, frame: CGRect(x: right + 72, y: offsetY + (size.height * scale / 2) - 6, width: 44, height: 12), font: .systemFont(ofSize: 9, weight: .semibold), alignment: .left)
+
     }
 
     private static func drawSegmentDimensionLabels(in context: CGContext, piece: Piece, scale: CGFloat, offsetX: CGFloat, offsetY: CGFloat) {
