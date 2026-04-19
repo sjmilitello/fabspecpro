@@ -363,7 +363,26 @@ struct DrawingCanvasView: View {
             var basePoint = point
 
             let boundaryEdges = edgesContaining(point: point, bounds: pieceBounds, shape: piece.shape, tolerance: 0.5)
-            if let curvedEdge = boundaryEdges.first(where: { piece.curve(for: $0)?.radius ?? 0 > 0 }),
+            // Rendering-only override: if this label index is a stored curve
+            // endpoint (startLabelIndex / endLabelIndex), resolve the curved
+            // edge directly from the curve instead of via boundaryEdges. When
+            // a mid-side notch sits outside the straight-edge boundary,
+            // pieceBounds expands past the base rectangle and edgesContaining
+            // no longer reports the point as being on .top/.bottom/.left/.right,
+            // which causes the curved-edge override below to be skipped and
+            // the label to fall through to the piece-center fallback — landing
+            // inside the concave arc. Looking up the edge via the curve's own
+            // metadata keeps the override firing consistently in both cases.
+            // Does not alter pieceCorners, label ordering, cornerLabelCount,
+            // labelingSignature, anchorCornerIndex, or cornerIndex.
+            // Legacy curves with -1 label indices (pre-migration) will never
+            // match and fall through to the original boundaryEdges-based path.
+            let curveEndpointOverride: CurvedEdge? = piece.curvedEdges.first { curve in
+                curve.radius > 0 && (curve.startLabelIndex == index || curve.endLabelIndex == index)
+            }
+            let resolvedCurvedEdge: EdgePosition? = curveEndpointOverride?.edge
+                ?? boundaryEdges.first(where: { piece.curve(for: $0)?.radius ?? 0 > 0 })
+            if let curvedEdge = resolvedCurvedEdge,
                let curve = piece.curve(for: curvedEdge),
                let geometry = fullEdgeGeometryDisplay(edge: curvedEdge) {
                 let t = edgeProgress(point: point, geometry: geometry, edge: curvedEdge)

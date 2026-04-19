@@ -8,7 +8,6 @@ final class BusinessHeader {
     var address: String
     var email: String
     var phone: String
-    var logoData: Data?
 
     init() {
         self.id = UUID()
@@ -16,7 +15,6 @@ final class BusinessHeader {
         self.address = ""
         self.email = ""
         self.phone = ""
-        self.logoData = nil
     }
 }
 

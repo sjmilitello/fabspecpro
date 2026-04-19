@@ -251,9 +251,33 @@ enum FabSpecProSchemaV14: VersionedSchema {
     }
 }
 
+/// Schema V15: Removes logoData from BusinessHeader (logo feature removed from
+/// Settings) and adds PieceDefaults to the tracked model list. PieceDefaults
+/// was present in the production Schema used by FabSpecProApp but was never
+/// declared in any earlier VersionedSchema, so V15 brings the migration plan
+/// into sync with what the app actually stores.
+enum FabSpecProSchemaV15: VersionedSchema {
+    static var versionIdentifier: Schema.Version { Schema.Version(1, 14, 0) }
+    static var models: [any PersistentModel.Type] {
+        [
+            Project.self,
+            Piece.self,
+            EdgeTreatment.self,
+            EdgeAssignment.self,
+            Cutout.self,
+            CurvedEdge.self,
+            AngleCut.self,
+            CornerRadius.self,
+            BusinessHeader.self,
+            MaterialOption.self,
+            PieceDefaults.self
+        ]
+    }
+}
+
 enum FabSpecProMigrationPlan: SchemaMigrationPlan {
     static var schemas: [any VersionedSchema.Type] {
-        [FabSpecProSchemaV1.self, FabSpecProSchemaV2.self, FabSpecProSchemaV3.self, FabSpecProSchemaV4.self, FabSpecProSchemaV5.self, FabSpecProSchemaV6.self, FabSpecProSchemaV7.self, FabSpecProSchemaV8.self, FabSpecProSchemaV9.self, FabSpecProSchemaV10.self, FabSpecProSchemaV11.self, FabSpecProSchemaV12.self, FabSpecProSchemaV13.self, FabSpecProSchemaV14.self]
+        [FabSpecProSchemaV1.self, FabSpecProSchemaV2.self, FabSpecProSchemaV3.self, FabSpecProSchemaV4.self, FabSpecProSchemaV5.self, FabSpecProSchemaV6.self, FabSpecProSchemaV7.self, FabSpecProSchemaV8.self, FabSpecProSchemaV9.self, FabSpecProSchemaV10.self, FabSpecProSchemaV11.self, FabSpecProSchemaV12.self, FabSpecProSchemaV13.self, FabSpecProSchemaV14.self, FabSpecProSchemaV15.self]
     }
 
     static var stages: [MigrationStage] {
@@ -270,7 +294,8 @@ enum FabSpecProMigrationPlan: SchemaMigrationPlan {
             .lightweight(fromVersion: FabSpecProSchemaV10.self, toVersion: FabSpecProSchemaV11.self),
             .lightweight(fromVersion: FabSpecProSchemaV11.self, toVersion: FabSpecProSchemaV12.self),
             .lightweight(fromVersion: FabSpecProSchemaV12.self, toVersion: FabSpecProSchemaV13.self),
-            .lightweight(fromVersion: FabSpecProSchemaV13.self, toVersion: FabSpecProSchemaV14.self)
+            .lightweight(fromVersion: FabSpecProSchemaV13.self, toVersion: FabSpecProSchemaV14.self),
+            .lightweight(fromVersion: FabSpecProSchemaV14.self, toVersion: FabSpecProSchemaV15.self)
         ]
     }
 }

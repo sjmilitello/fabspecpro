@@ -2,12 +2,10 @@
 import UIKit
 typealias PlatformFont = UIFont
 typealias PlatformColor = UIColor
-typealias PlatformImage = UIImage
 #else
 import AppKit
 typealias PlatformFont = NSFont
 typealias PlatformColor = NSColor
-typealias PlatformImage = NSImage
 #endif
 import SwiftUI
 
@@ -34,16 +32,25 @@ enum PDFRenderer {
             businessName: header.businessName,
             phone: header.phone,
             email: header.email,
-            address: header.address,
-            logoData: header.logoData
+            address: header.address
         )
         
         // Pre-compute all piece rendering data to avoid SwiftData access during rendering
         let pieceRenderData = precomputePieceData(from: pieces, pageSize: pageSize)
-        let totalPages = computeTotalPagesFromRenderData(pieceData: pieceRenderData, pageSize: pageSize)
         
         // Pre-compute edge legend from pieces
         let edgeLegend = computeEdgeLegend(from: pieces)
+        
+        let totalPages = computeTotalPagesFromRenderData(
+            pieceData: pieceRenderData,
+            projectNotes: projectNotes,
+            edgeLegend: edgeLegend,
+            pageSize: pageSize,
+            headerData: headerData,
+            projectName: projectName,
+            projectAddress: projectAddress,
+            projectDate: projectDate
+        )
         
         // Use CGContext directly instead of UIGraphicsPDFRenderer closure to avoid SwiftData exclusivity issues
         let pdfData = NSMutableData()
@@ -109,8 +116,7 @@ enum PDFRenderer {
         businessName: String,
         phone: String,
         email: String,
-        address: String,
-        logoData: Data?
+        address: String
     )
     
     // Pre-computed rendering data for a piece to avoid SwiftData access in closures
@@ -156,49 +162,75 @@ enum PDFRenderer {
         return unique.map { "\($0.0) - \($0.1)" }
     }
     
-    private static func computeTotalPagesFromRenderData(pieceData: [PieceRenderData], pageSize: CGSize) -> Int {
-        var pageCount = 1
-        var yOffset: CGFloat = 140
-        let headerHeight: CGFloat = 18
-        let blockSpacing: CGFloat = 6
-        let thicknessGroupSpacing: CGFloat = 12
-        
-        let materialGrouped = Dictionary(grouping: pieceData) { $0.materialName }
-        let sortedMaterials = materialGrouped.keys.sorted()
-        
-        for materialKey in sortedMaterials {
-            if yOffset + 28 > pageSize.height - 60 {
-                pageCount += 1
-                yOffset = 140
-            }
-            let thicknessGrouped = Dictionary(grouping: materialGrouped[materialKey] ?? []) { $0.thicknessRaw }
-            let sortedThickness = thicknessGrouped.keys.sorted()
-            
-            for thicknessKey in sortedThickness {
-                let piecesInGroup = thicknessGrouped[thicknessKey] ?? []
-                guard let firstPieceData = piecesInGroup.first else { continue }
-                let headerAndBlock = headerHeight + firstPieceData.layout.blockHeight
-                if yOffset + headerAndBlock > pageSize.height - 60 {
-                    pageCount += 1
-                    yOffset = 140
-                }
-                yOffset += headerHeight
-                
-                for pd in piecesInGroup {
-                    if yOffset + pd.layout.blockHeight > pageSize.height - 60 {
-                        pageCount += 1
-                        yOffset = 140
-                        // Account for continuation header on new page
-                        yOffset += headerHeight
-                    }
-                    yOffset += pd.layout.blockHeight + blockSpacing
-                }
-                
-                // Match the spacing added after each thickness group in renderContentFromRenderDataWithState
-                yOffset += thicknessGroupSpacing
-            }
+    private static func computeTotalPagesFromRenderData(
+        pieceData: [PieceRenderData],
+        projectNotes: String,
+        edgeLegend: [String],
+        pageSize: CGSize,
+        headerData: HeaderData,
+        projectName: String,
+        projectAddress: String,
+        projectDate: Date
+    ) -> Int {
+        // Dry-run the real renderer against a discardable PDF context and
+        // return the resulting pageIndex. A standalone estimator drifts from
+        // the renderer because drawHeaderFromData's return value depends on
+        // runtime data (which contact lines are present, whether the project
+        // has an address, etc.), so any fixed page-1 start-Y is wrong for
+        // some inputs. The prior estimator over-counted by ~20–36pt on page
+        // 1, producing footers like "Page 2 of 3" on a PDF that physically
+        // had 2 pages.
+        //
+        // Doing a full dry-render guarantees the count matches what the
+        // second (real) pass will actually emit. The scratch PDF data is
+        // thrown away; rendering cost roughly doubles, which is negligible
+        // for an on-demand export.
+        let scratch = NSMutableData()
+        var mediaBox = CGRect(origin: .zero, size: pageSize)
+        guard let consumer = CGDataConsumer(data: scratch as CFMutableData),
+              let ctx = CGContext(consumer: consumer, mediaBox: &mediaBox, nil) else {
+            return 1
         }
-        return pageCount
+        let state = RenderState()
+        let leftMargin: CGFloat = 24
+        func scratchBeginPage() {
+            ctx.beginPDFPage(nil)
+            #if canImport(UIKit)
+            ctx.translateBy(x: 0, y: pageSize.height)
+            ctx.scaleBy(x: 1, y: -1)
+            #else
+            ctx.translateBy(x: 0, y: pageSize.height)
+            ctx.scaleBy(x: 1, y: -1)
+            #endif
+            state.yOffset = 24
+            let headerHeight = drawHeaderFromData(
+                in: ctx,
+                headerData: headerData,
+                projectName: projectName,
+                projectAddress: projectAddress,
+                projectDate: projectDate,
+                pageSize: pageSize,
+                pageIndex: state.pageIndex,
+                totalPages: 1
+            )
+            state.yOffset = 24 + headerHeight + 10
+        }
+        scratchBeginPage()
+        renderContentFromRenderDataWithState(
+            context: ctx,
+            pieceData: pieceData,
+            projectNotes: projectNotes,
+            edgeLegend: edgeLegend,
+            headerData: headerData,
+            pageSize: pageSize,
+            leftMargin: leftMargin,
+            totalPages: 1,
+            state: state,
+            beginPage: scratchBeginPage
+        )
+        ctx.endPDFPage()
+        ctx.closePDF()
+        return state.pageIndex
     }
     
     private static func renderContentFromRenderData(
@@ -461,22 +493,8 @@ enum PDFRenderer {
         let dateString = formatter.string(from: projectDate)
 
         if pageIndex == 1 {
-            var textX: CGFloat = headerRect.minX + 12
+            let textX: CGFloat = headerRect.minX + 12
             var headerHeight: CGFloat = 0
-            if let logoData = headerData.logoData, let image = PlatformImage(data: logoData) {
-                let logoRect = CGRect(x: headerRect.minX + 12, y: headerRect.minY + 12, width: 64, height: 64)
-                #if canImport(UIKit)
-                UIGraphicsPushContext(context)
-                image.draw(in: logoRect)
-                UIGraphicsPopContext()
-                #else
-                if let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) {
-                    context.draw(cgImage, in: logoRect)
-                }
-                #endif
-                textX = logoRect.maxX + 12
-                headerHeight = max(headerHeight, logoRect.maxY - headerOriginY)
-            }
 
             let bodyFontSize: CGFloat = 12
             let emphasisFontSize: CGFloat = bodyFontSize + 2
@@ -721,31 +739,8 @@ enum PDFRenderer {
         let dateString = formatter.string(from: projectDate)
 
         if pageIndex == 1 {
-            var textX: CGFloat = headerRect.minX + 12
+            let textX: CGFloat = headerRect.minX + 12
             var headerHeight: CGFloat = 0
-            if let logoData = header.logoData, let image = PlatformImage(data: logoData) {
-                let logoRect = CGRect(x: headerRect.minX + 12, y: headerRect.minY + 12, width: 64, height: 64)
-                #if canImport(UIKit)
-                context.saveGState()
-                context.translateBy(x: logoRect.minX, y: logoRect.maxY)
-                context.scaleBy(x: 1, y: -1)
-                UIGraphicsPushContext(context)
-                image.draw(in: CGRect(origin: .zero, size: logoRect.size))
-                UIGraphicsPopContext()
-                context.restoreGState()
-                #else
-                if let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) {
-                    context.saveGState()
-                    // Flip for image drawing (images need to be flipped back)
-                    context.translateBy(x: logoRect.minX, y: logoRect.maxY)
-                    context.scaleBy(x: 1, y: -1)
-                    context.draw(cgImage, in: CGRect(origin: .zero, size: logoRect.size))
-                    context.restoreGState()
-                }
-                #endif
-                textX = logoRect.maxX + 12
-                headerHeight = max(headerHeight, logoRect.maxY - headerOriginY)
-            }
 
             let bodyFontSize: CGFloat = 12
             let emphasisFontSize: CGFloat = bodyFontSize + 2
@@ -790,9 +785,6 @@ enum PDFRenderer {
         var height: CGFloat = 0
         if pageIndex == 1 {
             height = max(height, 12 + 18)
-            if header.logoData != nil {
-                height = max(height, 12 + 64)
-            }
             let contactLines = [
                 header.address.trimmingCharacters(in: .whitespacesAndNewlines),
                 header.email.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -1040,9 +1032,9 @@ enum PDFRenderer {
             let apexWidthPaddingMultiplier: CGFloat = 1.05
             let apexLengthPaddingMultiplier: CGFloat = 1.0
             let padding: CGFloat = 14 * basePaddingMultiplier * 0.85 / max(scale, 0.01)
-            let labelPadding = padding
-            let apexWidthLabelPadding = labelPadding * (apexWidthPaddingMultiplier / basePaddingMultiplier)
-            let apexLengthLabelPadding = labelPadding * (apexLengthPaddingMultiplier / basePaddingMultiplier)
+            let labelPadding: CGFloat = 6.5 / max(scale, 0.01)
+            let apexWidthLabelPadding = padding * (apexWidthPaddingMultiplier / basePaddingMultiplier)
+            let apexLengthLabelPadding = padding * (apexLengthPaddingMultiplier / basePaddingMultiplier)
 
             func edgeInfo(for edge: EdgePosition, fallback: CGPoint) -> (edge: EdgePosition, mid: CGPoint, length: CGFloat) {
                 if let info = visibleCutoutEdgeInfo(displayCutout: dispCutout, edge: edge, displaySize: displaySize, polygon: outerPolygon, shape: piece.shape) {
@@ -1235,12 +1227,12 @@ enum PDFRenderer {
                     let distLength = pointLineDistance(point: lengthEdgeMid, a: hypStart, b: hypEnd)
                     let hypDepth = hypCurve.isConcave ? -CGFloat(hypCurve.radius) : CGFloat(hypCurve.radius)
                     let tolerance = max(0.05, max(displaySize.width, displaySize.height) * 0.002)
-                    if distWidth <= distLength {
-                        if distWidth <= tolerance || distLength > tolerance {
-                            widthCurveDepth = hypDepth
-                            widthFromApex = true
-                        }
-                    } else if distLength <= tolerance || distWidth > tolerance {
+                    // Mirrors DrawingCanvasView tolerance logic so PDF apex
+                    // detection matches the drawing canvas 1:1.
+                    if distWidth <= distLength, distWidth <= tolerance {
+                        widthCurveDepth = hypDepth
+                        widthFromApex = true
+                    } else if distLength <= tolerance {
                         lengthCurveDepth = hypDepth
                         lengthFromApex = true
                     }
@@ -1262,8 +1254,29 @@ enum PDFRenderer {
                 }
             }
 
-            widthValue += widthCurveDepth
-            lengthValue += lengthCurveDepth
+            // "to Apex" = distance from the notch's far edge to the curve's
+            // apex point. Mirrors DrawingCanvasView so PDF numbers match the
+            // drawing canvas exactly (independent of any boundary-clipping
+            // adjustments made to widthValue/lengthValue above).
+            if widthFromApex {
+                if touchesDisplayBottom {
+                    widthValue = abs(size.height + widthCurveDepth - minY)
+                } else if touchesDisplayTop {
+                    widthValue = abs(maxY + widthCurveDepth)
+                } else {
+                    // Fallback for hypotenuse or other non-axis-aligned edges
+                    widthValue = abs(widthCurveDepth)
+                }
+            }
+            if lengthFromApex {
+                if touchesDisplayRight {
+                    lengthValue = abs(size.width + lengthCurveDepth - minX)
+                } else if touchesDisplayLeft {
+                    lengthValue = abs(maxX + lengthCurveDepth)
+                } else {
+                    lengthValue = abs(lengthCurveDepth)
+                }
+            }
 
             // Don't draw labels for a notch with no visible depth on a curved edge.
             let apexThreshold: CGFloat = 0.0625  // 1/16" minimum visible depth
@@ -1357,16 +1370,16 @@ enum PDFRenderer {
                     context.saveGState()
                     context.translateBy(x: apexCanvas.x, y: apexCanvas.y)
                     context.rotate(by: rotation)
-                    drawText(line1, in: context, frame: CGRect(x: -30, y: -lineSpacing / 2 - 6, width: 60, height: 12), font: .systemFont(ofSize: 9, weight: .semibold), alignment: .center)
-                    drawText(line2, in: context, frame: CGRect(x: -30, y: lineSpacing / 2 - 6, width: 60, height: 12), font: .systemFont(ofSize: 9, weight: .semibold), alignment: .center)
+                    drawText(line1, in: context, frame: CGRect(x: -30, y: -lineSpacing / 2 - 6, width: 60, height: 12), font: .systemFont(ofSize: 8, weight: .semibold), alignment: .center)
+                    drawText(line2, in: context, frame: CGRect(x: -30, y: lineSpacing / 2 - 6, width: 60, height: 12), font: .systemFont(ofSize: 8, weight: .semibold), alignment: .center)
                     context.restoreGState()
                 } else {
-                    drawText(line1, in: context, frame: CGRect(x: apexCanvas.x - 30, y: apexCanvas.y - lineSpacing / 2 - 6, width: 60, height: 12), font: .systemFont(ofSize: 9, weight: .semibold), alignment: .center)
-                    drawText(line2, in: context, frame: CGRect(x: apexCanvas.x - 30, y: apexCanvas.y + lineSpacing / 2 - 6, width: 60, height: 12), font: .systemFont(ofSize: 9, weight: .semibold), alignment: .center)
+                    drawText(line1, in: context, frame: CGRect(x: apexCanvas.x - 30, y: apexCanvas.y - lineSpacing / 2 - 6, width: 60, height: 12), font: .systemFont(ofSize: 8, weight: .semibold), alignment: .center)
+                    drawText(line2, in: context, frame: CGRect(x: apexCanvas.x - 30, y: apexCanvas.y + lineSpacing / 2 - 6, width: 60, height: 12), font: .systemFont(ofSize: 8, weight: .semibold), alignment: .center)
                 }
             } else {
                 let widthLabel = "\(widthText)\""
-                drawText(widthLabel, in: context, frame: CGRect(x: widthX - 20, y: widthCenterY - 6, width: 40, height: 12), font: .systemFont(ofSize: 9, weight: .semibold), alignment: .center)
+                drawText(widthLabel, in: context, frame: CGRect(x: widthX - 20, y: widthCenterY - 6, width: 40, height: 12), font: .systemFont(ofSize: 8, weight: .semibold), alignment: .center)
             }
 
             // Draw length label (for left/right edge notches - lengthFromApex)
@@ -1380,11 +1393,11 @@ enum PDFRenderer {
                 let line1 = "\(heightText)\" to"
                 let line2 = "Apex"
                 let lineSpacing: CGFloat = 10
-                drawText(line1, in: context, frame: CGRect(x: apexCanvas.x - 30, y: apexCanvas.y - lineSpacing / 2 - 6, width: 60, height: 12), font: .systemFont(ofSize: 9, weight: .semibold), alignment: .center)
-                drawText(line2, in: context, frame: CGRect(x: apexCanvas.x - 30, y: apexCanvas.y + lineSpacing / 2 - 6, width: 60, height: 12), font: .systemFont(ofSize: 9, weight: .semibold), alignment: .center)
+                drawText(line1, in: context, frame: CGRect(x: apexCanvas.x - 30, y: apexCanvas.y - lineSpacing / 2 - 6, width: 60, height: 12), font: .systemFont(ofSize: 8, weight: .semibold), alignment: .center)
+                drawText(line2, in: context, frame: CGRect(x: apexCanvas.x - 30, y: apexCanvas.y + lineSpacing / 2 - 6, width: 60, height: 12), font: .systemFont(ofSize: 8, weight: .semibold), alignment: .center)
             } else {
                 let lengthLabel = "\(heightText)\""
-                drawText(lengthLabel, in: context, frame: CGRect(x: lengthCenterX - 20, y: heightY - 6, width: 40, height: 12), font: .systemFont(ofSize: 9, weight: .semibold), alignment: .center)
+                drawText(lengthLabel, in: context, frame: CGRect(x: lengthCenterX - 20, y: heightY - 6, width: 40, height: 12), font: .systemFont(ofSize: 8, weight: .semibold), alignment: .center)
             }
         }
     }
@@ -1402,7 +1415,7 @@ enum PDFRenderer {
 
             let displaySize = ShapePathBuilder.displaySize(for: piece)
             let outerPolygon = ShapePathBuilder.displayPolygonPoints(for: piece, includeAngles: true, includeNotches: false)
-            let padding: CGFloat = 14 * 0.75 * 0.85 / max(scale, 0.01)
+            let padding: CGFloat = 5 / max(scale, 0.01)
 
             func chooseEdgeInfo(primary: EdgePosition, secondary: EdgePosition) -> (mid: CGPoint, length: CGFloat)? {
                 let primaryInfo = visibleCutoutEdgeInfo(displayCutout: dispCutout, edge: primary, displaySize: displaySize, polygon: outerPolygon, shape: piece.shape)
@@ -1457,8 +1470,8 @@ enum PDFRenderer {
             let widthText = MeasurementParser.formatInches(Double(widthValue))
             let lengthText = MeasurementParser.formatInches(Double(lengthValue))
 
-            drawText("\(widthText)\"", in: context, frame: CGRect(x: widthCanvas.x - 30, y: widthCanvas.y - 6, width: 60, height: 12), font: .systemFont(ofSize: 9, weight: .semibold), alignment: .center)
-            drawText("\(lengthText)\"", in: context, frame: CGRect(x: lengthCanvas.x - 30, y: lengthCanvas.y - 6, width: 60, height: 12), font: .systemFont(ofSize: 9, weight: .semibold), alignment: .center)
+            drawText("\(widthText)\"", in: context, frame: CGRect(x: widthCanvas.x - 30, y: widthCanvas.y - 6, width: 60, height: 12), font: .systemFont(ofSize: 8, weight: .semibold), alignment: .center)
+            drawText("\(lengthText)\"", in: context, frame: CGRect(x: lengthCanvas.x - 30, y: lengthCanvas.y - 6, width: 60, height: 12), font: .systemFont(ofSize: 8, weight: .semibold), alignment: .center)
         }
     }
     
@@ -2923,8 +2936,8 @@ enum PDFRenderer {
             let labelWidth: CGFloat = 64
             let leftLabelCenterX = left - widthLabelPadding
             let widthFrame = CGRect(x: leftLabelCenterX - labelWidth / 2, y: offsetY + (size.height * scale / 2) - 6, width: labelWidth, height: 12)
-            drawText(lengthLabel, in: context, frame: lengthFrame, font: .systemFont(ofSize: 9, weight: .semibold), alignment: .center)
-            drawText(depthLabel, in: context, frame: widthFrame, font: .systemFont(ofSize: 9, weight: .semibold), alignment: .center)
+            drawText(lengthLabel, in: context, frame: lengthFrame, font: .systemFont(ofSize: 8, weight: .semibold), alignment: .center)
+            drawText(depthLabel, in: context, frame: widthFrame, font: .systemFont(ofSize: 8, weight: .semibold), alignment: .center)
         } else if piece.shape == .rectangle {
             drawSegmentDimensionLabels(in: context, piece: piece, scale: scale, offsetX: offsetX, offsetY: offsetY)
             let sideMetrics = rectangleSideMetrics(for: piece)
@@ -2948,9 +2961,9 @@ enum PDFRenderer {
                 if let leftMetric = sideMetrics[.left] {
                     let widthText = "\(MeasurementParser.formatInches(Double(leftMetric.length)))\""
                     let centerY = offsetY + leftMetric.center.y * scale
-                    drawText(widthText, in: context, frame: CGRect(x: leftLabelFrameX, y: centerY - 6, width: labelWidth, height: 12), font: .systemFont(ofSize: 9, weight: .semibold), alignment: .center)
+                    drawText(widthText, in: context, frame: CGRect(x: leftLabelFrameX, y: centerY - 6, width: labelWidth, height: 12), font: .systemFont(ofSize: 8, weight: .semibold), alignment: .center)
                 } else {
-                    drawText(depthLabel, in: context, frame: CGRect(x: leftLabelFrameX, y: offsetY + (size.height * scale / 2) - 6, width: labelWidth, height: 12), font: .systemFont(ofSize: 9, weight: .semibold), alignment: .center)
+                    drawText(depthLabel, in: context, frame: CGRect(x: leftLabelFrameX, y: offsetY + (size.height * scale / 2) - 6, width: labelWidth, height: 12), font: .systemFont(ofSize: 8, weight: .semibold), alignment: .center)
                 }
             }
 
@@ -2965,9 +2978,9 @@ enum PDFRenderer {
                 if let topMetric = sideMetrics[.top] {
                     let lengthText = "\(MeasurementParser.formatInches(Double(topMetric.length)))\""
                     let centerX = offsetX + topMetric.center.x * scale
-                    drawText(lengthText, in: context, frame: CGRect(x: centerX - 30, y: topLabelFrameY, width: 60, height: 12), font: .systemFont(ofSize: 9, weight: .semibold), alignment: .center)
+                    drawText(lengthText, in: context, frame: CGRect(x: centerX - 30, y: topLabelFrameY, width: 60, height: 12), font: .systemFont(ofSize: 8, weight: .semibold), alignment: .center)
                 } else {
-                    drawText(lengthLabel, in: context, frame: CGRect(x: offsetX + (size.width * scale / 2) - 30, y: topLabelFrameY, width: 60, height: 12), font: .systemFont(ofSize: 9, weight: .semibold), alignment: .center)
+                    drawText(lengthLabel, in: context, frame: CGRect(x: offsetX + (size.width * scale / 2) - 30, y: topLabelFrameY, width: 60, height: 12), font: .systemFont(ofSize: 8, weight: .semibold), alignment: .center)
                 }
             }
             
@@ -2980,7 +2993,7 @@ enum PDFRenderer {
                 let centerY = offsetY + rightMetric.center.y * scale
                 let rightLabelCenterX = right + widthLabelPadding
                 let rightLabelFrameX = rightLabelCenterX - labelWidth / 2
-                drawText(widthText, in: context, frame: CGRect(x: rightLabelFrameX, y: centerY - 6, width: labelWidth, height: 12), font: .systemFont(ofSize: 9, weight: .semibold), alignment: .center)
+                drawText(widthText, in: context, frame: CGRect(x: rightLabelFrameX, y: centerY - 6, width: labelWidth, height: 12), font: .systemFont(ofSize: 8, weight: .semibold), alignment: .center)
             }
             
             // Show bottom side measurement when it differs from top (e.g., angle cuts)
@@ -2992,7 +3005,7 @@ enum PDFRenderer {
                 let bottom = offsetY + expanded.maxY * scale
                 let bottomLabelCenterY = bottom + lengthLabelPadding
                 let bottomLabelFrameY = bottomLabelCenterY - 6
-                drawText(lengthText, in: context, frame: CGRect(x: centerX - 30, y: bottomLabelFrameY, width: 60, height: 12), font: .systemFont(ofSize: 9, weight: .semibold), alignment: .center)
+                drawText(lengthText, in: context, frame: CGRect(x: centerX - 30, y: bottomLabelFrameY, width: 60, height: 12), font: .systemFont(ofSize: 8, weight: .semibold), alignment: .center)
             }
 
 
@@ -3015,10 +3028,10 @@ enum PDFRenderer {
             let leftLabelCenterX = left - widthLabelPadding
 
             if segmentCounts[.legA] == 1 {
-                drawText(lengthLabel, in: context, frame: CGRect(x: offsetX + (size.width * scale / 2) - 30, y: topLabelCenterY - 6, width: 60, height: 12), font: .systemFont(ofSize: 9, weight: .semibold), alignment: .center)
+                drawText(lengthLabel, in: context, frame: CGRect(x: offsetX + (size.width * scale / 2) - 30, y: topLabelCenterY - 6, width: 60, height: 12), font: .systemFont(ofSize: 8, weight: .semibold), alignment: .center)
             }
             if segmentCounts[.legB] == 1 {
-                drawText(depthLabel, in: context, frame: CGRect(x: leftLabelCenterX - 32, y: offsetY + (size.height * scale / 2) - 6, width: 64, height: 12), font: .systemFont(ofSize: 9, weight: .semibold), alignment: .center)
+                drawText(depthLabel, in: context, frame: CGRect(x: leftLabelCenterX - 32, y: offsetY + (size.height * scale / 2) - 6, width: 64, height: 12), font: .systemFont(ofSize: 8, weight: .semibold), alignment: .center)
             }
         } else {
             // For other shapes, match DrawingCanvasView positioning
@@ -3027,8 +3040,8 @@ enum PDFRenderer {
             let top = offsetY + expanded.minY * scale
             let topLabelCenterY = top - lengthLabelPadding
             let leftLabelCenterX = left - widthLabelPadding
-            drawText(lengthLabel, in: context, frame: CGRect(x: offsetX + (size.width * scale / 2) - 30, y: topLabelCenterY - 6, width: 60, height: 12), font: .systemFont(ofSize: 9, weight: .semibold), alignment: .center)
-            drawText(depthLabel, in: context, frame: CGRect(x: leftLabelCenterX - 32, y: offsetY + (size.height * scale / 2) - 6, width: 64, height: 12), font: .systemFont(ofSize: 9, weight: .semibold), alignment: .center)
+            drawText(lengthLabel, in: context, frame: CGRect(x: offsetX + (size.width * scale / 2) - 30, y: topLabelCenterY - 6, width: 60, height: 12), font: .systemFont(ofSize: 8, weight: .semibold), alignment: .center)
+            drawText(depthLabel, in: context, frame: CGRect(x: leftLabelCenterX - 32, y: offsetY + (size.height * scale / 2) - 6, width: 64, height: 12), font: .systemFont(ofSize: 8, weight: .semibold), alignment: .center)
         }
 
     }
